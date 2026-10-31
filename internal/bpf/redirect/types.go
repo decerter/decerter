@@ -9,7 +9,9 @@ import (
 type Flow struct {
 	OriginalDestination netip.AddrPort
 	IPProtocol          uint8
+	Redirected          bool
 	Tgid                uint32
 	UID                 uint32
 	CgroupID            uint64
+	Comm                string
 }

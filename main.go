@@ -10,24 +10,23 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"syscall"
 
-	"github.com/decerter/decerter/internal/attach"
-	"github.com/decerter/decerter/internal/bpf"
-	"github.com/decerter/decerter/internal/bpf/redirect"
-	"github.com/cilium/ebpf"
+	"github.com/decerter/decerter/app"
 )
 
 var (
-	uids []uint32
+	uids         []uint32
+	tcpProxyPort uint16 = 15001
+	flowTable    bool
 )
 
 func main() {
 	flag.Func("uid", "uid of an inspected user, repeatable or comma separated (default is none, an empty set matches no process)", parseUIDs)
+	flag.Func("port", "port of the tcp proxy listener on lo (default is 15001)", parsePort)
+	flag.BoolVar(&flowTable, "flow-table", false, "print the flow_map table every 5 seconds, for debugging")
 	flag.Parse()
 	err := run()
 
@@ -51,74 +50,66 @@ func parseUIDs(value string) (err error) {
 	return
 }
 
+func parsePort(value string) (err error) {
+	port, parseErr := strconv.ParseUint(value, 10, 16)
+
+	if err = parseErr; err != nil {
+		err = fmt.Errorf("invalid port %q: %w", value, err)
+		return
+	}
+
+	// the port is a load-time constant in the bpf programs, so it can't be picked by the kernel
+	if port == 0 {
+		err = fmt.Errorf("invalid port %q: must be between 1 and 65535", value)
+		return
+	}
+
+	tcpProxyPort = uint16(port)
+	return
+}
+
 func run() (err error) {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
-	closeFunctions := []func() error{}
+	logger := slog.Default()
+	decerter := app.New(ctx, uids, tcpProxyPort, flowTable, logger)
 
-	// links are closed before the objects, in reverse order of creation
 	defer func() {
-		for _, closeFunction := range slices.Backward(closeFunctions) {
-			closeErr := closeFunction()
-
-			if closeErr != nil {
-				slog.Error("Could not close bpf resource", "error", closeErr)
-			}
-
-			err = errors.Join(err, closeErr)
-		}
+		err = errors.Join(err, decerter.Shutdown())
 	}()
 
-	bpfMaps, bpfPrograms, closeObjects, loadErr := redirect.LoadBpfObjects(uint32(os.Getpid()))
-
-	if err = loadErr; err != nil {
-		slog.Error("Could not load bpf objects", "error", err)
-		return
-	}
-
-	closeFunctions = append(closeFunctions, closeObjects)
-	err = redirect.UpdateBpfMaps(uids, bpfMaps)
+	err = decerter.LoadBpfObjects()
 
 	if err != nil {
-		slog.Error("Could not update bpf maps", "error", err)
 		return
 	}
 
-	if len(uids) == 0 {
-		slog.Warn("No uid given, no flow will be recorded")
+	err = decerter.UpdateBpfMaps()
+
+	if err != nil {
+		return
 	}
 
-	attachments := []struct {
-		program    bpf.BpfProgramName
-		attachType ebpf.AttachType
-	}{
-		{program: redirect.RedirectConnect4, attachType: ebpf.AttachCGroupInet4Connect},
-		{program: redirect.RedirectConnect6, attachType: ebpf.AttachCGroupInet6Connect},
-		{program: redirect.RedirectSendmsg4, attachType: ebpf.AttachCGroupUDP4Sendmsg},
-		{program: redirect.RedirectSendmsg6, attachType: ebpf.AttachCGroupUDP6Sendmsg},
+	err = decerter.StartRouteSync()
+
+	if err != nil {
+		return
 	}
 
-	for _, attachment := range attachments {
-		closeLink, attachErr := attach.AddCgroup(attach.CgroupRoot, bpfPrograms[attachment.program], attachment.attachType)
+	err = decerter.StartProxy()
 
-		if err = attachErr; err != nil {
-			slog.Error("Could not attach bpf program", "error", err, "attachType", attachment.attachType)
-			return
-		}
-
-		closeFunctions = append(closeFunctions, closeLink)
+	if err != nil {
+		return
 	}
 
-	slog.Info("Recording flows", "cgroup", attach.CgroupRoot, "uids", uids)
-	waitGroup := sync.WaitGroup{}
+	err = decerter.AttachRedirect()
 
-	// flow_map printer
-	waitGroup.Go(func() {
-		redirect.Read(ctx, bpfMaps[redirect.FlowMap])
-	})
+	if err != nil {
+		return
+	}
 
+	decerter.StartFlowTable()
 	<-ctx.Done()
-	slog.Info("Got shutdown signal", "cause", context.Cause(ctx))
-	waitGroup.Wait()
+	logger.Info("Got shutdown signal", "cause", context.Cause(ctx))
 	return
 }
