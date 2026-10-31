@@ -8,16 +8,34 @@ import (
 	_ "embed"
 	"fmt"
 	"io"
+	"structs"
 
 	"github.com/cilium/ebpf"
 )
+
+type bpfFlow struct {
+	_          structs.HostLayout
+	Ip         [4]uint32
+	Port       uint16
+	IpProtocol uint8
+	Padding    uint8
+	Tgid       uint32
+	Uid        uint32
+	Pad32      uint32
+	CgroupId   uint64
+}
 
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	bpfMapCounterMap     = "counter_map"
-	bpfProgCountConnect4 = "count_connect4"
+	bpfMapFlowMap           = "flow_map"
+	bpfMapUidMap            = "uid_map"
+	bpfProgRedirectConnect4 = "redirect_connect4"
+	bpfProgRedirectConnect6 = "redirect_connect6"
+	bpfProgRedirectSendmsg4 = "redirect_sendmsg4"
+	bpfProgRedirectSendmsg6 = "redirect_sendmsg6"
+	bpfVarProxyTgid         = "proxy_tgid"
 )
 
 // loadBpf returns the embedded CollectionSpec for bpf.
@@ -62,20 +80,25 @@ type bpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
-	CountConnect4 *ebpf.ProgramSpec `ebpf:"count_connect4"`
+	RedirectConnect4 *ebpf.ProgramSpec `ebpf:"redirect_connect4"`
+	RedirectConnect6 *ebpf.ProgramSpec `ebpf:"redirect_connect6"`
+	RedirectSendmsg4 *ebpf.ProgramSpec `ebpf:"redirect_sendmsg4"`
+	RedirectSendmsg6 *ebpf.ProgramSpec `ebpf:"redirect_sendmsg6"`
 }
 
 // bpfMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	CounterMap *ebpf.MapSpec `ebpf:"counter_map"`
+	FlowMap *ebpf.MapSpec `ebpf:"flow_map"`
+	UidMap  *ebpf.MapSpec `ebpf:"uid_map"`
 }
 
 // bpfVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfVariableSpecs struct {
+	ProxyTgid *ebpf.VariableSpec `ebpf:"proxy_tgid"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -98,12 +121,14 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	CounterMap *ebpf.Map `ebpf:"counter_map"`
+	FlowMap *ebpf.Map `ebpf:"flow_map"`
+	UidMap  *ebpf.Map `ebpf:"uid_map"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
-		m.CounterMap,
+		m.FlowMap,
+		m.UidMap,
 	)
 }
 
@@ -111,18 +136,25 @@ func (m *bpfMaps) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfVariables struct {
+	ProxyTgid *ebpf.Variable `ebpf:"proxy_tgid"`
 }
 
 // bpfPrograms contains all programs after they have been loaded into the kernel.
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
-	CountConnect4 *ebpf.Program `ebpf:"count_connect4"`
+	RedirectConnect4 *ebpf.Program `ebpf:"redirect_connect4"`
+	RedirectConnect6 *ebpf.Program `ebpf:"redirect_connect6"`
+	RedirectSendmsg4 *ebpf.Program `ebpf:"redirect_sendmsg4"`
+	RedirectSendmsg6 *ebpf.Program `ebpf:"redirect_sendmsg6"`
 }
 
 func (p *bpfPrograms) Close() error {
 	return _BpfClose(
-		p.CountConnect4,
+		p.RedirectConnect4,
+		p.RedirectConnect6,
+		p.RedirectSendmsg4,
+		p.RedirectSendmsg6,
 	)
 }
 
