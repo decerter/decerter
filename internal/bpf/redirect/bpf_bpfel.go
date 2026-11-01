@@ -32,6 +32,8 @@ type bpfFlow struct {
 	Pad32      uint32
 	CgroupId   uint64
 	Comm       [16]int8
+	Client     bpfEndpoint
+	Pad32End   uint32
 }
 
 type bpfPrefixKey struct {
@@ -40,23 +42,37 @@ type bpfPrefixKey struct {
 	Ip        [4]uint32
 }
 
+type bpfRelease struct {
+	_     structs.HostLayout
+	Timer struct {
+		_      structs.HostLayout
+		Opaque [2]uint64
+	}
+}
+
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	bpfMapClientMap            = "client_map"
-	bpfMapFlowMap              = "flow_map"
-	bpfMapRouteMap             = "route_map"
-	bpfMapUidMap               = "uid_map"
-	bpfProgClientSockops       = "client_sockops"
-	bpfProgRedirectConnect4    = "redirect_connect4"
-	bpfProgRedirectConnect6    = "redirect_connect6"
-	bpfProgRedirectSendmsg4    = "redirect_sendmsg4"
-	bpfProgRedirectSendmsg6    = "redirect_sendmsg6"
-	bpfProgRestoreGetpeername4 = "restore_getpeername4"
-	bpfProgRestoreGetpeername6 = "restore_getpeername6"
-	bpfVarProxyTgid            = "proxy_tgid"
-	bpfVarTcpProxyPort         = "tcp_proxy_port"
+	bpfMapClientMap             = "client_map"
+	bpfMapFlowMap               = "flow_map"
+	bpfMapReleaseMap            = "release_map"
+	bpfMapRouteMap              = "route_map"
+	bpfMapUidMap                = "uid_map"
+	bpfProgClientSockops        = "client_sockops"
+	bpfProgForgetReleasedSocket = "forget_released_socket"
+	bpfProgLearnUdpClient       = "learn_udp_client"
+	bpfProgRedirectConnect4     = "redirect_connect4"
+	bpfProgRedirectConnect6     = "redirect_connect6"
+	bpfProgRedirectSendmsg4     = "redirect_sendmsg4"
+	bpfProgRedirectSendmsg6     = "redirect_sendmsg6"
+	bpfProgRestoreGetpeername4  = "restore_getpeername4"
+	bpfProgRestoreGetpeername6  = "restore_getpeername6"
+	bpfProgRestoreRecvmsg4      = "restore_recvmsg4"
+	bpfProgRestoreRecvmsg6      = "restore_recvmsg6"
+	bpfVarProxyPort             = "proxy_port"
+	bpfVarProxyTgid             = "proxy_tgid"
+	bpfVarReleaseDelayNs        = "release_delay_ns"
 )
 
 // loadBpf returns the embedded CollectionSpec for bpf.
@@ -101,31 +117,37 @@ type bpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
-	ClientSockops       *ebpf.ProgramSpec `ebpf:"client_sockops"`
-	RedirectConnect4    *ebpf.ProgramSpec `ebpf:"redirect_connect4"`
-	RedirectConnect6    *ebpf.ProgramSpec `ebpf:"redirect_connect6"`
-	RedirectSendmsg4    *ebpf.ProgramSpec `ebpf:"redirect_sendmsg4"`
-	RedirectSendmsg6    *ebpf.ProgramSpec `ebpf:"redirect_sendmsg6"`
-	RestoreGetpeername4 *ebpf.ProgramSpec `ebpf:"restore_getpeername4"`
-	RestoreGetpeername6 *ebpf.ProgramSpec `ebpf:"restore_getpeername6"`
+	ClientSockops        *ebpf.ProgramSpec `ebpf:"client_sockops"`
+	ForgetReleasedSocket *ebpf.ProgramSpec `ebpf:"forget_released_socket"`
+	LearnUdpClient       *ebpf.ProgramSpec `ebpf:"learn_udp_client"`
+	RedirectConnect4     *ebpf.ProgramSpec `ebpf:"redirect_connect4"`
+	RedirectConnect6     *ebpf.ProgramSpec `ebpf:"redirect_connect6"`
+	RedirectSendmsg4     *ebpf.ProgramSpec `ebpf:"redirect_sendmsg4"`
+	RedirectSendmsg6     *ebpf.ProgramSpec `ebpf:"redirect_sendmsg6"`
+	RestoreGetpeername4  *ebpf.ProgramSpec `ebpf:"restore_getpeername4"`
+	RestoreGetpeername6  *ebpf.ProgramSpec `ebpf:"restore_getpeername6"`
+	RestoreRecvmsg4      *ebpf.ProgramSpec `ebpf:"restore_recvmsg4"`
+	RestoreRecvmsg6      *ebpf.ProgramSpec `ebpf:"restore_recvmsg6"`
 }
 
 // bpfMapSpecs contains maps before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	ClientMap *ebpf.MapSpec `ebpf:"client_map"`
-	FlowMap   *ebpf.MapSpec `ebpf:"flow_map"`
-	RouteMap  *ebpf.MapSpec `ebpf:"route_map"`
-	UidMap    *ebpf.MapSpec `ebpf:"uid_map"`
+	ClientMap  *ebpf.MapSpec `ebpf:"client_map"`
+	FlowMap    *ebpf.MapSpec `ebpf:"flow_map"`
+	ReleaseMap *ebpf.MapSpec `ebpf:"release_map"`
+	RouteMap   *ebpf.MapSpec `ebpf:"route_map"`
+	UidMap     *ebpf.MapSpec `ebpf:"uid_map"`
 }
 
 // bpfVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfVariableSpecs struct {
-	ProxyTgid    *ebpf.VariableSpec `ebpf:"proxy_tgid"`
-	TcpProxyPort *ebpf.VariableSpec `ebpf:"tcp_proxy_port"`
+	ProxyPort      *ebpf.VariableSpec `ebpf:"proxy_port"`
+	ProxyTgid      *ebpf.VariableSpec `ebpf:"proxy_tgid"`
+	ReleaseDelayNs *ebpf.VariableSpec `ebpf:"release_delay_ns"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -148,16 +170,18 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	ClientMap *ebpf.Map `ebpf:"client_map"`
-	FlowMap   *ebpf.Map `ebpf:"flow_map"`
-	RouteMap  *ebpf.Map `ebpf:"route_map"`
-	UidMap    *ebpf.Map `ebpf:"uid_map"`
+	ClientMap  *ebpf.Map `ebpf:"client_map"`
+	FlowMap    *ebpf.Map `ebpf:"flow_map"`
+	ReleaseMap *ebpf.Map `ebpf:"release_map"`
+	RouteMap   *ebpf.Map `ebpf:"route_map"`
+	UidMap     *ebpf.Map `ebpf:"uid_map"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
 		m.ClientMap,
 		m.FlowMap,
+		m.ReleaseMap,
 		m.RouteMap,
 		m.UidMap,
 	)
@@ -167,32 +191,41 @@ func (m *bpfMaps) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfVariables struct {
-	ProxyTgid    *ebpf.Variable `ebpf:"proxy_tgid"`
-	TcpProxyPort *ebpf.Variable `ebpf:"tcp_proxy_port"`
+	ProxyPort      *ebpf.Variable `ebpf:"proxy_port"`
+	ProxyTgid      *ebpf.Variable `ebpf:"proxy_tgid"`
+	ReleaseDelayNs *ebpf.Variable `ebpf:"release_delay_ns"`
 }
 
 // bpfPrograms contains all programs after they have been loaded into the kernel.
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
-	ClientSockops       *ebpf.Program `ebpf:"client_sockops"`
-	RedirectConnect4    *ebpf.Program `ebpf:"redirect_connect4"`
-	RedirectConnect6    *ebpf.Program `ebpf:"redirect_connect6"`
-	RedirectSendmsg4    *ebpf.Program `ebpf:"redirect_sendmsg4"`
-	RedirectSendmsg6    *ebpf.Program `ebpf:"redirect_sendmsg6"`
-	RestoreGetpeername4 *ebpf.Program `ebpf:"restore_getpeername4"`
-	RestoreGetpeername6 *ebpf.Program `ebpf:"restore_getpeername6"`
+	ClientSockops        *ebpf.Program `ebpf:"client_sockops"`
+	ForgetReleasedSocket *ebpf.Program `ebpf:"forget_released_socket"`
+	LearnUdpClient       *ebpf.Program `ebpf:"learn_udp_client"`
+	RedirectConnect4     *ebpf.Program `ebpf:"redirect_connect4"`
+	RedirectConnect6     *ebpf.Program `ebpf:"redirect_connect6"`
+	RedirectSendmsg4     *ebpf.Program `ebpf:"redirect_sendmsg4"`
+	RedirectSendmsg6     *ebpf.Program `ebpf:"redirect_sendmsg6"`
+	RestoreGetpeername4  *ebpf.Program `ebpf:"restore_getpeername4"`
+	RestoreGetpeername6  *ebpf.Program `ebpf:"restore_getpeername6"`
+	RestoreRecvmsg4      *ebpf.Program `ebpf:"restore_recvmsg4"`
+	RestoreRecvmsg6      *ebpf.Program `ebpf:"restore_recvmsg6"`
 }
 
 func (p *bpfPrograms) Close() error {
 	return _BpfClose(
 		p.ClientSockops,
+		p.ForgetReleasedSocket,
+		p.LearnUdpClient,
 		p.RedirectConnect4,
 		p.RedirectConnect6,
 		p.RedirectSendmsg4,
 		p.RedirectSendmsg6,
 		p.RestoreGetpeername4,
 		p.RestoreGetpeername6,
+		p.RestoreRecvmsg4,
+		p.RestoreRecvmsg6,
 	)
 }
 

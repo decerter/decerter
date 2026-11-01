@@ -13,19 +13,22 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/decerter/decerter/app"
 )
 
 var (
-	uids         []uint32
-	tcpProxyPort uint16 = 15001
-	flowTable    bool
+	uids           []uint32
+	proxyPort      uint16        = 15001
+	udpIdleTimeout time.Duration = 30 * time.Second
+	flowTable      bool
 )
 
 func main() {
 	flag.Func("uid", "uid of an inspected user, repeatable or comma separated (default is none, an empty set matches no process)", parseUIDs)
-	flag.Func("port", "port of the tcp proxy listener on lo (default is 15001)", parsePort)
+	flag.Func("port", "port of the tcp proxy listener and the udp proxy socket on lo (default is 15001)", parsePort)
+	flag.Func("udp-idle-timeout", "a udp session ends after this long without a datagram in either direction (default is 30s)", parseIdleTimeout)
 	flag.BoolVar(&flowTable, "flow-table", false, "print the flow_map table every 5 seconds, for debugging")
 	flag.Parse()
 	err := run()
@@ -64,7 +67,24 @@ func parsePort(value string) (err error) {
 		return
 	}
 
-	tcpProxyPort = uint16(port)
+	proxyPort = uint16(port)
+	return
+}
+
+func parseIdleTimeout(value string) (err error) {
+	timeout, parseErr := time.ParseDuration(value)
+
+	if err = parseErr; err != nil {
+		err = fmt.Errorf("invalid udp idle timeout %q: %w", value, err)
+		return
+	}
+
+	if timeout <= 0 {
+		err = fmt.Errorf("invalid udp idle timeout %q: must be positive", value)
+		return
+	}
+
+	udpIdleTimeout = timeout
 	return
 }
 
@@ -72,7 +92,7 @@ func run() (err error) {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	logger := slog.Default()
-	decerter := app.New(ctx, uids, tcpProxyPort, flowTable, logger)
+	decerter := app.New(ctx, uids, proxyPort, udpIdleTimeout, flowTable, logger)
 
 	defer func() {
 		err = errors.Join(err, decerter.Shutdown())

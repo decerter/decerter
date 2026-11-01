@@ -154,7 +154,7 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 	}()
 
 	upBytes, downBytes := pipeTCP(ctx, client, upstream, logger)
-	printFlow(flow, cmdline, clientAddressPort, upBytes, downBytes, time.Since(startTime))
+	printFlow(flow, cmdline, clientAddressPort, strconv.FormatInt(upBytes, 10)+"B", strconv.FormatInt(downBytes, 10)+"B", time.Since(startTime))
 }
 
 // a FIN from one side is forwarded as CloseWrite and the other direction keeps running, an error or shutdown aborts both

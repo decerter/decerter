@@ -14,4 +14,5 @@ type Flow struct {
 	UID                 uint32
 	CgroupID            uint64
 	Comm                string
+	Client              netip.AddrPort
 }

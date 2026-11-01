@@ -23,6 +23,8 @@ import (
 const (
 	routeSyncDebounce time.Duration = 100 * time.Millisecond
 	routeSyncRetry    time.Duration = time.Second
+	// datagrams of a closed UDP socket can still wait in the proxy socket, its flow is removed this long after the close
+	udpReleaseDelay time.Duration = 2 * time.Second
 )
 
 type App struct {
@@ -30,35 +32,39 @@ type App struct {
 	cancel              context.CancelFunc
 	waitGroup           *sync.WaitGroup
 	uids                []uint32
-	tcpProxyPort        uint16
+	proxyPort           uint16
+	udpIdleTimeout      time.Duration
 	flowTable           bool
 	logger              *slog.Logger
 	redirectBpfMaps     map[bpf.BpfMapName]*ebpf.Map
 	redirectBpfPrograms map[bpf.BpfProgramName]*ebpf.Program
 	tcpListener         *net.TCPListener
+	udpConnection       *net.UDPConn
 	closeFunctions      [](func() error)
 }
 
-func New(ctx context.Context, uids []uint32, tcpProxyPort uint16, flowTable bool, logger *slog.Logger) (app App) {
+func New(ctx context.Context, uids []uint32, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, logger *slog.Logger) (app App) {
 	appCtx, cancel := context.WithCancel(ctx)
 	app = App{
 		ctx:                 appCtx,
 		cancel:              cancel,
 		waitGroup:           &sync.WaitGroup{},
 		uids:                uids,
-		tcpProxyPort:        tcpProxyPort,
+		proxyPort:           proxyPort,
+		udpIdleTimeout:      udpIdleTimeout,
 		flowTable:           flowTable,
 		logger:              logger,
 		redirectBpfMaps:     nil,
 		redirectBpfPrograms: nil,
 		tcpListener:         nil,
+		udpConnection:       nil,
 		closeFunctions:      [](func() error){},
 	}
 	return
 }
 
 func (app *App) LoadBpfObjects() (err error) {
-	bpfMaps, bpfPrograms, closeFunction, loadErr := redirect.LoadBpfObjects(app.tcpProxyPort, uint32(os.Getpid()))
+	bpfMaps, bpfPrograms, closeFunction, loadErr := redirect.LoadBpfObjects(app.proxyPort, uint32(os.Getpid()), udpReleaseDelay)
 
 	if err = loadErr; err != nil {
 		app.logger.Error("Could not load redirect bpf objects", "error", err)
@@ -172,9 +178,9 @@ func (app *App) syncRoutes() (err error) {
 	return
 }
 
-// the listener has to be up before AttachRedirect, otherwise redirected connects are refused
+// the listener and the udp socket have to be up before AttachRedirect, otherwise redirected connects are refused and datagrams dropped
 func (app *App) StartProxy() (err error) {
-	listener, listenErr := proxy.ListenTCP(app.ctx, app.tcpProxyPort)
+	listener, listenErr := proxy.ListenTCP(app.ctx, app.proxyPort)
 
 	if err = listenErr; err != nil {
 		app.logger.Error("Could not start tcp proxy", "error", err)
@@ -189,6 +195,21 @@ func (app *App) StartProxy() (err error) {
 		proxy.ServeTCP(app.ctx, app.tcpListener, app.redirectBpfMaps, app.waitGroup, app.logger)
 	})
 
+	connection, udpListenErr := proxy.ListenUDP(app.ctx, app.proxyPort)
+
+	if err = udpListenErr; err != nil {
+		app.logger.Error("Could not start udp proxy", "error", err)
+		return
+	}
+
+	app.udpConnection = connection
+	app.logger.Info("Udp proxy listening", "address", connection.LocalAddr().String(), "device", "lo", "idleTimeout", app.udpIdleTimeout)
+
+	// udp proxy, closes the socket when the context is cancelled
+	app.waitGroup.Go(func() {
+		proxy.ServeUDP(app.ctx, app.udpConnection, app.udpIdleTimeout, app.redirectBpfMaps, app.waitGroup, app.logger)
+	})
+
 	return
 }
 
@@ -197,13 +218,18 @@ func (app *App) AttachRedirect() (err error) {
 		program    bpf.BpfProgramName
 		attachType ebpf.AttachType
 	}{
+		// the programs that learn clients, restore addresses and clean up come first, so the first redirected socket already has them
+		{program: redirect.ClientSockops, attachType: ebpf.AttachCGroupSockOps},
+		{program: redirect.LearnUdpClient, attachType: ebpf.AttachCGroupInetEgress},
+		{program: redirect.ForgetReleasedSocket, attachType: ebpf.AttachCgroupInetSockRelease},
+		{program: redirect.RestoreGetpeername4, attachType: ebpf.AttachCgroupInet4GetPeername},
+		{program: redirect.RestoreGetpeername6, attachType: ebpf.AttachCgroupInet6GetPeername},
+		{program: redirect.RestoreRecvmsg4, attachType: ebpf.AttachCGroupUDP4Recvmsg},
+		{program: redirect.RestoreRecvmsg6, attachType: ebpf.AttachCGroupUDP6Recvmsg},
 		{program: redirect.RedirectConnect4, attachType: ebpf.AttachCGroupInet4Connect},
 		{program: redirect.RedirectConnect6, attachType: ebpf.AttachCGroupInet6Connect},
 		{program: redirect.RedirectSendmsg4, attachType: ebpf.AttachCGroupUDP4Sendmsg},
 		{program: redirect.RedirectSendmsg6, attachType: ebpf.AttachCGroupUDP6Sendmsg},
-		{program: redirect.ClientSockops, attachType: ebpf.AttachCGroupSockOps},
-		{program: redirect.RestoreGetpeername4, attachType: ebpf.AttachCgroupInet4GetPeername},
-		{program: redirect.RestoreGetpeername6, attachType: ebpf.AttachCgroupInet6GetPeername},
 	}
 
 	for _, attachment := range attachments {
@@ -217,11 +243,11 @@ func (app *App) AttachRedirect() (err error) {
 		app.closeFunctions = append(app.closeFunctions, closeFunction)
 	}
 
-	app.logger.Info("Redirecting flows", "cgroup", attach.CgroupRoot, "uids", app.uids, "port", app.tcpProxyPort)
+	app.logger.Info("Redirecting flows", "cgroup", attach.CgroupRoot, "uids", app.uids, "port", app.proxyPort)
 	return
 }
 
-// for debugging: the flow_map table, also shows the recorded but not yet proxied udp flows
+// for debugging: the flow_map table, also shows the learned client endpoint of udp flows
 func (app *App) StartFlowTable() {
 	if !app.flowTable {
 		return

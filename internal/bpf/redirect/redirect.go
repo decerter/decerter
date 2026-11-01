@@ -22,20 +22,25 @@ import (
 //go:generate go tool bpf2go -tags linux -cflags "-O2 -g -Wall -Werror -fms-extensions -Wno-microsoft-anon-tag -mcpu=v4 $BPF_CFLAGS" bpf ../../../bpf/redirect/redirect.c -- -I../../../bpf -I../../../bpf/include
 
 const (
-	ClientMap           bpf.BpfMapName     = 0 // value: "client_map"
-	FlowMap             bpf.BpfMapName     = 1 // value: "flow_map"
-	RouteMap            bpf.BpfMapName     = 2 // value: "route_map"
-	UidMap              bpf.BpfMapName     = 3 // value: "uid_map"
-	ClientSockops       bpf.BpfProgramName = 0 // value: "client_sockops"
-	RedirectConnect4    bpf.BpfProgramName = 1 // value: "redirect_connect4"
-	RedirectConnect6    bpf.BpfProgramName = 2 // value: "redirect_connect6"
-	RedirectSendmsg4    bpf.BpfProgramName = 3 // value: "redirect_sendmsg4"
-	RedirectSendmsg6    bpf.BpfProgramName = 4 // value: "redirect_sendmsg6"
-	RestoreGetpeername4 bpf.BpfProgramName = 5 // value: "restore_getpeername4"
-	RestoreGetpeername6 bpf.BpfProgramName = 6 // value: "restore_getpeername6"
+	ClientMap            bpf.BpfMapName     = 0  // value: "client_map"
+	FlowMap              bpf.BpfMapName     = 1  // value: "flow_map"
+	ReleaseMap           bpf.BpfMapName     = 2  // value: "release_map"
+	RouteMap             bpf.BpfMapName     = 3  // value: "route_map"
+	UidMap               bpf.BpfMapName     = 4  // value: "uid_map"
+	ClientSockops        bpf.BpfProgramName = 0  // value: "client_sockops"
+	ForgetReleasedSocket bpf.BpfProgramName = 1  // value: "forget_released_socket"
+	LearnUdpClient       bpf.BpfProgramName = 2  // value: "learn_udp_client"
+	RedirectConnect4     bpf.BpfProgramName = 3  // value: "redirect_connect4"
+	RedirectConnect6     bpf.BpfProgramName = 4  // value: "redirect_connect6"
+	RedirectSendmsg4     bpf.BpfProgramName = 5  // value: "redirect_sendmsg4"
+	RedirectSendmsg6     bpf.BpfProgramName = 6  // value: "redirect_sendmsg6"
+	RestoreGetpeername4  bpf.BpfProgramName = 7  // value: "restore_getpeername4"
+	RestoreGetpeername6  bpf.BpfProgramName = 8  // value: "restore_getpeername6"
+	RestoreRecvmsg4      bpf.BpfProgramName = 9  // value: "restore_recvmsg4"
+	RestoreRecvmsg6      bpf.BpfProgramName = 10 // value: "restore_recvmsg6"
 )
 
-func LoadBpfObjects(tcpProxyPort uint16, proxyTgid uint32) (bpfMaps map[bpf.BpfMapName]*ebpf.Map, bpfPrograms map[bpf.BpfProgramName]*ebpf.Program, closeFunction func() error, err error) {
+func LoadBpfObjects(proxyPort uint16, proxyTgid uint32, releaseDelay time.Duration) (bpfMaps map[bpf.BpfMapName]*ebpf.Map, bpfPrograms map[bpf.BpfProgramName]*ebpf.Program, closeFunction func() error, err error) {
 	err = rlimit.RemoveMemlock()
 
 	if err != nil {
@@ -52,8 +57,9 @@ func LoadBpfObjects(tcpProxyPort uint16, proxyTgid uint32) (bpfMaps map[bpf.BpfM
 
 	// load-time constants have to be set before the programs are loaded
 	variables := map[string]any{
-		bpfVarProxyTgid:    proxyTgid,
-		bpfVarTcpProxyPort: tcpProxyPort,
+		bpfVarProxyTgid:      proxyTgid,
+		bpfVarProxyPort:      proxyPort,
+		bpfVarReleaseDelayNs: uint64(releaseDelay.Nanoseconds()),
 	}
 
 	for name, value := range variables {
@@ -74,19 +80,24 @@ func LoadBpfObjects(tcpProxyPort uint16, proxyTgid uint32) (bpfMaps map[bpf.BpfM
 	}
 
 	bpfMaps = map[bpf.BpfMapName]*ebpf.Map{
-		ClientMap: objs.ClientMap,
-		FlowMap:   objs.FlowMap,
-		RouteMap:  objs.RouteMap,
-		UidMap:    objs.UidMap,
+		ClientMap:  objs.ClientMap,
+		FlowMap:    objs.FlowMap,
+		ReleaseMap: objs.ReleaseMap,
+		RouteMap:   objs.RouteMap,
+		UidMap:     objs.UidMap,
 	}
 	bpfPrograms = map[bpf.BpfProgramName]*ebpf.Program{
-		ClientSockops:       objs.ClientSockops,
-		RedirectConnect4:    objs.RedirectConnect4,
-		RedirectConnect6:    objs.RedirectConnect6,
-		RedirectSendmsg4:    objs.RedirectSendmsg4,
-		RedirectSendmsg6:    objs.RedirectSendmsg6,
-		RestoreGetpeername4: objs.RestoreGetpeername4,
-		RestoreGetpeername6: objs.RestoreGetpeername6,
+		ClientSockops:        objs.ClientSockops,
+		ForgetReleasedSocket: objs.ForgetReleasedSocket,
+		LearnUdpClient:       objs.LearnUdpClient,
+		RedirectConnect4:     objs.RedirectConnect4,
+		RedirectConnect6:     objs.RedirectConnect6,
+		RedirectSendmsg4:     objs.RedirectSendmsg4,
+		RedirectSendmsg6:     objs.RedirectSendmsg6,
+		RestoreGetpeername4:  objs.RestoreGetpeername4,
+		RestoreGetpeername6:  objs.RestoreGetpeername6,
+		RestoreRecvmsg4:      objs.RestoreRecvmsg4,
+		RestoreRecvmsg6:      objs.RestoreRecvmsg6,
 	}
 	closeFunction = objs.Close
 	return
@@ -156,7 +167,7 @@ func UpdateRouteMap(routes map[netip.Prefix]bool, bpfMaps map[bpf.BpfMapName]*eb
 	return
 }
 
-// the client endpoint is the peer address of the accepted proxy connection, sockops stores it IPv4-mapped
+// the client endpoint is the peer address of the accepted connection or received datagram, sockops and the egress program store it IPv4-mapped
 func FlowByClient(clientAddressPort netip.AddrPort, ipProtocol uint8, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (cookie uint64, flow Flow, err error) {
 	var bpfFlow bpfFlow
 
@@ -205,11 +216,18 @@ func Read(ctx context.Context, flowMap *ebpf.Map) {
 				continue
 			}
 
-			fmt.Printf("\n%-20s %-5s %-47s %-10s %-8s %-8s %-16s %-10s\n", "Cookie", "Proto", "Destination", "Redirected", "PID", "UID", "Comm", "Cgroup ID")
+			fmt.Printf("\n%-20s %-5s %-47s %-10s %-8s %-8s %-16s %-10s %-47s\n", "Cookie", "Proto", "Destination", "Redirected", "PID", "UID", "Comm", "Cgroup ID", "UDP Client")
 
 			for _, sortedCookie := range slices.SortedFunc(maps.Keys(flows), cmp.Compare) {
 				flow := flows[sortedCookie]
-				fmt.Printf("%-20d %-5s %-47s %-10t %-8d %-8d %-16s %-10d\n", sortedCookie, ProtocolName(flow.IPProtocol), flow.OriginalDestination, flow.Redirected, flow.Tgid, flow.UID, flow.Comm, flow.CgroupID)
+				client := "-"
+
+				// only UDP flows carry the client endpoint
+				if flow.Client.IsValid() {
+					client = flow.Client.String()
+				}
+
+				fmt.Printf("%-20d %-5s %-47s %-10t %-8d %-8d %-16s %-10d %-47s\n", sortedCookie, ProtocolName(flow.IPProtocol), flow.OriginalDestination, flow.Redirected, flow.Tgid, flow.UID, flow.Comm, flow.CgroupID, client)
 			}
 		}
 	}
@@ -224,7 +242,14 @@ func flowFromBpf(bpfFlow bpfFlow) (flow Flow) {
 		UID:                 bpfFlow.Uid,
 		CgroupID:            bpfFlow.CgroupId,
 		Comm:                commToString(bpfFlow.Comm),
+		Client:              netip.AddrPort{},
 	}
+
+	// only UDP flows carry the client endpoint, from their first datagram to the proxy
+	if bpfFlow.Client.Port != 0 {
+		flow.Client = netip.AddrPortFrom(keyToIP(bpfFlow.Client.Ip), bpfFlow.Client.Port)
+	}
+
 	return
 }
 
