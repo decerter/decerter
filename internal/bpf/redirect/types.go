@@ -4,7 +4,23 @@ package redirect
 
 import (
 	"net/netip"
+	"strconv"
 )
+
+// IPProtocol is IPPROTO_TCP or IPPROTO_UDP
+type DestinationPort struct {
+	Port       uint16
+	IPProtocol uint8
+}
+
+// a process is selected if its uid is in UIDs or its tgid in Tgids, with both empty no process is selected
+// a flow of a selected process is in scope if its destination matches every destination filter that is set: any of DestinationCIDRs and any of DestinationPorts, an empty one passes everything
+type Filter struct {
+	UIDs             []uint32
+	Tgids            []uint32
+	DestinationCIDRs []netip.Prefix
+	DestinationPorts []DestinationPort
+}
 
 type Flow struct {
 	OriginalDestination netip.AddrPort
@@ -15,4 +31,9 @@ type Flow struct {
 	CgroupID            uint64
 	Comm                string
 	Client              netip.AddrPort
+}
+
+func (destinationPort DestinationPort) String() (text string) {
+	text = ProtocolName(destinationPort.IPProtocol) + "/" + strconv.Itoa(int(destinationPort.Port))
+	return
 }

@@ -31,7 +31,7 @@ type App struct {
 	ctx                 context.Context
 	cancel              context.CancelFunc
 	waitGroup           *sync.WaitGroup
-	uids                []uint32
+	filter              redirect.Filter
 	proxyPort           uint16
 	udpIdleTimeout      time.Duration
 	flowTable           bool
@@ -43,13 +43,13 @@ type App struct {
 	closeFunctions      [](func() error)
 }
 
-func New(ctx context.Context, uids []uint32, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, logger *slog.Logger) (app App) {
+func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, logger *slog.Logger) (app App) {
 	appCtx, cancel := context.WithCancel(ctx)
 	app = App{
 		ctx:                 appCtx,
 		cancel:              cancel,
 		waitGroup:           &sync.WaitGroup{},
-		uids:                uids,
+		filter:              filter,
 		proxyPort:           proxyPort,
 		udpIdleTimeout:      udpIdleTimeout,
 		flowTable:           flowTable,
@@ -78,15 +78,16 @@ func (app *App) LoadBpfObjects() (err error) {
 }
 
 func (app *App) UpdateBpfMaps() (err error) {
-	err = redirect.UpdateBpfMaps(app.uids, app.redirectBpfMaps)
+	err = redirect.UpdateBpfMaps(app.filter, app.redirectBpfMaps)
 
 	if err != nil {
 		app.logger.Error("Could not update redirect bpf maps", "error", err)
 		return
 	}
 
-	if len(app.uids) == 0 {
-		app.logger.Warn("No uid given, no flow will be redirected")
+	// the destination filters only narrow the flows of the selected processes
+	if (len(app.filter.UIDs) == 0) && (len(app.filter.Tgids) == 0) {
+		app.logger.Warn("No uid or pid given, no flow will be redirected")
 	}
 
 	return
@@ -243,7 +244,7 @@ func (app *App) AttachRedirect() (err error) {
 		app.closeFunctions = append(app.closeFunctions, closeFunction)
 	}
 
-	app.logger.Info("Redirecting flows", "cgroup", attach.CgroupRoot, "uids", app.uids, "port", app.proxyPort)
+	app.logger.Info("Redirecting flows", "cgroup", attach.CgroupRoot, "uids", app.filter.UIDs, "pids", app.filter.Tgids, "destinationCidrs", app.filter.DestinationCIDRs, "destinationPorts", app.filter.DestinationPorts, "proxyPort", app.proxyPort)
 	return
 }
 

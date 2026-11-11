@@ -30,6 +30,9 @@
 #define NOK				1
 #define REDIRECT		2
 
+//prefix length of a full address in an LPM_TRIE lookup key, IPv4 is stored IPv4-mapped
+#define ADDRESS_BITS	128
+
 //second word of an IPv4-mapped IPv6 address (::ffff:0:0/96)
 #define IPV4_MAPPED		0x0000FFFF
 
@@ -66,7 +69,22 @@ struct packet_info {
 	struct endpoint destination;
 };
 
-//Key: socket cookie, Value: original destination + process of the socket
+//cidr_filter: 1 if the destination address has to match cidr_map, 0 if every address passes
+//port_filter: 1 if the destination port + IP protocol has to match port_map, 0 if every port passes
+struct filter_config {
+	uint8_t cidr_filter;
+	uint8_t port_filter;
+	uint16_t padding;
+};
+
+//port: destination port in host byte order, ip_protocol: IPPROTO_TCP or IPPROTO_UDP
+struct port_key {
+	uint16_t port;
+	uint8_t ip_protocol;
+	uint8_t padding;
+};
+
+//Key: socket cookie, Value: original destination + process of the socket, only flows that passed the process and destination filters are here
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
 	__uint(max_entries, 65535);
@@ -82,6 +100,31 @@ struct {
 	__type(key, struct prefix_key);
 	__type(value, uint8_t);
 } route_map SEC(".maps");
+
+//Key: 0, Value: which destination filters are set, a program can't ask if cidr_map or port_map is empty and an unset filter has to pass everything, written by Go after the sets
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 1);
+	__type(key, uint32_t);
+	__type(value, struct filter_config);
+} filter_map SEC(".maps");
+
+//Key: destination prefix of the CIDR filter, IPv4 stored IPv4-mapped like in route_map, Value: 1, only read while filter_config.cidr_filter is set
+struct {
+	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(max_entries, 65535);
+	__uint(map_flags, BPF_F_NO_PREALLOC);
+	__type(key, struct prefix_key);
+	__type(value, uint8_t);
+} cidr_map SEC(".maps");
+
+//Key: destination port + IP protocol of the port filter, Value: 1, only read while filter_config.port_filter is set
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 1024);
+	__type(key, struct port_key);
+	__type(value, uint8_t);
+} port_map SEC(".maps");
 
 //Key: client endpoint of a redirected TCP connection or UDP socket: IP address + layer 4 port + IP protocol, Value: socket cookie
 struct {
@@ -99,7 +142,75 @@ struct {
 	__type(value, struct release);
 } release_map SEC(".maps");
 
-//Check if the calling process is in scope and fill the protocol, port and process of the flow
+//Check if the process is selected: its uid is in uid_map or its tgid in tgid_map, decerter itself never is
+bool is_selected_process(uint32_t tgid, uint32_t uid)
+{
+	if (tgid == proxy_tgid)
+	{
+		return false;
+	}
+
+	if (bpf_map_lookup_elem(&uid_map, &uid))
+	{
+		return true;
+	}
+
+	if (bpf_map_lookup_elem(&tgid_map, &tgid))
+	{
+		return true;
+	}
+
+	return false;
+}
+
+//Check if the destination of the flow passes the port and the CIDR filter, a filter that is not set passes everything
+bool is_selected_destination(struct flow *flow)
+{
+	if (!flow)
+	{
+		return false;
+	}
+
+	uint32_t index = 0;
+	struct filter_config *filter_config = bpf_map_lookup_elem(&filter_map, &index);
+
+	//the only slot of an ARRAY map is always there
+	if (!filter_config)
+	{
+		return false;
+	}
+
+	if (filter_config->port_filter)
+	{
+		struct port_key key = {
+			.port = flow->port,
+			.ip_protocol = flow->ip_protocol,
+			.padding = 0
+		};
+
+		if (!bpf_map_lookup_elem(&port_map, &key))
+		{
+			return false;
+		}
+	}
+
+	if (filter_config->cidr_filter)
+	{
+		struct prefix_key key = {
+			.prefixlen = ADDRESS_BITS,
+			.ip = {flow->ip[0], flow->ip[1], flow->ip[2], flow->ip[3]}
+		};
+
+		if (!bpf_map_lookup_elem(&cidr_map, &key))
+		{
+			return false;
+		}
+	}
+
+	return true;
+}
+
+//Check if the flow is in scope: a selected process and a destination that passes the filters, and fill its protocol, port and process, its destination address is already filled
 uint16_t check_flow(struct bpf_sock_addr *ctx, struct flow *flow)
 {
 	if ((!ctx) || (!flow))
@@ -111,12 +222,17 @@ uint16_t check_flow(struct bpf_sock_addr *ctx, struct flow *flow)
 	uint32_t tgid = pid_tgid >> 32;
 	uint32_t uid = bpf_get_current_uid_gid();
 
-	if (tgid == proxy_tgid)
+	//most connects and sends of the system leave here
+	if (!is_selected_process(tgid, uid))
 	{
 		return OK;
 	}
 
-	if (!bpf_map_lookup_elem(&uid_map, &uid))
+	flow->ip_protocol = ctx->protocol;
+	flow->port = bpf_ntohs(ctx->user_port);
+
+	//a socket with a flow of an earlier destination keeps it, restore_destination4/6 only touch the proxy address
+	if (!is_selected_destination(flow))
 	{
 		return OK;
 	}
@@ -124,8 +240,6 @@ uint16_t check_flow(struct bpf_sock_addr *ctx, struct flow *flow)
 	flow->tgid = tgid;
 	flow->uid = uid;
 	flow->cgroup_id = bpf_get_current_cgroup_id();
-	flow->ip_protocol = ctx->protocol;
-	flow->port = bpf_ntohs(ctx->user_port);
 
 	//comm of the thread group leader like /proc/<tgid>/comm, read here so a process that exits before the proxy accepts keeps its name
 	//bpf_get_current_comm would give the name of the calling thread, it is only the fallback if the read fails
@@ -148,7 +262,7 @@ bool has_route(struct flow *flow)
 	}
 
 	struct prefix_key key = {
-		.prefixlen = 128,
+		.prefixlen = ADDRESS_BITS,
 		.ip = {flow->ip[0], flow->ip[1], flow->ip[2], flow->ip[3]}
 	};
 	uint8_t *routable = bpf_map_lookup_elem(&route_map, &key);
@@ -210,7 +324,26 @@ uint16_t save_flow(struct bpf_sock_addr *ctx, struct flow *flow)
 	return OK;
 }
 
-//Record the IPv4 destination of an in scope process IPv4-mapped in flow_map
+//Record the flow if it is in scope, its destination address is already filled, REDIRECT if the destination has to be rewritten to the proxy
+uint16_t record_flow(struct bpf_sock_addr *ctx, struct flow *flow)
+{
+	if ((!ctx) || (!flow))
+	{
+		return NOK;
+	}
+
+	switch (check_flow(ctx, flow))
+	{
+	case REDIRECT:
+		return save_flow(ctx, flow);
+	case OK:
+		return OK;
+	default:
+		return NOK;
+	}
+}
+
+//Record the flow to an IPv4 destination, stored IPv4-mapped
 uint16_t record_flow4(struct bpf_sock_addr *ctx)
 {
 	if (!ctx)
@@ -218,28 +351,18 @@ uint16_t record_flow4(struct bpf_sock_addr *ctx)
 		return NOK;
 	}
 
+	//user_ip4 is only readable from the IPv4 attach types, so the address is filled here and everything else in record_flow
 	struct flow flow = {};
 
-	switch (check_flow(ctx, &flow))
-	{
-	case REDIRECT:
-		break;
-	case OK:
-		return OK;
-	default:
-		return NOK;
-	}
-
-	//user_ip4 is only readable from the IPv4 attach types, so it can't be read in check_flow
 	flow.ip[0] = 0;
 	flow.ip[1] = 0;
 	flow.ip[2] = bpf_htonl(IPV4_MAPPED);
 	flow.ip[3] = ctx->user_ip4;
 
-	return save_flow(ctx, &flow);
+	return record_flow(ctx, &flow);
 }
 
-//Record the IPv6 destination of an in scope process in flow_map
+//Record the flow to an IPv6 destination
 uint16_t record_flow6(struct bpf_sock_addr *ctx)
 {
 	if (!ctx)
@@ -247,25 +370,15 @@ uint16_t record_flow6(struct bpf_sock_addr *ctx)
 		return NOK;
 	}
 
+	//user_ip6 is only readable from the IPv6 attach types, so the address is filled here and everything else in record_flow
 	struct flow flow = {};
 
-	switch (check_flow(ctx, &flow))
-	{
-	case REDIRECT:
-		break;
-	case OK:
-		return OK;
-	default:
-		return NOK;
-	}
-
-	//user_ip6 is only readable from the IPv6 attach types, so it can't be read in check_flow
 	flow.ip[0] = ctx->user_ip6[0];
 	flow.ip[1] = ctx->user_ip6[1];
 	flow.ip[2] = ctx->user_ip6[2];
 	flow.ip[3] = ctx->user_ip6[3];
 
-	return save_flow(ctx, &flow);
+	return record_flow(ctx, &flow);
 }
 
 //Rewrite the IPv4 destination to the proxy on 127.0.0.1, the TCP listener and the UDP socket share the port
@@ -448,53 +561,6 @@ uint16_t forget_flow(struct bpf_sock_ops *skops)
 	return OK;
 }
 
-//Restore the original IPv4 destination of a redirected socket as its peer
-uint16_t restore_peer4(struct bpf_sock_addr *ctx)
-{
-	if (!ctx)
-	{
-		return NOK;
-	}
-
-	uint64_t cookie = bpf_get_socket_cookie(ctx);
-	struct flow *flow = bpf_map_lookup_elem(&flow_map, &cookie);
-
-	if ((!flow) || (!flow->redirected))
-	{
-		return OK;
-	}
-
-	ctx->user_ip4 = flow->ip[3];
-	ctx->user_port = bpf_htons(flow->port);
-
-	return REDIRECT;
-}
-
-//Restore the original IPv6 destination of a redirected socket as its peer
-uint16_t restore_peer6(struct bpf_sock_addr *ctx)
-{
-	if (!ctx)
-	{
-		return NOK;
-	}
-
-	uint64_t cookie = bpf_get_socket_cookie(ctx);
-	struct flow *flow = bpf_map_lookup_elem(&flow_map, &cookie);
-
-	if ((!flow) || (!flow->redirected))
-	{
-		return OK;
-	}
-
-	ctx->user_ip6[0] = flow->ip[0];
-	ctx->user_ip6[1] = flow->ip[1];
-	ctx->user_ip6[2] = flow->ip[2];
-	ctx->user_ip6[3] = flow->ip[3];
-	ctx->user_port = bpf_htons(flow->port);
-
-	return REDIRECT;
-}
-
 //Check if the endpoint is the proxy: 127.0.0.1 (stored IPv4-mapped, also how a dual-stack IPv6 socket sees it) or ::1 on proxy_port
 bool is_proxy_endpoint(struct endpoint *endpoint)
 {
@@ -516,6 +582,31 @@ bool is_proxy_endpoint(struct endpoint *endpoint)
 	return (endpoint->ip[2] == 0) && (endpoint->ip[3] == bpf_htonl(LOOPBACK6));
 }
 
+//Fill the ports and the IP protocol of the source and destination from the UDP header at l4_offset
+uint16_t parse_udp_ports(struct __sk_buff *skb, uint32_t l4_offset, struct packet_info *packet)
+{
+	if ((!skb) || (!packet))
+	{
+		return NOK;
+	}
+
+	struct udphdr udph = {};
+
+	if (bpf_skb_load_bytes(skb, l4_offset, &udph, sizeof(struct udphdr)) != 0)
+	{
+		return NOK;
+	}
+
+	packet->source.port = bpf_ntohs(udph.source);
+	packet->source.ip_protocol = IPPROTO_UDP;
+	packet->source.padding = 0;
+	packet->destination.port = bpf_ntohs(udph.dest);
+	packet->destination.ip_protocol = IPPROTO_UDP;
+	packet->destination.padding = 0;
+
+	return OK;
+}
+
 //Fill the source and destination of an IPv4 UDP packet, cgroup_skb data starts at the IP header
 __noinline uint16_t parse_packet4(struct __sk_buff *skb, struct packet_info *packet)
 {
@@ -525,7 +616,6 @@ __noinline uint16_t parse_packet4(struct __sk_buff *skb, struct packet_info *pac
 	}
 
 	struct iphdr iph = {};
-	struct udphdr udph = {};
 
 	if (bpf_skb_load_bytes(skb, 0, &iph, sizeof(struct iphdr)) != 0)
 	{
@@ -538,27 +628,16 @@ __noinline uint16_t parse_packet4(struct __sk_buff *skb, struct packet_info *pac
 		return NOK;
 	}
 
-	if (bpf_skb_load_bytes(skb, iph.ihl * 4, &udph, sizeof(struct udphdr)) != 0)
-	{
-		return NOK;
-	}
-
 	packet->source.ip[0] = 0;
 	packet->source.ip[1] = 0;
 	packet->source.ip[2] = bpf_htonl(IPV4_MAPPED);
 	packet->source.ip[3] = iph.saddr;
-	packet->source.port = bpf_ntohs(udph.source);
-	packet->source.ip_protocol = IPPROTO_UDP;
-	packet->source.padding = 0;
 	packet->destination.ip[0] = 0;
 	packet->destination.ip[1] = 0;
 	packet->destination.ip[2] = bpf_htonl(IPV4_MAPPED);
 	packet->destination.ip[3] = iph.daddr;
-	packet->destination.port = bpf_ntohs(udph.dest);
-	packet->destination.ip_protocol = IPPROTO_UDP;
-	packet->destination.padding = 0;
 
-	return OK;
+	return parse_udp_ports(skb, iph.ihl * 4, packet);
 }
 
 //Fill the source and destination of an IPv6 UDP packet, cgroup_skb data starts at the IP header
@@ -570,7 +649,6 @@ __noinline uint16_t parse_packet6(struct __sk_buff *skb, struct packet_info *pac
 	}
 
 	struct ipv6hdr iph = {};
-	struct udphdr udph = {};
 
 	if (bpf_skb_load_bytes(skb, 0, &iph, sizeof(struct ipv6hdr)) != 0)
 	{
@@ -583,27 +661,16 @@ __noinline uint16_t parse_packet6(struct __sk_buff *skb, struct packet_info *pac
 		return NOK;
 	}
 
-	if (bpf_skb_load_bytes(skb, sizeof(struct ipv6hdr), &udph, sizeof(struct udphdr)) != 0)
-	{
-		return NOK;
-	}
-
 	packet->source.ip[0] = iph.saddr.in6_u.u6_addr32[0];
 	packet->source.ip[1] = iph.saddr.in6_u.u6_addr32[1];
 	packet->source.ip[2] = iph.saddr.in6_u.u6_addr32[2];
 	packet->source.ip[3] = iph.saddr.in6_u.u6_addr32[3];
-	packet->source.port = bpf_ntohs(udph.source);
-	packet->source.ip_protocol = IPPROTO_UDP;
-	packet->source.padding = 0;
 	packet->destination.ip[0] = iph.daddr.in6_u.u6_addr32[0];
 	packet->destination.ip[1] = iph.daddr.in6_u.u6_addr32[1];
 	packet->destination.ip[2] = iph.daddr.in6_u.u6_addr32[2];
 	packet->destination.ip[3] = iph.daddr.in6_u.u6_addr32[3];
-	packet->destination.port = bpf_ntohs(udph.dest);
-	packet->destination.ip_protocol = IPPROTO_UDP;
-	packet->destination.padding = 0;
 
-	return OK;
+	return parse_udp_ports(skb, sizeof(struct ipv6hdr), packet);
 }
 
 //Fill the source and destination of a UDP packet by its IP version, NOK for anything else
@@ -784,8 +851,8 @@ uint16_t release_flow(struct bpf_sock *sk)
 	return OK;
 }
 
-//Restore the original IPv4 server as the source of a datagram the proxy sent to a redirected UDP socket
-uint16_t restore_source4(struct bpf_sock_addr *ctx)
+//Replace the proxy address with the original IPv4 destination of a redirected socket: its peer in getpeername, the source of a datagram in recvmsg
+uint16_t restore_destination4(struct bpf_sock_addr *ctx)
 {
 	if (!ctx)
 	{
@@ -800,15 +867,15 @@ uint16_t restore_source4(struct bpf_sock_addr *ctx)
 		return OK;
 	}
 
-	struct endpoint source = {
+	struct endpoint reported = {
 		.ip = {0, 0, bpf_htonl(IPV4_MAPPED), ctx->user_ip4},
 		.port = bpf_ntohs(ctx->user_port),
-		.ip_protocol = IPPROTO_UDP,
+		.ip_protocol = flow->ip_protocol,
 		.padding = 0
 	};
 
-	//other senders of an unconnected socket keep their address
-	if (!is_proxy_endpoint(&source))
+	//every other address is real: another sender of an unconnected socket, or the peer of a socket that was connected again to a destination that is not redirected
+	if (!is_proxy_endpoint(&reported))
 	{
 		return OK;
 	}
@@ -819,8 +886,8 @@ uint16_t restore_source4(struct bpf_sock_addr *ctx)
 	return REDIRECT;
 }
 
-//Restore the original IPv6 server as the source of a datagram the proxy sent to a redirected UDP socket, IPv4 datagrams on a dual-stack socket arrive IPv4-mapped
-uint16_t restore_source6(struct bpf_sock_addr *ctx)
+//Replace the proxy address with the original IPv6 destination of a redirected socket: its peer in getpeername, the source of a datagram in recvmsg, IPv4 on a dual-stack socket is IPv4-mapped
+uint16_t restore_destination6(struct bpf_sock_addr *ctx)
 {
 	if (!ctx)
 	{
@@ -835,15 +902,15 @@ uint16_t restore_source6(struct bpf_sock_addr *ctx)
 		return OK;
 	}
 
-	struct endpoint source = {
+	struct endpoint reported = {
 		.ip = {ctx->user_ip6[0], ctx->user_ip6[1], ctx->user_ip6[2], ctx->user_ip6[3]},
 		.port = bpf_ntohs(ctx->user_port),
-		.ip_protocol = IPPROTO_UDP,
+		.ip_protocol = flow->ip_protocol,
 		.padding = 0
 	};
 
-	//other senders of an unconnected socket keep their address
-	if (!is_proxy_endpoint(&source))
+	//every other address is real: another sender of an unconnected socket, or the peer of a socket that was connected again to a destination that is not redirected
+	if (!is_proxy_endpoint(&reported))
 	{
 		return OK;
 	}

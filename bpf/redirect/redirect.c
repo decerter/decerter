@@ -4,7 +4,7 @@
 
 #include "redirect.h"
 
-//Record TCP and connected UDP IPv4 sockets of in scope processes and redirect them to the proxy, always allowed
+//Record in scope TCP and connected UDP IPv4 flows and redirect them to the proxy, the connect is always allowed
 SEC("cgroup/connect4")
 int redirect_connect4(struct bpf_sock_addr *ctx)
 {
@@ -21,7 +21,7 @@ int redirect_connect4(struct bpf_sock_addr *ctx)
 	}
 }
 
-//Record TCP and connected UDP IPv6 sockets of in scope processes and redirect them to the proxy, always allowed
+//Record in scope TCP and connected UDP IPv6 flows and redirect them to the proxy, the connect is always allowed
 SEC("cgroup/connect6")
 int redirect_connect6(struct bpf_sock_addr *ctx)
 {
@@ -38,7 +38,7 @@ int redirect_connect6(struct bpf_sock_addr *ctx)
 	}
 }
 
-//Record the original destination of unconnected UDP IPv4 sends and redirect them to the proxy, the datagram is always allowed
+//Record the original destination of in scope unconnected UDP IPv4 sends and redirect them to the proxy, the datagram is always allowed
 SEC("cgroup/sendmsg4")
 int redirect_sendmsg4(struct bpf_sock_addr *ctx)
 {
@@ -55,7 +55,7 @@ int redirect_sendmsg4(struct bpf_sock_addr *ctx)
 	}
 }
 
-//Record the original destination of unconnected UDP IPv6 sends and redirect them to the proxy, the datagram is always allowed
+//Record the original destination of in scope unconnected UDP IPv6 sends and redirect them to the proxy, the datagram is always allowed
 SEC("cgroup/sendmsg6")
 int redirect_sendmsg6(struct bpf_sock_addr *ctx)
 {
@@ -99,7 +99,7 @@ int client_sockops(struct bpf_sock_ops *skops)
 SEC("cgroup/getpeername4")
 int restore_getpeername4(struct bpf_sock_addr *ctx)
 {
-	switch (restore_peer4(ctx))
+	switch (restore_destination4(ctx))
 	{
 	case REDIRECT:
 		return SOCK_ALLOW;
@@ -112,7 +112,7 @@ int restore_getpeername4(struct bpf_sock_addr *ctx)
 SEC("cgroup/getpeername6")
 int restore_getpeername6(struct bpf_sock_addr *ctx)
 {
-	switch (restore_peer6(ctx))
+	switch (restore_destination6(ctx))
 	{
 	case REDIRECT:
 		return SOCK_ALLOW;
@@ -125,7 +125,7 @@ int restore_getpeername6(struct bpf_sock_addr *ctx)
 SEC("cgroup/recvmsg4")
 int restore_recvmsg4(struct bpf_sock_addr *ctx)
 {
-	switch (restore_source4(ctx))
+	switch (restore_destination4(ctx))
 	{
 	case REDIRECT:
 		return SOCK_ALLOW;
@@ -138,7 +138,7 @@ int restore_recvmsg4(struct bpf_sock_addr *ctx)
 SEC("cgroup/recvmsg6")
 int restore_recvmsg6(struct bpf_sock_addr *ctx)
 {
-	switch (restore_source6(ctx))
+	switch (restore_destination6(ctx))
 	{
 	case REDIRECT:
 		return SOCK_ALLOW;

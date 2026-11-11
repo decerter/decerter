@@ -65,7 +65,7 @@ func List() (routes map[netip.Prefix]bool, err error) {
 		}
 
 		// a default route has no RTA_DST
-		address := netip.Addr{}
+		var address netip.Addr
 
 		switch family {
 		case syscall.AF_INET:

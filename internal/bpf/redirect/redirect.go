@@ -22,11 +22,15 @@ import (
 //go:generate go tool bpf2go -tags linux -cflags "-O2 -g -Wall -Werror -fms-extensions -Wno-microsoft-anon-tag -mcpu=v4 $BPF_CFLAGS" bpf ../../../bpf/redirect/redirect.c -- -I../../../bpf -I../../../bpf/include
 
 const (
-	ClientMap            bpf.BpfMapName     = 0  // value: "client_map"
-	FlowMap              bpf.BpfMapName     = 1  // value: "flow_map"
-	ReleaseMap           bpf.BpfMapName     = 2  // value: "release_map"
-	RouteMap             bpf.BpfMapName     = 3  // value: "route_map"
-	UidMap               bpf.BpfMapName     = 4  // value: "uid_map"
+	CidrMap              bpf.BpfMapName     = 0  // value: "cidr_map"
+	ClientMap            bpf.BpfMapName     = 1  // value: "client_map"
+	FilterMap            bpf.BpfMapName     = 2  // value: "filter_map"
+	FlowMap              bpf.BpfMapName     = 3  // value: "flow_map"
+	PortMap              bpf.BpfMapName     = 4  // value: "port_map"
+	ReleaseMap           bpf.BpfMapName     = 5  // value: "release_map"
+	RouteMap             bpf.BpfMapName     = 6  // value: "route_map"
+	TgidMap              bpf.BpfMapName     = 7  // value: "tgid_map"
+	UidMap               bpf.BpfMapName     = 8  // value: "uid_map"
 	ClientSockops        bpf.BpfProgramName = 0  // value: "client_sockops"
 	ForgetReleasedSocket bpf.BpfProgramName = 1  // value: "forget_released_socket"
 	LearnUdpClient       bpf.BpfProgramName = 2  // value: "learn_udp_client"
@@ -80,10 +84,14 @@ func LoadBpfObjects(proxyPort uint16, proxyTgid uint32, releaseDelay time.Durati
 	}
 
 	bpfMaps = map[bpf.BpfMapName]*ebpf.Map{
+		CidrMap:    objs.CidrMap,
 		ClientMap:  objs.ClientMap,
+		FilterMap:  objs.FilterMap,
 		FlowMap:    objs.FlowMap,
+		PortMap:    objs.PortMap,
 		ReleaseMap: objs.ReleaseMap,
 		RouteMap:   objs.RouteMap,
+		TgidMap:    objs.TgidMap,
 		UidMap:     objs.UidMap,
 	}
 	bpfPrograms = map[bpf.BpfProgramName]*ebpf.Program{
@@ -103,15 +111,70 @@ func LoadBpfObjects(proxyPort uint16, proxyTgid uint32, releaseDelay time.Durati
 	return
 }
 
-// an empty uid set matches no process, nothing is recorded
-func UpdateBpfMaps(uids []uint32, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (err error) {
-	for _, uid := range uids {
+// the sets of the filter are only added to, nothing is removed from the maps
+// filter_map is written last: the programs can't ask if cidr_map or port_map is empty, they only read a set after its switch is on
+func UpdateBpfMaps(filter Filter, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (err error) {
+	for _, uid := range filter.UIDs {
 		err = bpfMaps[UidMap].Update(uid, uint8(1), ebpf.UpdateAny)
 
 		if err != nil {
 			err = fmt.Errorf("update %s uid %d: %w", bpfMapUidMap, uid, err)
 			return
 		}
+	}
+
+	for _, tgid := range filter.Tgids {
+		err = bpfMaps[TgidMap].Update(tgid, uint8(1), ebpf.UpdateAny)
+
+		if err != nil {
+			err = fmt.Errorf("update %s tgid %d: %w", bpfMapTgidMap, tgid, err)
+			return
+		}
+	}
+
+	for _, destinationCIDR := range filter.DestinationCIDRs {
+		// bits after the prefix length are not part of the key, masked so the map shows the prefix as given
+		err = bpfMaps[CidrMap].Update(prefixToKey(destinationCIDR.Masked()), uint8(1), ebpf.UpdateAny)
+
+		if err != nil {
+			err = fmt.Errorf("update %s %s: %w", bpfMapCidrMap, destinationCIDR, err)
+			return
+		}
+	}
+
+	for _, destinationPort := range filter.DestinationPorts {
+		key := bpfPortKey{
+			Port:       destinationPort.Port,
+			IpProtocol: destinationPort.IPProtocol,
+			Padding:    0,
+		}
+		err = bpfMaps[PortMap].Update(key, uint8(1), ebpf.UpdateAny)
+
+		if err != nil {
+			err = fmt.Errorf("update %s %s: %w", bpfMapPortMap, destinationPort, err)
+			return
+		}
+	}
+
+	filterConfig := bpfFilterConfig{
+		CidrFilter: 0,
+		PortFilter: 0,
+		Padding:    0,
+	}
+
+	if len(filter.DestinationCIDRs) > 0 {
+		filterConfig.CidrFilter = 1
+	}
+
+	if len(filter.DestinationPorts) > 0 {
+		filterConfig.PortFilter = 1
+	}
+
+	err = bpfMaps[FilterMap].Update(uint32(0), filterConfig, ebpf.UpdateAny)
+
+	if err != nil {
+		err = fmt.Errorf("update %s: %w", bpfMapFilterMap, err)
+		return
 	}
 
 	return
@@ -269,26 +332,18 @@ func commToString(comm [16]int8) (name string) {
 	return
 }
 
-// IPv4 is stored IPv4-mapped like in the C structs: As16 gives ::ffff:a.b.c.d for both plain and mapped IPv4
 func endpointToKey(addressPort netip.AddrPort, ipProtocol uint8) (key bpfEndpoint) {
-	address := addressPort.Addr().As16()
 	key = bpfEndpoint{
-		Ip:         [4]uint32{},
+		Ip:         ipToKey(addressPort.Addr()),
 		Port:       addressPort.Port(),
 		IpProtocol: ipProtocol,
 		Padding:    0,
 	}
-
-	for index := range key.Ip {
-		key.Ip[index] = binary.NativeEndian.Uint32(address[index*4 : index*4+4])
-	}
-
 	return
 }
 
 // IPv4 prefixes are stored IPv4-mapped, so their length grows by the 96 bits of ::ffff:0:0/96
 func prefixToKey(prefix netip.Prefix) (key bpfPrefixKey) {
-	address := prefix.Addr().As16()
 	prefixLength := prefix.Bits()
 
 	if prefix.Addr().Is4() {
@@ -297,13 +352,8 @@ func prefixToKey(prefix netip.Prefix) (key bpfPrefixKey) {
 
 	key = bpfPrefixKey{
 		Prefixlen: uint32(prefixLength),
-		Ip:        [4]uint32{},
+		Ip:        ipToKey(prefix.Addr()),
 	}
-
-	for index := range key.Ip {
-		key.Ip[index] = binary.NativeEndian.Uint32(address[index*4 : index*4+4])
-	}
-
 	return
 }
 
@@ -316,6 +366,17 @@ func keyToPrefix(key bpfPrefixKey) (prefix netip.Prefix) {
 	}
 
 	prefix = netip.PrefixFrom(address, prefixLength)
+	return
+}
+
+// IPv4 is stored IPv4-mapped like in the C structs: As16 gives ::ffff:a.b.c.d for both plain and mapped IPv4
+func ipToKey(address netip.Addr) (key [4]uint32) {
+	addressBytes := address.As16()
+
+	for index := range key {
+		key[index] = binary.NativeEndian.Uint32(addressBytes[index*4 : index*4+4])
+	}
+
 	return
 }
 

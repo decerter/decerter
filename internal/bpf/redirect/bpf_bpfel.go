@@ -21,6 +21,13 @@ type bpfEndpoint struct {
 	Padding    uint8
 }
 
+type bpfFilterConfig struct {
+	_          structs.HostLayout
+	CidrFilter uint8
+	PortFilter uint8
+	Padding    uint16
+}
+
 type bpfFlow struct {
 	_          structs.HostLayout
 	Ip         [4]uint32
@@ -34,6 +41,13 @@ type bpfFlow struct {
 	Comm       [16]int8
 	Client     bpfEndpoint
 	Pad32End   uint32
+}
+
+type bpfPortKey struct {
+	_          structs.HostLayout
+	Port       uint16
+	IpProtocol uint8
+	Padding    uint8
 }
 
 type bpfPrefixKey struct {
@@ -54,10 +68,14 @@ type bpfRelease struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	bpfMapCidrMap               = "cidr_map"
 	bpfMapClientMap             = "client_map"
+	bpfMapFilterMap             = "filter_map"
 	bpfMapFlowMap               = "flow_map"
+	bpfMapPortMap               = "port_map"
 	bpfMapReleaseMap            = "release_map"
 	bpfMapRouteMap              = "route_map"
+	bpfMapTgidMap               = "tgid_map"
 	bpfMapUidMap                = "uid_map"
 	bpfProgClientSockops        = "client_sockops"
 	bpfProgForgetReleasedSocket = "forget_released_socket"
@@ -134,10 +152,14 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
+	CidrMap    *ebpf.MapSpec `ebpf:"cidr_map"`
 	ClientMap  *ebpf.MapSpec `ebpf:"client_map"`
+	FilterMap  *ebpf.MapSpec `ebpf:"filter_map"`
 	FlowMap    *ebpf.MapSpec `ebpf:"flow_map"`
+	PortMap    *ebpf.MapSpec `ebpf:"port_map"`
 	ReleaseMap *ebpf.MapSpec `ebpf:"release_map"`
 	RouteMap   *ebpf.MapSpec `ebpf:"route_map"`
+	TgidMap    *ebpf.MapSpec `ebpf:"tgid_map"`
 	UidMap     *ebpf.MapSpec `ebpf:"uid_map"`
 }
 
@@ -170,19 +192,27 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
+	CidrMap    *ebpf.Map `ebpf:"cidr_map"`
 	ClientMap  *ebpf.Map `ebpf:"client_map"`
+	FilterMap  *ebpf.Map `ebpf:"filter_map"`
 	FlowMap    *ebpf.Map `ebpf:"flow_map"`
+	PortMap    *ebpf.Map `ebpf:"port_map"`
 	ReleaseMap *ebpf.Map `ebpf:"release_map"`
 	RouteMap   *ebpf.Map `ebpf:"route_map"`
+	TgidMap    *ebpf.Map `ebpf:"tgid_map"`
 	UidMap     *ebpf.Map `ebpf:"uid_map"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
+		m.CidrMap,
 		m.ClientMap,
+		m.FilterMap,
 		m.FlowMap,
+		m.PortMap,
 		m.ReleaseMap,
 		m.RouteMap,
+		m.TgidMap,
 		m.UidMap,
 	)
 }

@@ -3,13 +3,21 @@
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
 
-//Key: uid of an inspected user, Value: 1, an empty map matches no process
+//Key: uid of an inspected user, Value: 1, a process is selected if its uid is here or its tgid in tgid_map, with both maps empty no process is selected
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 1024);
 	__type(key, uint32_t);
 	__type(value, uint8_t);
 } uid_map SEC(".maps");
+
+//Key: tgid of an inspected process, Value: 1, selects single processes next to uid_map, a child gets its own tgid and is not followed
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 1024);
+	__type(key, uint32_t);
+	__type(value, uint8_t);
+} tgid_map SEC(".maps");
 
 //ip: network byte order, IPv4 stored IPv4-mapped (::ffff:a.b.c.d), port: host byte order
 struct endpoint {
