@@ -9,6 +9,7 @@ CLANG ?= clang-21
 LLVM_STRIP ?= llvm-strip-21
 LIBBPF_VERSION ?= v1.8.0
 LIBBPF_HEADERS ?= bpf_helpers.h bpf_helper_defs.h bpf_endian.h bpf_tracing.h bpf_core_read.h
+OPENSSL_VERSIONS ?= openssl-3.6.2
 
 # bpf2go reads the compiler from the environment, the go:generate lines stay compiler independent
 export BPF2GO_CC := $(CLANG)
@@ -35,6 +36,11 @@ generate-bpf-redirect-objects: ## Generate bpf redirect object files
 
 .PHONY: generate-bpf-objects
 generate-bpf-objects: generate-bpf-redirect-objects ## Generate all bpf object files
+
+.PHONY: generate-openssl-offsets
+generate-openssl-offsets: ## Generate OpenSSL struct offsets for OPENSSL_VERSIONS (default is openssl-3.6.2)
+	./tools/offsetgen/offsetgen.sh $(OPENSSL_VERSIONS) > internal/tls/openssl/offsets_gen.go
+	gofmt -w internal/tls/openssl/offsets_gen.go
 
 .PHONY: generate
 generate: generate-vmlinux generate-bpf-objects ## Generate vmlinux.h and bpf object files
