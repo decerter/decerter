@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+// the secrets object is generated for amd64 only (PT_REGS_*), other architectures get stub.go
+//go:build amd64
+
 package secrets
 
 import (
@@ -22,6 +25,11 @@ const (
 	StashSsl        bpf.BpfProgramName = 0 // value: "stash_ssl"
 	StoreSecrets    bpf.BpfProgramName = 1 // value: "store_secrets"
 )
+
+// the uprobe is built for this architecture, stub.go returns ErrUnsupportedArchitecture
+func CheckSupported() (err error) {
+	return
+}
 
 // sharedUidMap and sharedTgidMap share the redirect object's selection maps in run mode, so run and keylog mode pick processes the same way
 // in keylog mode they are nil, the secrets object owns uid_map and tgid_map and UpdateSelection fills them; with both empty no process is read

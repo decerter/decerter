@@ -305,7 +305,21 @@ func (app *App) StartFlowTable() {
 
 // resolve libssl, detect the OpenSSL version and pick the offsets, then load the secrets object; an unknown version fails here, so this runs before anything is attached
 // in run mode the redirect object has to be loaded already, the secrets object shares its uid_map and tgid_map; in keylog mode it owns them
+// on an architecture without the secrets object keylog mode fails, run mode goes on without TLS secrets
 func (app *App) LoadSecretsBpfObjects() (err error) {
+	err = secrets.CheckSupported()
+
+	if err != nil {
+		if app.keylog {
+			app.logger.Error("Could not load secrets uprobe", "error", err)
+			return
+		}
+
+		app.logger.Warn("Could not load secrets uprobe, running without TLS secrets", "error", err)
+		err = nil
+		return
+	}
+
 	libsslPath, libcryptoPath, findErr := openssl.FindLibssl(app.libssl)
 
 	if err = findErr; err != nil {
@@ -385,7 +399,12 @@ func (app *App) StartKeylog() {
 }
 
 // attach the entry and return uprobes to every libssl function that carries a complete handshake
+// nothing to attach when run mode goes on without the secrets object
 func (app *App) AttachSecrets() (err error) {
+	if app.secretsBpfPrograms == nil {
+		return
+	}
+
 	executable, openErr := attach.OpenExecutable(app.libssl)
 
 	if err = openErr; err != nil {

@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
+// the secrets object is generated for amd64 only (PT_REGS_*), other architectures get stub.go
+//go:build amd64
+
 package secrets
 
 import (
