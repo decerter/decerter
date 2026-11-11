@@ -14,6 +14,7 @@ import (
 
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/tls/openssl"
+	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
 )
 
@@ -45,6 +46,12 @@ func UpdateSelection(uids []uint32, tgids []uint32, bpfMaps map[bpf.BpfMapName]*
 // nothing to read without the uprobe
 func ReadKeyLog(ctx context.Context, eventMap *ebpf.Map, writer io.Writer, logger *slog.Logger) {
 	logger.Error("Could not read key log", "error", CheckSupported())
+}
+
+// no secrets without the uprobe
+func Lookup(clientRandom [32]byte, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (sessionSecrets tlsrecord.Secrets, found bool, err error) {
+	err = CheckSupported()
+	return
 }
 
 func SymbolHooks() (symbols []string) {

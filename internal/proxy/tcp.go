@@ -16,6 +16,7 @@ import (
 
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/bpf/redirect"
+	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
 )
@@ -54,7 +55,8 @@ func controlTCP(network, address string, rawConnection syscall.RawConn) (err err
 }
 
 // accept until the listener is closed by the context, every connection gets its own goroutine on waitGroup
-func ServeTCP(ctx context.Context, listener *net.TCPListener, bpfMaps map[bpf.BpfMapName]*ebpf.Map, waitGroup *sync.WaitGroup, logger *slog.Logger) {
+// secretsBpfMaps are the maps of the secrets object, with them the TLS flows are decrypted next to the relay and printed, nil relays every flow without a look inside
+func ServeTCP(ctx context.Context, listener *net.TCPListener, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, waitGroup *sync.WaitGroup, logger *slog.Logger) {
 	// listener closer
 	stop := context.AfterFunc(ctx, func() {
 		closeErr := listener.Close()
@@ -88,13 +90,13 @@ func ServeTCP(ctx context.Context, listener *net.TCPListener, bpfMaps map[bpf.Bp
 
 		// proxied tcp connection
 		waitGroup.Go(func() {
-			handleTCP(ctx, client, bpfMaps, logger)
+			handleTCP(ctx, client, bpfMaps, secretsBpfMaps, logger)
 		})
 	}
 }
 
 // look up the original destination of the client, dial it and copy both directions until both are done
-func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapName]*ebpf.Map, logger *slog.Logger) {
+func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, logger *slog.Logger) {
 	startTime := time.Now()
 	clientAddressPort := client.RemoteAddr().(*net.TCPAddr).AddrPort()
 	localAddressPort := client.LocalAddr().(*net.TCPAddr).AddrPort()
@@ -153,12 +155,32 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 		}
 	}()
 
-	upBytes, downBytes := pipeTCP(ctx, client, upstream, logger)
+	var observer *TLSObserver
+	observerGroup := sync.WaitGroup{}
+
+	if secretsBpfMaps != nil {
+		observer = NewTLSObserver(flow, clientAddressPort, secretsBpfMaps)
+
+		// tls observer of the flow, decrypts copies of the relayed bytes
+		observerGroup.Go(func() {
+			watchTLS(ctx, observer, logger)
+		})
+	}
+
+	upBytes, downBytes := pipeTCP(ctx, client, upstream, observer, logger)
+
+	// the records the observer still has are printed before the flow line
+	if observer != nil {
+		observer.Close()
+		observerGroup.Wait()
+	}
+
 	printFlow(flow, cmdline, clientAddressPort, strconv.FormatInt(upBytes, 10)+"B", strconv.FormatInt(downBytes, 10)+"B", time.Since(startTime))
 }
 
 // a FIN from one side is forwarded as CloseWrite and the other direction keeps running, an error or shutdown aborts both
-func pipeTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn, logger *slog.Logger) (upBytes int64, downBytes int64) {
+// observer gets a copy of both directions while it is active, nil relays without one
+func pipeTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn, observer *TLSObserver, logger *slog.Logger) (upBytes int64, downBytes int64) {
 	abortOnce := sync.Once{}
 	abort := func() {
 		abortOnce.Do(func() {
@@ -176,10 +198,10 @@ func pipeTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn, lo
 
 	// client to upstream
 	waitGroup.Go(func() {
-		upBytes = copyHalf(upstream, client, abort, logger.With("direction", "up"))
+		upBytes = copyHalf(upstream, client, tlsrecord.ClientDirection, observer, abort, logger.With("direction", "up"))
 	})
 
-	downBytes = copyHalf(client, upstream, abort, logger.With("direction", "down"))
+	downBytes = copyHalf(client, upstream, tlsrecord.ServerDirection, observer, abort, logger.With("direction", "down"))
 	waitGroup.Wait()
 	return
 }
@@ -193,8 +215,20 @@ func resetTCP(connection *net.TCPConn, logger *slog.Logger) {
 	}
 }
 
-func copyHalf(destination *net.TCPConn, source *net.TCPConn, abort func(), logger *slog.Logger) (written int64) {
-	written, copyErr := io.Copy(destination, source)
+func copyHalf(destination *net.TCPConn, source *net.TCPConn, direction tlsrecord.Direction, observer *TLSObserver, abort func(), logger *slog.Logger) (written int64) {
+	var copyErr error
+	isFinished := false
+
+	if observer != nil {
+		written, isFinished, copyErr = copyObserved(destination, source, direction, observer, logger)
+	}
+
+	// without an observer, and for the rest of a flow it gave up on, io.Copy splices the stream in the kernel
+	if (copyErr == nil) && !isFinished {
+		copied, restErr := io.Copy(destination, source)
+		written += copied
+		copyErr = restErr
+	}
 
 	if copyErr != nil {
 		logger.Debug("Could not copy tcp stream", "error", copyErr)
@@ -207,6 +241,37 @@ func copyHalf(destination *net.TCPConn, source *net.TCPConn, abort func(), logge
 	if closeErr != nil {
 		logger.Debug("Could not half-close tcp stream", "error", closeErr)
 		abort()
+	}
+
+	return
+}
+
+// copy through user space while the observer wants a copy, isFinished is true at the end of the stream and false when the observer stopped first
+// the observer gets its copy without waiting for it, so the relay is as fast as without one; the copy is handed over before the bytes go on, so the observer sees both directions in the order the peers do
+func copyObserved(destination *net.TCPConn, source *net.TCPConn, direction tlsrecord.Direction, observer *TLSObserver, logger *slog.Logger) (written int64, isFinished bool, err error) {
+	buffer := make([]byte, copyBufferLength)
+
+	for observer.Active() {
+		readCount, readErr := source.Read(buffer)
+
+		if readCount > 0 {
+			observer.Observe(direction, buffer[:readCount], logger)
+			writeCount, writeErr := destination.Write(buffer[:readCount])
+			written += int64(writeCount)
+
+			if err = writeErr; err != nil {
+				return
+			}
+		}
+
+		if errors.Is(readErr, io.EOF) {
+			isFinished = true
+			return
+		}
+
+		if err = readErr; err != nil {
+			return
+		}
 	}
 
 	return

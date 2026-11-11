@@ -26,6 +26,7 @@ var (
 	udpIdleTimeout time.Duration = 30 * time.Second
 	flowTable      bool
 	keylog         bool
+	decrypt        bool
 	libssl         string
 )
 
@@ -38,6 +39,7 @@ func main() {
 	flag.Func("udp-idle-timeout", "a udp session ends after this long without a datagram in either direction (default is 30s)", parseIdleTimeout)
 	flag.BoolVar(&flowTable, "flow-table", false, "print the flow_map table every 5 seconds, for debugging")
 	flag.BoolVar(&keylog, "keylog", false, "print the TLS secrets of the selected processes on stdout in NSS key log format until stopped, logs go to stderr; only the libssl secrets uprobe is attached, nothing is redirected (default is false)")
+	flag.BoolVar(&decrypt, "decrypt", false, "decrypt the TLS records of the redirected tcp flows with the secrets of the libssl uprobe and print the plaintext of the application data on stdout, escaped and at most 2048 bytes per record; the flows are relayed unchanged (default is false)")
 	flag.StringVar(&libssl, "libssl", "", "path of the libssl.so the secrets uprobe is attached to, libcrypto.so.3 is read from the same directory (default is the libssl.so.3 of the dynamic linker cache; a process that bundles or statically links its own libssl is not covered)")
 	flag.Parse()
 	err := run()
@@ -201,7 +203,7 @@ func run() (err error) {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	logger := slog.Default()
-	decerter := app.New(ctx, filter, proxyPort, udpIdleTimeout, flowTable, keylog, libssl, logger)
+	decerter := app.New(ctx, filter, proxyPort, udpIdleTimeout, flowTable, keylog, decrypt, libssl, logger)
 
 	defer func() {
 		err = errors.Join(err, decerter.Shutdown())

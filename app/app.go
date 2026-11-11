@@ -40,6 +40,7 @@ type App struct {
 	udpIdleTimeout      time.Duration
 	flowTable           bool
 	keylog              bool
+	decrypt             bool
 	libssl              string
 	logger              *slog.Logger
 	redirectBpfMaps     map[bpf.BpfMapName]*ebpf.Map
@@ -52,8 +53,9 @@ type App struct {
 }
 
 // keylog is the -keylog mode: load and attach only the secrets uprobe and print NSS key log lines, no redirect, proxy or route sync
+// decrypt is the -decrypt option of run mode: the proxy decrypts the TLS flows with the secrets of the uprobe and prints their plaintext
 // libssl overrides the resolved libssl path, empty means search the standard directories
-func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, libssl string, logger *slog.Logger) (app App) {
+func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, decrypt bool, libssl string, logger *slog.Logger) (app App) {
 	appCtx, cancel := context.WithCancel(ctx)
 	app = App{
 		ctx:                 appCtx,
@@ -64,6 +66,7 @@ func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleT
 		udpIdleTimeout:      udpIdleTimeout,
 		flowTable:           flowTable,
 		keylog:              keylog,
+		decrypt:             decrypt,
 		libssl:              libssl,
 		logger:              logger,
 		redirectBpfMaps:     nil,
@@ -205,9 +208,17 @@ func (app *App) StartProxy() (err error) {
 	app.tcpListener = listener
 	app.logger.Info("Tcp proxy listening", "address", listener.Addr().String(), "device", "lo")
 
+	// the proxy only looks into TLS flows when asked to, and it can't without the secrets object
+	var secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map
+
+	if app.decrypt && (app.secretsBpfMaps != nil) {
+		secretsBpfMaps = app.secretsBpfMaps
+		app.logger.Info("Decrypting tls flows of the tcp proxy")
+	}
+
 	// tcp proxy, closes the listener when the context is cancelled
 	app.waitGroup.Go(func() {
-		proxy.ServeTCP(app.ctx, app.tcpListener, app.redirectBpfMaps, app.waitGroup, app.logger)
+		proxy.ServeTCP(app.ctx, app.tcpListener, app.redirectBpfMaps, secretsBpfMaps, app.waitGroup, app.logger)
 	})
 
 	connection, udpListenErr := proxy.ListenUDP(app.ctx, app.proxyPort)

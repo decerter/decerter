@@ -20,6 +20,8 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/decerter/decerter/internal/bpf"
+	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
 )
@@ -120,13 +122,36 @@ func ReadKeyLog(ctx context.Context, eventMap *ebpf.Map, writer io.Writer, logge
 	}
 }
 
-// build the NSS key log lines of a session: CLIENT_RANDOM for TLS 1.2, the handshake and application traffic secrets for TLS 1.3
-func keyLogLines(secrets bpfTlsSecrets) (lines []string, err error) {
-	clientRandom := hex.EncodeToString(secrets.ClientRandom[:])
+// the secrets of a session by its client_random for the record layer, found is false until the uprobe has seen the complete secrets
+// run mode has no reader on the secrets ringbuf, the proxy asks here when a record needs its keys
+func Lookup(clientRandom [32]byte, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (sessionSecrets tlsrecord.Secrets, found bool, err error) {
+	key := bpfClientRandom{
+		Value: clientRandom,
+	}
+	var secrets bpfTlsSecrets
+	lookupErr := bpfMaps[SecretsMap].Lookup(&key, &secrets)
+
+	if errors.Is(lookupErr, ebpf.ErrKeyNotExist) {
+		return
+	}
+
+	if err = lookupErr; err != nil {
+		err = fmt.Errorf("lookup %s: %w", bpfMapSecretsMap, err)
+		return
+	}
+
+	sessionSecrets, err = recordSecrets(secrets)
+	found = err == nil
+	return
+}
+
+// the secrets the way the key log and the record layer take them: the TLS 1.3 secrets cut to the hash length of the suite and the handshake traffic secrets derived
+func recordSecrets(secrets bpfTlsSecrets) (sessionSecrets tlsrecord.Secrets, err error) {
+	sessionSecrets.Version = uint16(secrets.TlsVersion)
 
 	switch secrets.TlsVersion {
 	case tls12Version:
-		lines = []string{keyLogLine(clientRandomLabel, clientRandom, secrets.MasterKey[:])}
+		sessionSecrets.MasterKey = secrets.MasterKey[:]
 		return
 	case tls13Version:
 		hashLength, ok := hashLength(secrets.CipherId)
@@ -142,19 +167,39 @@ func keyLogLines(secrets bpfTlsSecrets) (lines []string, err error) {
 			newHash = sha512.New384
 		}
 
-		clientHandshake := expandLabel(secrets.HandshakeSecret[:hashLength], clientHandshakeDerive, secrets.HandshakeTrafficHash[:hashLength], hashLength, newHash)
-		serverHandshake := expandLabel(secrets.HandshakeSecret[:hashLength], serverHandshakeDerive, secrets.HandshakeTrafficHash[:hashLength], hashLength, newHash)
-		lines = []string{
-			keyLogLine(clientHandshakeLabel, clientRandom, clientHandshake),
-			keyLogLine(serverHandshakeLabel, clientRandom, serverHandshake),
-			keyLogLine(clientTrafficLabel, clientRandom, secrets.ClientAppTrafficSecret[:hashLength]),
-			keyLogLine(serverTrafficLabel, clientRandom, secrets.ServerAppTrafficSecret[:hashLength]),
-		}
+		sessionSecrets.ClientHandshakeTrafficSecret = expandLabel(secrets.HandshakeSecret[:hashLength], clientHandshakeDerive, secrets.HandshakeTrafficHash[:hashLength], hashLength, newHash)
+		sessionSecrets.ServerHandshakeTrafficSecret = expandLabel(secrets.HandshakeSecret[:hashLength], serverHandshakeDerive, secrets.HandshakeTrafficHash[:hashLength], hashLength, newHash)
+		sessionSecrets.ClientTrafficSecret = secrets.ClientAppTrafficSecret[:hashLength]
+		sessionSecrets.ServerTrafficSecret = secrets.ServerAppTrafficSecret[:hashLength]
 		return
 	default:
 		err = fmt.Errorf("%w: 0x%x", ErrUnknownTLSVersion, secrets.TlsVersion)
 		return
 	}
+}
+
+// build the NSS key log lines of a session: CLIENT_RANDOM for TLS 1.2, the handshake and application traffic secrets for TLS 1.3
+func keyLogLines(secrets bpfTlsSecrets) (lines []string, err error) {
+	sessionSecrets, secretsErr := recordSecrets(secrets)
+
+	if err = secretsErr; err != nil {
+		return
+	}
+
+	clientRandom := hex.EncodeToString(secrets.ClientRandom[:])
+
+	if sessionSecrets.Version == tlsrecord.VersionTLS12 {
+		lines = []string{keyLogLine(clientRandomLabel, clientRandom, sessionSecrets.MasterKey)}
+		return
+	}
+
+	lines = []string{
+		keyLogLine(clientHandshakeLabel, clientRandom, sessionSecrets.ClientHandshakeTrafficSecret),
+		keyLogLine(serverHandshakeLabel, clientRandom, sessionSecrets.ServerHandshakeTrafficSecret),
+		keyLogLine(clientTrafficLabel, clientRandom, sessionSecrets.ClientTrafficSecret),
+		keyLogLine(serverTrafficLabel, clientRandom, sessionSecrets.ServerTrafficSecret),
+	}
+	return
 }
 
 // one NSS key log line: "<label> <client_random hex> <secret hex>"
