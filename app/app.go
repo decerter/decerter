@@ -27,6 +27,8 @@ const (
 	routeSyncRetry    time.Duration = time.Second
 	// datagrams of a closed UDP socket can still wait in the proxy socket, its flow is removed this long after the close
 	udpReleaseDelay time.Duration = 2 * time.Second
+	// how often released UDP flows are looked for, a flow lives at most udpReleaseDelay + udpReleaseSweep after the close
+	udpReleaseSweep time.Duration = time.Second
 )
 
 type App struct {
@@ -76,7 +78,7 @@ func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleT
 }
 
 func (app *App) LoadBpfObjects() (err error) {
-	bpfMaps, bpfPrograms, closeFunction, loadErr := redirect.LoadBpfObjects(app.proxyPort, uint32(os.Getpid()), udpReleaseDelay)
+	bpfMaps, bpfPrograms, closeFunction, loadErr := redirect.LoadBpfObjects(app.proxyPort, uint32(os.Getpid()))
 
 	if err = loadErr; err != nil {
 		app.logger.Error("Could not load redirect bpf objects", "error", err)
@@ -258,6 +260,35 @@ func (app *App) AttachRedirect() (err error) {
 
 	app.logger.Info("Redirecting flows", "cgroup", attach.CgroupRoot, "uids", app.filter.UIDs, "pids", app.filter.Tgids, "destinationCidrs", app.filter.DestinationCIDRs, "destinationPorts", app.filter.DestinationPorts, "proxyPort", app.proxyPort)
 	return
+}
+
+// sock_release only marks a released redirected UDP flow, this removes it and its client_map entry udpReleaseDelay later
+// started before AttachRedirect, so no released flow is missed
+func (app *App) StartReleaseSweep() {
+	// released udp flow remover
+	app.waitGroup.Go(func() {
+		app.watchReleasedFlows()
+	})
+}
+
+// a failed sweep is retried with the next tick, the flows stay marked
+func (app *App) watchReleasedFlows() {
+	ticker := time.NewTicker(udpReleaseSweep)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-app.ctx.Done():
+			app.logger.Debug("Context cancelled")
+			return
+		case <-ticker.C:
+			forgetErr := redirect.ForgetReleasedFlows(udpReleaseDelay, app.redirectBpfMaps)
+
+			if forgetErr != nil {
+				app.logger.Warn("Could not remove released udp flows", "error", forgetErr)
+			}
+		}
+	}
 }
 
 // for debugging: the flow_map table, also shows the learned client endpoint of udp flows

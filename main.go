@@ -271,6 +271,7 @@ func run() (err error) {
 		return
 	}
 
+	decerter.StartReleaseSweep()
 	err = decerter.AttachRedirect()
 
 	if err != nil {

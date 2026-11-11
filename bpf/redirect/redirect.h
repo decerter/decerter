@@ -22,9 +22,6 @@
 #define ETH_P_IP		0x0800
 #define ETH_P_IPV6		0x86DD
 
-//clock of bpf_timer_init missing from vmlinux.h
-#define CLOCK_MONOTONIC	1
-
 //check return values
 #define OK				0
 #define NOK				1
@@ -54,14 +51,6 @@ volatile const uint32_t proxy_tgid = 0;
 
 //Value: port of the TCP listener and the UDP socket of the proxy on lo in host byte order, set from Go before load
 volatile const uint16_t proxy_port = 0;
-
-//Value: nanoseconds the flow of a released UDP socket is kept, so datagrams still queued at the proxy can be looked up, set from Go before load
-volatile const uint64_t release_delay_ns = 0;
-
-//timer that removes the flow of a released UDP socket after release_delay_ns
-struct release {
-	struct bpf_timer timer;
-};
 
 //source and destination of a UDP packet, IPv4 stored IPv4-mapped like in struct endpoint
 struct packet_info {
@@ -133,14 +122,6 @@ struct {
 	__type(key, struct endpoint);
 	__type(value, uint64_t);
 } client_map SEC(".maps");
-
-//Key: socket cookie of a released UDP socket, Value: timer that removes its flow_map and client_map entries
-struct {
-	__uint(type, BPF_MAP_TYPE_HASH);
-	__uint(max_entries, 65535);
-	__type(key, uint64_t);
-	__type(value, struct release);
-} release_map SEC(".maps");
 
 //Check if the process is selected: its uid is in uid_map or its tgid in tgid_map, decerter itself never is
 bool is_selected_process(uint32_t tgid, uint32_t uid)
@@ -752,46 +733,7 @@ uint16_t save_udp_client(struct __sk_buff *skb)
 	return OK;
 }
 
-//Remove the flow_map entry of a UDP socket and its client_map entry if no newer socket took the client endpoint over
-uint16_t forget_udp_flow(uint64_t cookie)
-{
-	struct flow *flow = bpf_map_lookup_elem(&flow_map, &cookie);
-
-	if (!flow)
-	{
-		return OK;
-	}
-
-	struct endpoint client = flow->client;
-	uint64_t *client_cookie = bpf_map_lookup_elem(&client_map, &client);
-
-	if ((client_cookie) && (*client_cookie == cookie))
-	{
-		bpf_map_delete_elem(&client_map, &client);
-	}
-
-	bpf_map_delete_elem(&flow_map, &cookie);
-
-	return OK;
-}
-
-//Remove the flows of a released UDP socket when its timer fires, static because a timer callback can't be a global function
-static int forget_released_flow(void *map, uint64_t *cookie, struct release *release)
-{
-	if (!cookie)
-	{
-		return 0;
-	}
-
-	uint64_t released_cookie = *cookie;
-
-	forget_udp_flow(released_cookie);
-	bpf_map_delete_elem(&release_map, &released_cookie);
-
-	return 0;
-}
-
-//Remove the flow of a released socket: recorded only at once, redirected UDP after release_delay_ns because datagrams it sent can still wait in the proxy socket
+//Remove the flow of a released socket: recorded only at once, redirected UDP is only marked released because datagrams it sent can still wait in the proxy socket, Go removes it later
 uint16_t release_flow(struct bpf_sock *sk)
 {
 	if (!sk)
@@ -822,31 +764,8 @@ uint16_t release_flow(struct bpf_sock *sk)
 		return OK;
 	}
 
-	struct release new_release = {};
-
-	if (bpf_map_update_elem(&release_map, &cookie, &new_release, BPF_NOEXIST) != 0)
-	{
-		//release_map full: forget at once, a datagram still queued at the proxy is dropped
-		return forget_udp_flow(cookie);
-	}
-
-	struct release *release = bpf_map_lookup_elem(&release_map, &cookie);
-
-	if (!release)
-	{
-		return forget_udp_flow(cookie);
-	}
-
-	if ((bpf_timer_init(&release->timer, &release_map, CLOCK_MONOTONIC) != 0) || (bpf_timer_set_callback(&release->timer, forget_released_flow) != 0) || (bpf_timer_start(&release->timer, release_delay_ns, 0) != 0))
-	{
-#ifdef DEBUG
-		bpf_printk("sock_release === release_flow timer start failed");
-#endif
-
-		bpf_map_delete_elem(&release_map, &cookie);
-
-		return forget_udp_flow(cookie);
-	}
+	//no bpf_timer: its callback panics kernels with kCFI (Android 15, 6.6), Go removes the flow_map and client_map entries a grace time after released_ns
+	flow->released_ns = bpf_ktime_get_ns();
 
 	return OK;
 }

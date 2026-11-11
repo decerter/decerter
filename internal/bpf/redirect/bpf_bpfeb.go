@@ -41,6 +41,7 @@ type bpfFlow struct {
 	Comm       [16]int8
 	Client     bpfEndpoint
 	Pad32End   uint32
+	ReleasedNs uint64
 }
 
 type bpfPortKey struct {
@@ -56,14 +57,6 @@ type bpfPrefixKey struct {
 	Ip        [4]uint32
 }
 
-type bpfRelease struct {
-	_     structs.HostLayout
-	Timer struct {
-		_      structs.HostLayout
-		Opaque [2]uint64
-	}
-}
-
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
@@ -73,7 +66,6 @@ const (
 	bpfMapFilterMap             = "filter_map"
 	bpfMapFlowMap               = "flow_map"
 	bpfMapPortMap               = "port_map"
-	bpfMapReleaseMap            = "release_map"
 	bpfMapRouteMap              = "route_map"
 	bpfMapTgidMap               = "tgid_map"
 	bpfMapUidMap                = "uid_map"
@@ -90,7 +82,6 @@ const (
 	bpfProgRestoreRecvmsg6      = "restore_recvmsg6"
 	bpfVarProxyPort             = "proxy_port"
 	bpfVarProxyTgid             = "proxy_tgid"
-	bpfVarReleaseDelayNs        = "release_delay_ns"
 )
 
 // loadBpf returns the embedded CollectionSpec for bpf.
@@ -152,24 +143,22 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	CidrMap    *ebpf.MapSpec `ebpf:"cidr_map"`
-	ClientMap  *ebpf.MapSpec `ebpf:"client_map"`
-	FilterMap  *ebpf.MapSpec `ebpf:"filter_map"`
-	FlowMap    *ebpf.MapSpec `ebpf:"flow_map"`
-	PortMap    *ebpf.MapSpec `ebpf:"port_map"`
-	ReleaseMap *ebpf.MapSpec `ebpf:"release_map"`
-	RouteMap   *ebpf.MapSpec `ebpf:"route_map"`
-	TgidMap    *ebpf.MapSpec `ebpf:"tgid_map"`
-	UidMap     *ebpf.MapSpec `ebpf:"uid_map"`
+	CidrMap   *ebpf.MapSpec `ebpf:"cidr_map"`
+	ClientMap *ebpf.MapSpec `ebpf:"client_map"`
+	FilterMap *ebpf.MapSpec `ebpf:"filter_map"`
+	FlowMap   *ebpf.MapSpec `ebpf:"flow_map"`
+	PortMap   *ebpf.MapSpec `ebpf:"port_map"`
+	RouteMap  *ebpf.MapSpec `ebpf:"route_map"`
+	TgidMap   *ebpf.MapSpec `ebpf:"tgid_map"`
+	UidMap    *ebpf.MapSpec `ebpf:"uid_map"`
 }
 
 // bpfVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfVariableSpecs struct {
-	ProxyPort      *ebpf.VariableSpec `ebpf:"proxy_port"`
-	ProxyTgid      *ebpf.VariableSpec `ebpf:"proxy_tgid"`
-	ReleaseDelayNs *ebpf.VariableSpec `ebpf:"release_delay_ns"`
+	ProxyPort *ebpf.VariableSpec `ebpf:"proxy_port"`
+	ProxyTgid *ebpf.VariableSpec `ebpf:"proxy_tgid"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -192,15 +181,14 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	CidrMap    *ebpf.Map `ebpf:"cidr_map"`
-	ClientMap  *ebpf.Map `ebpf:"client_map"`
-	FilterMap  *ebpf.Map `ebpf:"filter_map"`
-	FlowMap    *ebpf.Map `ebpf:"flow_map"`
-	PortMap    *ebpf.Map `ebpf:"port_map"`
-	ReleaseMap *ebpf.Map `ebpf:"release_map"`
-	RouteMap   *ebpf.Map `ebpf:"route_map"`
-	TgidMap    *ebpf.Map `ebpf:"tgid_map"`
-	UidMap     *ebpf.Map `ebpf:"uid_map"`
+	CidrMap   *ebpf.Map `ebpf:"cidr_map"`
+	ClientMap *ebpf.Map `ebpf:"client_map"`
+	FilterMap *ebpf.Map `ebpf:"filter_map"`
+	FlowMap   *ebpf.Map `ebpf:"flow_map"`
+	PortMap   *ebpf.Map `ebpf:"port_map"`
+	RouteMap  *ebpf.Map `ebpf:"route_map"`
+	TgidMap   *ebpf.Map `ebpf:"tgid_map"`
+	UidMap    *ebpf.Map `ebpf:"uid_map"`
 }
 
 func (m *bpfMaps) Close() error {
@@ -210,7 +198,6 @@ func (m *bpfMaps) Close() error {
 		m.FilterMap,
 		m.FlowMap,
 		m.PortMap,
-		m.ReleaseMap,
 		m.RouteMap,
 		m.TgidMap,
 		m.UidMap,
@@ -221,9 +208,8 @@ func (m *bpfMaps) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfVariables struct {
-	ProxyPort      *ebpf.Variable `ebpf:"proxy_port"`
-	ProxyTgid      *ebpf.Variable `ebpf:"proxy_tgid"`
-	ReleaseDelayNs *ebpf.Variable `ebpf:"release_delay_ns"`
+	ProxyPort *ebpf.Variable `ebpf:"proxy_port"`
+	ProxyTgid *ebpf.Variable `ebpf:"proxy_tgid"`
 }
 
 // bpfPrograms contains all programs after they have been loaded into the kernel.

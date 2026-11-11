@@ -6,6 +6,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"maps"
 	"net/netip"
@@ -17,6 +18,7 @@ import (
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
+	"golang.org/x/sys/unix"
 )
 
 //go:generate go tool bpf2go -tags linux -cflags "-O2 -g -Wall -Werror -fms-extensions -Wno-microsoft-anon-tag -mcpu=v4 $BPF_CFLAGS" bpf ../../../bpf/redirect/redirect.c -- -I../../../bpf -I../../../bpf/include
@@ -27,10 +29,9 @@ const (
 	FilterMap            bpf.BpfMapName     = 2  // value: "filter_map"
 	FlowMap              bpf.BpfMapName     = 3  // value: "flow_map"
 	PortMap              bpf.BpfMapName     = 4  // value: "port_map"
-	ReleaseMap           bpf.BpfMapName     = 5  // value: "release_map"
-	RouteMap             bpf.BpfMapName     = 6  // value: "route_map"
-	TgidMap              bpf.BpfMapName     = 7  // value: "tgid_map"
-	UidMap               bpf.BpfMapName     = 8  // value: "uid_map"
+	RouteMap             bpf.BpfMapName     = 5  // value: "route_map"
+	TgidMap              bpf.BpfMapName     = 6  // value: "tgid_map"
+	UidMap               bpf.BpfMapName     = 7  // value: "uid_map"
 	ClientSockops        bpf.BpfProgramName = 0  // value: "client_sockops"
 	ForgetReleasedSocket bpf.BpfProgramName = 1  // value: "forget_released_socket"
 	LearnUdpClient       bpf.BpfProgramName = 2  // value: "learn_udp_client"
@@ -44,7 +45,7 @@ const (
 	RestoreRecvmsg6      bpf.BpfProgramName = 10 // value: "restore_recvmsg6"
 )
 
-func LoadBpfObjects(proxyPort uint16, proxyTgid uint32, releaseDelay time.Duration) (bpfMaps map[bpf.BpfMapName]*ebpf.Map, bpfPrograms map[bpf.BpfProgramName]*ebpf.Program, closeFunction func() error, err error) {
+func LoadBpfObjects(proxyPort uint16, proxyTgid uint32) (bpfMaps map[bpf.BpfMapName]*ebpf.Map, bpfPrograms map[bpf.BpfProgramName]*ebpf.Program, closeFunction func() error, err error) {
 	err = rlimit.RemoveMemlock()
 
 	if err != nil {
@@ -61,9 +62,8 @@ func LoadBpfObjects(proxyPort uint16, proxyTgid uint32, releaseDelay time.Durati
 
 	// load-time constants have to be set before the programs are loaded
 	variables := map[string]any{
-		bpfVarProxyTgid:      proxyTgid,
-		bpfVarProxyPort:      proxyPort,
-		bpfVarReleaseDelayNs: uint64(releaseDelay.Nanoseconds()),
+		bpfVarProxyTgid: proxyTgid,
+		bpfVarProxyPort: proxyPort,
 	}
 
 	for name, value := range variables {
@@ -84,15 +84,14 @@ func LoadBpfObjects(proxyPort uint16, proxyTgid uint32, releaseDelay time.Durati
 	}
 
 	bpfMaps = map[bpf.BpfMapName]*ebpf.Map{
-		CidrMap:    objs.CidrMap,
-		ClientMap:  objs.ClientMap,
-		FilterMap:  objs.FilterMap,
-		FlowMap:    objs.FlowMap,
-		PortMap:    objs.PortMap,
-		ReleaseMap: objs.ReleaseMap,
-		RouteMap:   objs.RouteMap,
-		TgidMap:    objs.TgidMap,
-		UidMap:     objs.UidMap,
+		CidrMap:   objs.CidrMap,
+		ClientMap: objs.ClientMap,
+		FilterMap: objs.FilterMap,
+		FlowMap:   objs.FlowMap,
+		PortMap:   objs.PortMap,
+		RouteMap:  objs.RouteMap,
+		TgidMap:   objs.TgidMap,
+		UidMap:    objs.UidMap,
 	}
 	bpfPrograms = map[bpf.BpfProgramName]*ebpf.Program{
 		ClientSockops:        objs.ClientSockops,
@@ -249,6 +248,96 @@ func FlowByClient(clientAddressPort netip.AddrPort, ipProtocol uint8, bpfMaps ma
 	}
 
 	flow = flowFromBpf(bpfFlow)
+	return
+}
+
+// sock_release only marks a redirected UDP flow released, a bpf_timer callback panics kernels with kCFI (Android 15)
+// the flow is kept releaseDelay after the close, because datagrams the socket sent before can still wait in the proxy socket and need it
+func ForgetReleasedFlows(releaseDelay time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (err error) {
+	var (
+		cookie  uint64
+		bpfFlow bpfFlow
+		now     unix.Timespec
+	)
+
+	// released_ns is bpf_ktime_get_ns, which is CLOCK_MONOTONIC
+	err = unix.ClockGettime(unix.CLOCK_MONOTONIC, &now)
+
+	if err != nil {
+		err = fmt.Errorf("read monotonic clock: %w", err)
+		return
+	}
+
+	// collected first, deleting while iterating can restart the iteration
+	releasedClients := map[uint64]bpfEndpoint{}
+	iterator := bpfMaps[FlowMap].Iterate()
+
+	for iterator.Next(&cookie, &bpfFlow) {
+		if (bpfFlow.ReleasedNs != 0) && (now.Nano()-int64(bpfFlow.ReleasedNs) >= releaseDelay.Nanoseconds()) {
+			releasedClients[cookie] = bpfFlow.Client
+		}
+	}
+
+	err = iterator.Err()
+
+	if err != nil {
+		err = fmt.Errorf("iterate %s: %w", bpfMapFlowMap, err)
+		return
+	}
+
+	for releasedCookie, client := range releasedClients {
+		err = forgetUDPFlow(releasedCookie, client, bpfMaps)
+
+		if err != nil {
+			return
+		}
+	}
+
+	return
+}
+
+// remove the flow_map entry and the client_map entry of a released UDP socket, a client endpoint with port 0 was never learned
+// the client entry is taken out with one lookup and delete and put back when a newer socket on the same client port owns it by now, a lookup then delete could remove an entry written in between for good
+func forgetUDPFlow(cookie uint64, client bpfEndpoint, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (err error) {
+	var clientCookie uint64
+
+	if client.Port != 0 {
+		err = bpfMaps[ClientMap].LookupAndDelete(client, &clientCookie)
+
+		switch {
+		case errors.Is(err, ebpf.ErrKeyNotExist):
+			err = nil
+		case err != nil:
+			err = fmt.Errorf("lookup and delete %s cookie %d: %w", bpfMapClientMap, cookie, err)
+			return
+		case clientCookie != cookie:
+			// the newer socket can have written its entry again in between, that one is newer still and stays
+			err = bpfMaps[ClientMap].Update(client, clientCookie, ebpf.UpdateNoExist)
+
+			if errors.Is(err, ebpf.ErrKeyExist) {
+				err = nil
+			}
+
+			if err != nil {
+				err = fmt.Errorf("restore %s cookie %d: %w", bpfMapClientMap, clientCookie, err)
+				return
+			}
+		default:
+		}
+	}
+
+	err = bpfMaps[FlowMap].Delete(cookie)
+
+	// LRU can have evicted it already
+	if errors.Is(err, ebpf.ErrKeyNotExist) {
+		err = nil
+	}
+
+	if err != nil {
+		err = fmt.Errorf("delete %s cookie %d: %w", bpfMapFlowMap, cookie, err)
+		return
+	}
+
 	return
 }
 

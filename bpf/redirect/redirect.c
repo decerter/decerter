@@ -160,7 +160,7 @@ int learn_udp_client(struct __sk_buff *skb)
 	}
 }
 
-//Remove the map entries of a closed socket that sockops doesn't remove: recorded only flows and redirected UDP, which has no TCP_CLOSE state callback
+//Remove the flow of a closed recorded only socket at once and mark a redirected UDP flow released for Go to remove later, redirected TCP is left to sockops at TCP_CLOSE
 SEC("cgroup/sock_release")
 int forget_released_socket(struct bpf_sock *sk)
 {

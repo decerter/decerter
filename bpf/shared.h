@@ -37,6 +37,7 @@ struct prefix_key {
 //redirected: 1 if the destination was rewritten to the proxy, 0 if the flow is only recorded
 //comm: name of the process (thread group leader) at connect/sendmsg time, NUL terminated
 //client: source endpoint of a redirected UDP socket as the proxy sees it, learned from its first datagram to the proxy, zero for TCP (sockops keeps it in client_map only)
+//released_ns: bpf_ktime_get_ns() (CLOCK_MONOTONIC) when a redirected UDP socket was released, 0 while it is open, Go removes the flow a grace time later
 struct flow {
 	uint32_t ip[4];
 	uint16_t port;
@@ -49,4 +50,5 @@ struct flow {
 	char comm[TASK_COMM_LEN];
 	struct endpoint client;
 	uint32_t pad32_end;
+	uint64_t released_ns;
 };
