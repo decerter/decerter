@@ -1,3 +1,4 @@
 bpf/vmlinux.h
 decerter
 decerter-debug
+decerter-arm64

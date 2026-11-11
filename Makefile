@@ -50,6 +50,10 @@ generate: generate-vmlinux generate-bpf-objects ## Generate vmlinux.h and bpf ob
 build: ## Run static go build from the committed bpf objects
 	CGO_ENABLED=0 go build -trimpath -tags netgo,osusergo -ldflags="-s -w -buildid=" -o decerter .
 
+.PHONY: build-arm64
+build-arm64: ## Run static go build for linux/arm64 from the committed bpf objects, the binary for Android devices is decerter-arm64
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -tags netgo,osusergo -ldflags="-s -w -buildid=" -o decerter-arm64 .
+
 .PHONY: run
 run: build ## Run decerter with sudo
 	sudo ./decerter $(ARGS)
