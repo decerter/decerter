@@ -39,8 +39,8 @@ generate-bpf-objects: generate-bpf-redirect-objects ## Generate all bpf object f
 
 .PHONY: generate-openssl-offsets
 generate-openssl-offsets: ## Generate OpenSSL struct offsets for OPENSSL_VERSIONS (default is openssl-3.6.2)
-	./tools/offsetgen/offsetgen.sh $(OPENSSL_VERSIONS) > internal/tls/openssl/offsets_gen.go
-	gofmt -w internal/tls/openssl/offsets_gen.go
+	tmp="$$(mktemp)"; \
+	./tools/offsetgen/offsetgen.sh $(OPENSSL_VERSIONS) > "$$tmp" && gofmt -w "$$tmp" && mv "$$tmp" internal/tls/openssl/offsets_gen.go || { rm -f "$$tmp"; exit 1; }
 
 .PHONY: generate
 generate: generate-vmlinux generate-bpf-objects ## Generate vmlinux.h and bpf object files
