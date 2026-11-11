@@ -15,8 +15,10 @@ import (
 	"github.com/decerter/decerter/internal/attach"
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/bpf/redirect"
+	"github.com/decerter/decerter/internal/bpf/secrets"
 	"github.com/decerter/decerter/internal/proxy"
 	"github.com/decerter/decerter/internal/route"
+	"github.com/decerter/decerter/internal/tls/openssl"
 	"github.com/cilium/ebpf"
 )
 
@@ -35,15 +37,21 @@ type App struct {
 	proxyPort           uint16
 	udpIdleTimeout      time.Duration
 	flowTable           bool
+	keylog              bool
+	libssl              string
 	logger              *slog.Logger
 	redirectBpfMaps     map[bpf.BpfMapName]*ebpf.Map
 	redirectBpfPrograms map[bpf.BpfProgramName]*ebpf.Program
+	secretsBpfMaps      map[bpf.BpfMapName]*ebpf.Map
+	secretsBpfPrograms  map[bpf.BpfProgramName]*ebpf.Program
 	tcpListener         *net.TCPListener
 	udpConnection       *net.UDPConn
 	closeFunctions      [](func() error)
 }
 
-func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, logger *slog.Logger) (app App) {
+// keylog is the -keylog mode: load and attach only the secrets uprobe and print NSS key log lines, no redirect, proxy or route sync
+// libssl overrides the resolved libssl path, empty means search the standard directories
+func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, libssl string, logger *slog.Logger) (app App) {
 	appCtx, cancel := context.WithCancel(ctx)
 	app = App{
 		ctx:                 appCtx,
@@ -53,9 +61,13 @@ func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleT
 		proxyPort:           proxyPort,
 		udpIdleTimeout:      udpIdleTimeout,
 		flowTable:           flowTable,
+		keylog:              keylog,
+		libssl:              libssl,
 		logger:              logger,
 		redirectBpfMaps:     nil,
 		redirectBpfPrograms: nil,
+		secretsBpfMaps:      nil,
+		secretsBpfPrograms:  nil,
 		tcpListener:         nil,
 		udpConnection:       nil,
 		closeFunctions:      [](func() error){},
@@ -258,6 +270,121 @@ func (app *App) StartFlowTable() {
 	app.waitGroup.Go(func() {
 		redirect.Read(app.ctx, app.redirectBpfMaps[redirect.FlowMap])
 	})
+}
+
+// resolve libssl, detect the OpenSSL version and pick the offsets, then load the secrets object; an unknown version fails here, so this runs before anything is attached
+// in run mode the redirect object has to be loaded already, the secrets object shares its uid_map and tgid_map; in keylog mode it owns them
+func (app *App) LoadSecretsBpfObjects() (err error) {
+	libsslPath, libcryptoPath, findErr := openssl.FindLibssl(app.libssl)
+
+	if err = findErr; err != nil {
+		app.logger.Error("Could not find libssl", "error", err)
+		return
+	}
+
+	version, versionErr := openssl.DetectVersion(libcryptoPath)
+
+	if err = versionErr; err != nil {
+		app.logger.Error("Could not detect OpenSSL version", "error", err, "libcrypto", libcryptoPath)
+		return
+	}
+
+	offset, offsetErr := openssl.GetOffset(version)
+
+	if err = offsetErr; err != nil {
+		app.logger.Error("Could not get OpenSSL offsets", "error", err, "version", version)
+		return
+	}
+
+	app.libssl = libsslPath
+
+	var sharedUidMap, sharedTgidMap *ebpf.Map
+
+	// run mode shares the redirect object's selection maps so the same -uid and -pid select the flows and the secrets
+	if !app.keylog {
+		sharedUidMap = app.redirectBpfMaps[redirect.UidMap]
+		sharedTgidMap = app.redirectBpfMaps[redirect.TgidMap]
+	}
+
+	bpfMaps, bpfPrograms, closeFunction, loadErr := secrets.LoadBpfObjects(offset, uint32(os.Getpid()), sharedUidMap, sharedTgidMap)
+
+	if err = loadErr; err != nil {
+		app.logger.Error("Could not load secrets bpf objects", "error", err)
+		return
+	}
+
+	app.secretsBpfMaps = bpfMaps
+	app.secretsBpfPrograms = bpfPrograms
+	app.closeFunctions = append(app.closeFunctions, closeFunction)
+	app.logger.Info("Loaded secrets uprobe", "libssl", libsslPath, "version", version)
+	return
+}
+
+// keylog mode fills the secrets object's own uid_map and tgid_map; run mode shares the redirect's maps, which are already filled, and skips this
+func (app *App) UpdateSecretsSelection() (err error) {
+	if !app.keylog {
+		return
+	}
+
+	err = secrets.UpdateSelection(app.filter.UIDs, app.filter.Tgids, app.secretsBpfMaps)
+
+	if err != nil {
+		app.logger.Error("Could not update secrets selection maps", "error", err)
+		return
+	}
+
+	// an empty selection reads nothing, warn like the redirect does
+	if (len(app.filter.UIDs) == 0) && (len(app.filter.Tgids) == 0) {
+		app.logger.Warn("No uid or pid given, no secret will be read")
+	}
+
+	return
+}
+
+// the key log reader is started before the uprobe is attached so no session is missed
+func (app *App) StartKeylog() {
+	if !app.keylog {
+		return
+	}
+
+	// secrets key log printer, writes NSS key log lines to stdout
+	app.waitGroup.Go(func() {
+		secrets.ReadKeyLog(app.ctx, app.secretsBpfMaps[secrets.SecretsEventMap], os.Stdout, app.logger)
+	})
+}
+
+// attach the entry and return uprobes to every libssl function that carries a complete handshake
+func (app *App) AttachSecrets() (err error) {
+	executable, openErr := attach.OpenExecutable(app.libssl)
+
+	if err = openErr; err != nil {
+		app.logger.Error("Could not open libssl", "error", err, "libssl", app.libssl)
+		return
+	}
+
+	attachments := []struct {
+		program  bpf.BpfProgramName
+		isReturn bool
+	}{
+		{program: secrets.StashSsl, isReturn: false},
+		{program: secrets.StoreSecrets, isReturn: true},
+	}
+
+	for _, symbol := range secrets.SymbolHooks() {
+		for _, attachment := range attachments {
+			closeFunction, attachErr := attach.AddUprobe(executable, symbol, app.secretsBpfPrograms[attachment.program], attachment.isReturn)
+
+			if err = attachErr; err != nil {
+				app.logger.Error("Could not attach secrets uprobe", "error", err, "symbol", symbol, "return", attachment.isReturn)
+				return
+			}
+
+			app.closeFunctions = append(app.closeFunctions, closeFunction)
+		}
+	}
+
+	app.logger.Info("Attached secrets uprobe", "libssl", app.libssl, "symbols", secrets.SymbolHooks(), "uids", app.filter.UIDs, "pids", app.filter.Tgids)
+	return
 }
 
 // links are closed before the objects, in reverse order of creation

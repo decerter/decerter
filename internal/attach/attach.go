@@ -28,3 +28,37 @@ func AddCgroup(cgroupPath string, program *ebpf.Program, attachType ebpf.AttachT
 	closeFunction = cgroupLink.Close
 	return
 }
+
+// open the executable or shared library the uprobes attach to, one handle serves many symbol attaches
+func OpenExecutable(path string) (executable *link.Executable, err error) {
+	executable, openErr := link.OpenExecutable(path)
+
+	if err = openErr; err != nil {
+		err = fmt.Errorf("%w: %s: %w", ErrOpenExecutable, path, err)
+		return
+	}
+
+	return
+}
+
+// attach program to the entry (isReturn false) or the return (isReturn true) of symbol in executable
+func AddUprobe(executable *link.Executable, symbol string, program *ebpf.Program, isReturn bool) (closeFunction func() error, err error) {
+	var (
+		uprobeLink link.Link
+		attachErr  error
+	)
+
+	if isReturn {
+		uprobeLink, attachErr = executable.Uretprobe(symbol, program, nil)
+	} else {
+		uprobeLink, attachErr = executable.Uprobe(symbol, program, nil)
+	}
+
+	if err = attachErr; err != nil {
+		err = fmt.Errorf("%w: %s return=%t: %w", ErrAttach, symbol, isReturn, attachErr)
+		return
+	}
+
+	closeFunction = uprobeLink.Close
+	return
+}

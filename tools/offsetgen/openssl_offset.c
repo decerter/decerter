@@ -22,6 +22,10 @@ int main(void)
 	printf("\t\tMasterKeyLength:        0x%zx,\n", offsetof(SSL_SESSION, master_key_length));
 	printf("\t\tClientAppTrafficSecret: 0x%zx,\n", offsetof(SSL_CONNECTION, client_app_traffic_secret));
 	printf("\t\tServerAppTrafficSecret: 0x%zx,\n", offsetof(SSL_CONNECTION, server_app_traffic_secret));
+	printf("\t\tHandshakeSecret:        0x%zx,\n", offsetof(SSL_CONNECTION, handshake_secret));
+	printf("\t\tHandshakeTrafficHash:   0x%zx,\n", offsetof(SSL_CONNECTION, handshake_traffic_hash));
+	printf("\t\tSessionCipher:          0x%zx,\n", offsetof(SSL_SESSION, cipher));
+	printf("\t\tCipherId:               0x%zx,\n", offsetof(SSL_CIPHER, id));
 	printf("\t\tSSLConnection:          0x%zx,\n", offsetof(SSL_CONNECTION, ssl));
 	printf("\t},\n");
 

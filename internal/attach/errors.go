@@ -7,5 +7,6 @@ import (
 )
 
 var (
-	ErrAttach = errors.New("could not attach bpf program")
+	ErrAttach         = errors.New("could not attach bpf program")
+	ErrOpenExecutable = errors.New("could not open executable")
 )

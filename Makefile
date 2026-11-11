@@ -34,8 +34,12 @@ generate-libbpf-headers: ## Vendor libbpf headers of LIBBPF_VERSION into bpf/inc
 generate-bpf-redirect-objects: ## Generate bpf redirect object files
 	BPF_CFLAGS="$(BPF_CFLAGS)" go generate ./internal/bpf/redirect
 
+.PHONY: generate-bpf-secrets-objects
+generate-bpf-secrets-objects: ## Generate bpf secrets object files
+	BPF_CFLAGS="$(BPF_CFLAGS)" go generate ./internal/bpf/secrets
+
 .PHONY: generate-bpf-objects
-generate-bpf-objects: generate-bpf-redirect-objects ## Generate all bpf object files
+generate-bpf-objects: generate-bpf-redirect-objects generate-bpf-secrets-objects ## Generate all bpf object files
 
 .PHONY: generate-openssl-offsets
 generate-openssl-offsets: ## Generate OpenSSL struct offsets for OPENSSL_VERSIONS (default is openssl-3.6.2)

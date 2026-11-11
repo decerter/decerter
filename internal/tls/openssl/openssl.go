@@ -13,13 +13,18 @@ import (
 var versionRegexp = regexp.MustCompile(`OpenSSL (\d+\.\d+\.\d+)`)
 
 // Offset holds the per-version, per-architecture struct offsets the secrets
-// uprobe reads. Version, ClientRandom, Session and the traffic secrets are
-// offsets into SSL_CONNECTION; MasterKey and MasterKeyLength are offsets into
-// SSL_SESSION. Type is the SSL type field (SSL_TYPE_SSL_CONNECTION vs the QUIC
-// types) and sits inside the embedded ssl_st base. SSLConnection is the delta
-// from the SSL * the public API hands out to the SSL_CONNECTION: subtract it
-// from the SSL * before applying the other offsets. For OpenSSL >= 3.2 the
-// embedded base is the first member, so the delta is zero.
+// uprobe reads. Version, ClientRandom, Session, the traffic secrets, the
+// handshake secret and the handshake traffic hash are offsets into
+// SSL_CONNECTION; MasterKey, MasterKeyLength and SessionCipher are offsets into
+// SSL_SESSION; CipherId is the offset of the id field inside SSL_CIPHER, the
+// cipher SessionCipher points at. Type is the SSL type field
+// (SSL_TYPE_SSL_CONNECTION vs the QUIC types) and sits inside the embedded
+// ssl_st base. SSLConnection is the delta from the SSL * the public API hands
+// out to the SSL_CONNECTION: subtract it from the SSL * before applying the
+// other offsets. For OpenSSL >= 3.2 the embedded base is the first member, so
+// the delta is zero. HandshakeSecret and HandshakeTrafficHash let Go derive the
+// handshake traffic secrets with HKDF-Expand-Label, which TLS 1.3 does not
+// store in the connection; tshark decrypts no TLS 1.3 stream without them.
 type Offset struct {
 	Type                   uint64
 	Version                uint64
@@ -29,6 +34,10 @@ type Offset struct {
 	MasterKeyLength        uint64
 	ClientAppTrafficSecret uint64
 	ServerAppTrafficSecret uint64
+	HandshakeSecret        uint64
+	HandshakeTrafficHash   uint64
+	SessionCipher          uint64
+	CipherId               uint64
 	SSLConnection          uint64
 }
 

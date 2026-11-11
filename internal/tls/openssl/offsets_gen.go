@@ -14,6 +14,10 @@ var offsets = map[string]Offset{
 		MasterKeyLength:        0x8,
 		ClientAppTrafficSecret: 0x77c,
 		ServerAppTrafficSecret: 0x7bc,
+		HandshakeSecret:        0x5bc,
+		HandshakeTrafficHash:   0x73c,
+		SessionCipher:          0x2f8,
+		CipherId:               0x18,
 		SSLConnection:          0x0,
 	},
 }
