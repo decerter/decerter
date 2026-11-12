@@ -46,6 +46,7 @@ type App struct {
 	decrypt             bool
 	libssl              string
 	capturePath         string
+	plaintext           bool
 	snaplen             uint32
 	logger              *slog.Logger
 	redirectBpfMaps     map[bpf.BpfMapName]*ebpf.Map
@@ -64,7 +65,8 @@ type App struct {
 // decrypt is the -decrypt option of run mode: the proxy decrypts the TLS flows with the secrets of the uprobe and prints their plaintext
 // libssl overrides the resolved libssl path, empty means search the standard directories
 // capturePath is the -capture mode: nothing is redirected, the packets of the selected flows and the secrets of their TLS sessions are written to this pcapng file, at most snaplen bytes of a packet
-func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, decrypt bool, libssl string, capturePath string, snaplen uint32, logger *slog.Logger) (app App) {
+// plaintext is the -plaintext option of capture mode: the file gets synthesized packets with the decrypted payload instead of the captured packets and the secrets
+func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, decrypt bool, libssl string, capturePath string, plaintext bool, snaplen uint32, logger *slog.Logger) (app App) {
 	appCtx, cancel := context.WithCancel(ctx)
 	app = App{
 		ctx:                 appCtx,
@@ -78,6 +80,7 @@ func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleT
 		decrypt:             decrypt,
 		libssl:              libssl,
 		capturePath:         capturePath,
+		plaintext:           plaintext,
 		snaplen:             snaplen,
 		logger:              logger,
 		redirectBpfMaps:     nil,
@@ -331,13 +334,17 @@ func (app *App) StartCapture() (err error) {
 		return
 	}
 
-	if app.secretsBpfMaps == nil {
+	switch {
+	case (app.secretsBpfMaps == nil) && app.plaintext:
+		app.logger.Warn("Capturing without TLS secrets, TLS flows will be written encrypted")
+	case app.secretsBpfMaps == nil:
 		app.logger.Warn("Capturing without TLS secrets, the file will have no keys")
+	default:
 	}
 
 	// capture writer, writes the packets that wait and flushes the file when the context is cancelled
 	app.waitGroup.Go(func() {
-		writeErr := errors.Join(capture.Write(app.ctx, file, app.snaplen, app.captureBpfMaps, app.secretsBpfMaps, app.logger), file.Close())
+		writeErr := errors.Join(capture.Write(app.ctx, file, app.snaplen, app.plaintext, app.captureBpfMaps, app.secretsBpfMaps, app.logger), file.Close())
 
 		if writeErr != nil {
 			app.logger.Error("Could not write capture file", "error", writeErr, "fileName", app.capturePath)
@@ -371,7 +378,7 @@ func (app *App) AttachCapture() (err error) {
 		app.closeFunctions = append(app.closeFunctions, closeFunction)
 	}
 
-	app.logger.Info("Capturing packets", "cgroup", attach.CgroupRoot, "fileName", app.capturePath, "snaplen", app.snaplen)
+	app.logger.Info("Capturing packets", "cgroup", attach.CgroupRoot, "fileName", app.capturePath, "snaplen", app.snaplen, "plaintext", app.plaintext)
 	return
 }
 

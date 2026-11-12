@@ -11,6 +11,8 @@ import (
 const (
 	// blocks are collected up to this size before they go to the output, a longer block is written through
 	bufferLength int = 1 << 16
+	// the longest value of an option (section 3.5)
+	maxOptionLength int = 65535
 )
 
 // writes one pcapng section with one LINKTYPE_RAW interface: packets with nanosecond timestamps and TLS key logs
@@ -48,6 +50,12 @@ func New(output io.Writer, snaplen uint32) (writer Writer, err error) {
 func (writer *Writer) WritePacket(packet Packet) (err error) {
 	if (uint32(len(packet.Data)) > packet.OriginalLength) || (uint32(len(packet.Data)) > writer.snaplen) {
 		err = fmt.Errorf("%w: %d bytes of %d, snaplen %d", ErrPacketSize, len(packet.Data), packet.OriginalLength, writer.snaplen)
+		return
+	}
+
+	// the length of an option is 16 bits
+	if len(packet.Comment) > maxOptionLength {
+		err = fmt.Errorf("%w: %d bytes", ErrCommentSize, len(packet.Comment))
 		return
 	}
 

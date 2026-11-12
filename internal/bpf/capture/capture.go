@@ -4,6 +4,7 @@ package capture
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 
 	"github.com/decerter/decerter/internal/bpf"
@@ -129,5 +130,25 @@ func ReadDropped(bpfMaps map[bpf.BpfMapName]*ebpf.Map) (dropped uint64, err erro
 		dropped += count
 	}
 
+	return
+}
+
+// a recorded socket stays in flow_map until a moment after it closed, found tells the capture writer that it is still open
+func HasFlow(cookie uint64, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (found bool, err error) {
+	var flow bpfFlow
+
+	err = bpfMaps[FlowMap].Lookup(cookie, &flow)
+
+	if errors.Is(err, ebpf.ErrKeyNotExist) {
+		err = nil
+		return
+	}
+
+	if err != nil {
+		err = fmt.Errorf("lookup %s: %w", bpfMapFlowMap, err)
+		return
+	}
+
+	found = true
 	return
 }

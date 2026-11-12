@@ -22,7 +22,8 @@ import (
 )
 
 var (
-	errModeConflict = errors.New("-capture can't be combined with -keylog or -decrypt")
+	errModeConflict     = errors.New("-capture can't be combined with -keylog or -decrypt")
+	errPlaintextCapture = errors.New("-plaintext needs -capture")
 )
 
 var (
@@ -34,6 +35,7 @@ var (
 	decrypt        bool
 	libssl         string
 	capturePath    string
+	plaintext      bool
 	snaplen        uint32 = capturebpf.MaxSnaplen
 )
 
@@ -49,7 +51,8 @@ func main() {
 	flag.BoolVar(&decrypt, "decrypt", false, "decrypt the TLS records of the redirected tcp flows with the secrets of the libssl uprobe and print the plaintext of the application data on stdout, escaped and at most 2048 bytes per record; the flows are relayed unchanged (default is false)")
 	flag.StringVar(&libssl, "libssl", "", "path of the libssl.so the secrets uprobe is attached to, libcrypto.so.3 is read from the same directory (default is the libssl.so.3 of the dynamic linker cache; a process that bundles or statically links its own libssl is not covered)")
 	flag.StringVar(&capturePath, "capture", "", "write the packets of the selected flows and the TLS secrets of their sessions to this pcapng file until stopped, Wireshark and tshark decrypt it without a key log; nothing is redirected, the flows reach their servers directly; the file holds secrets and is created with mode 0600 (default is off)")
-	flag.Func("snaplen", "most bytes written of a captured packet, counted from the IP header, a packet cut short can't be decrypted (default is 262144, the largest value)", parseSnaplen)
+	flag.BoolVar(&plaintext, "plaintext", false, "with -capture: write synthesized packets with the decrypted payload instead of the captured packets, so tcpdump and every other tool reads the plaintext; the tcp streams are put back in order and the TLS sessions decrypted, a flow keeps its addresses and ports and gets new sequence numbers, a flow that is not TLS keeps its payload; the file holds no secrets but the plaintext (default is false)")
+	flag.Func("snaplen", "most bytes copied of a captured packet, counted from the IP header, a packet cut short can't be decrypted and is a hole in its tcp stream with -plaintext (default is 262144, the largest value)", parseSnaplen)
 	flag.Parse()
 	err := run()
 
@@ -238,7 +241,13 @@ func run() (err error) {
 		return
 	}
 
-	decerter := app.New(ctx, filter, proxyPort, udpIdleTimeout, flowTable, keylog, decrypt, libssl, capturePath, snaplen, logger)
+	if plaintext && (capturePath == "") {
+		err = errPlaintextCapture
+		logger.Error("Could not start", "error", err)
+		return
+	}
+
+	decerter := app.New(ctx, filter, proxyPort, udpIdleTimeout, flowTable, keylog, decrypt, libssl, capturePath, plaintext, snaplen, logger)
 
 	defer func() {
 		err = errors.Join(err, decerter.Shutdown())

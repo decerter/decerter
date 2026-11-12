@@ -5,8 +5,8 @@ package capture
 import (
 	"bytes"
 	"log/slog"
+	"maps"
 	"slices"
-	"syscall"
 	"time"
 
 	"github.com/decerter/decerter/internal/bpf"
@@ -32,25 +32,6 @@ const (
 	sweepInterval time.Duration = 10 * time.Second
 )
 
-// IP header fields the writer reads to find the TCP payload
-const (
-	ipv4Version           uint8 = 4
-	ipv6Version           uint8 = 6
-	ipv4MinHeaderLength   int   = 20
-	ipv4ProtocolOffset    int   = 9
-	ipv4FragmentOffset    int   = 6
-	ipv4FragmentMask      uint8 = 0x1F
-	ipv6HeaderLength      int   = 40
-	ipv6NextHeaderOffset  int   = 6
-	ipv6ExtensionUnit     int   = 8
-	ipv6HopByHop          uint8 = 0
-	ipv6Routing           uint8 = 43
-	ipv6DestinationOption uint8 = 60
-	ipv6MaxExtensions     int   = 8
-	tcpMinHeaderLength    int   = 20
-	tcpDataOffsetOffset   int   = 12
-)
-
 // why the packets of a flow were written without its secrets
 const (
 	timeoutReason     string = "no secrets before the hold timeout"
@@ -66,12 +47,15 @@ const (
 	watchedFlowState flowState = 0 // no ClientHello seen yet, the packets are written as they come
 	heldFlowState    flowState = 1 // ClientHello seen, the packets wait for the secrets of the session
 	passedFlowState  flowState = 2 // the secrets are written or given up, the packets are written as they come and not looked at
+	// plaintext mode: the record layer has the secrets, the records are decrypted as they come; held there means the record layer reads the session and its secrets are looked for
+	decryptedFlowState flowState = 3
 )
 
 // what the writer keeps of one recorded socket
 // conn reads the ClientHello and is nil once the client_random is known
 // held are the packets that wait from the ClientHello on, heldBytes their length
 // pollPause and nextPoll spread the lookups of the secrets, holdStart is when the ClientHello came
+// connection is the TCP connection of the flow in plaintext mode, nil until its first TCP packet; conn stays with the flow there and decrypts its session, held is not used and heldBytes is what connection keeps
 type flow struct {
 	state           flowState
 	conn            *tlsrecord.Conn
@@ -84,13 +68,19 @@ type flow struct {
 	pollPause       time.Duration
 	nextPoll        time.Time
 	lastPacket      time.Time
+	connection      *connection
 }
 
 // the state of the capture writer, only the goroutine of Write uses it
 // holding are the cookies of the held flows in the order their hold started, heldBytes the packets of all of them
 // nextWake is when tick has to run again: the next lookup of a held flow, or idleWake away when nothing is held
+// plaintext is the -plaintext mode: synthesized packets with the decrypted payload are written instead of the captured ones, buffer is the packet being built and parts what a stream gave for the packet being read
 type recorder struct {
 	writer          *pcapng.Writer
+	plaintext       bool
+	buffer          []byte
+	parts           []Part
+	missingBytes    uint64
 	bootOffset      int64
 	captureBpfMaps  map[bpf.BpfMapName]*ebpf.Map
 	secretsBpfMaps  map[bpf.BpfMapName]*ebpf.Map
@@ -107,9 +97,13 @@ type recorder struct {
 	logger          *slog.Logger
 }
 
-func newRecorder(writer *pcapng.Writer, bootOffset int64, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, now time.Time, logger *slog.Logger) (newRecorder recorder) {
+func newRecorder(writer *pcapng.Writer, plaintext bool, bootOffset int64, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, now time.Time, logger *slog.Logger) (newRecorder recorder) {
 	newRecorder = recorder{
 		writer:          writer,
+		plaintext:       plaintext,
+		buffer:          nil,
+		parts:           nil,
+		missingBytes:    0,
 		bootOffset:      bootOffset,
 		captureBpfMaps:  captureBpfMaps,
 		secretsBpfMaps:  secretsBpfMaps,
@@ -146,6 +140,7 @@ func (recorder *recorder) handle(packet capturebpf.Packet, now time.Time) (err e
 			pollPause:       0,
 			nextPoll:        time.Time{},
 			lastPacket:      now,
+			connection:      nil,
 		}
 
 		// without the secrets uprobe there is nothing to wait for
@@ -170,6 +165,12 @@ func (recorder *recorder) handle(packet capturebpf.Packet, now time.Time) (err e
 		OriginalLength: packet.Length,
 		Data:           packet.Data,
 	}
+
+	if recorder.plaintext {
+		err = recorder.synthesize(packet.Cookie, currentFlow, packet, pcapPacket, now)
+		return
+	}
+
 	var payload []byte
 
 	// only client flows are recorded, so what the socket sends is the client side of the session
@@ -206,12 +207,11 @@ func (recorder *recorder) handle(packet capturebpf.Packet, now time.Time) (err e
 		}
 	}
 
-	// a last lookup before the flow is given up
 	switch {
 	case currentFlow.heldBytes > maxHoldBytes:
-		err = recorder.release(packet.Cookie, currentFlow, recorder.lookup(packet.Cookie, currentFlow), holdLimitReason)
+		err = recorder.giveUp(packet.Cookie, currentFlow, holdLimitReason)
 	case recorder.heldBytes > maxTotalHoldBytes:
-		err = recorder.release(packet.Cookie, currentFlow, recorder.lookup(packet.Cookie, currentFlow), totalLimitReason)
+		err = recorder.giveUp(packet.Cookie, currentFlow, totalLimitReason)
 	default:
 	}
 
@@ -265,15 +265,14 @@ func (recorder *recorder) tick(now time.Time) (err error) {
 		heldFlow := recorder.flows[cookie]
 
 		if !now.Before(heldFlow.nextPoll) {
-			keyLog := recorder.lookup(cookie, heldFlow)
+			err = recorder.poll(cookie, heldFlow)
 
-			if keyLog != "" {
-				err = recorder.release(cookie, heldFlow, keyLog, "")
+			if err != nil {
+				return
+			}
 
-				if err != nil {
-					return
-				}
-
+			// its secrets were there
+			if heldFlow.state != heldFlowState {
 				continue
 			}
 
@@ -282,7 +281,7 @@ func (recorder *recorder) tick(now time.Time) (err error) {
 		}
 
 		if now.Sub(heldFlow.holdStart) >= holdTimeout {
-			err = recorder.release(cookie, heldFlow, recorder.lookup(cookie, heldFlow), timeoutReason)
+			err = recorder.giveUp(cookie, heldFlow, timeoutReason)
 
 			if err != nil {
 				return
@@ -292,8 +291,12 @@ func (recorder *recorder) tick(now time.Time) (err error) {
 
 	if !now.Before(recorder.nextSweep) {
 		recorder.nextSweep = now.Add(sweepInterval)
-		recorder.forgetIdleFlows(now)
 		recorder.countDropped()
+		err = recorder.forgetIdleFlows(now)
+
+		if err != nil {
+			return
+		}
 	}
 
 	recorder.nextWake = now.Add(idleWake)
@@ -304,6 +307,39 @@ func (recorder *recorder) tick(now time.Time) (err error) {
 		}
 	}
 
+	return
+}
+
+// look the secrets of a held flow up and let the flow go when they are there
+func (recorder *recorder) poll(cookie uint64, heldFlow *flow) (err error) {
+	if recorder.plaintext {
+		err = recorder.unlock(cookie, heldFlow)
+		return
+	}
+
+	keyLog := recorder.lookup(cookie, heldFlow)
+
+	if keyLog != "" {
+		err = recorder.release(cookie, heldFlow, keyLog, "")
+	}
+
+	return
+}
+
+// a held flow waits no longer: after a last lookup it is written without its keys, in plaintext mode as it was captured
+func (recorder *recorder) giveUp(cookie uint64, heldFlow *flow, reason string) (err error) {
+	if !recorder.plaintext {
+		err = recorder.release(cookie, heldFlow, recorder.lookup(cookie, heldFlow), reason)
+		return
+	}
+
+	err = recorder.unlock(cookie, heldFlow)
+
+	if (err != nil) || (heldFlow.state != heldFlowState) {
+		return
+	}
+
+	err = recorder.abandon(cookie, heldFlow, reason)
 	return
 }
 
@@ -377,12 +413,35 @@ func (recorder *recorder) write(packet pcapng.Packet) (err error) {
 
 // a held flow is never idle here, its hold ends after holdTimeout
 // a flow that sends again later starts as a new one, which only matters for a ClientHello and that is looked for in every flow
-func (recorder *recorder) forgetIdleFlows(now time.Time) {
+// in plaintext mode a TCP connection can't start again, its streams and its session would be lost: it is kept while its socket is in flow_map, which holds at most 65535 sockets, and what it still keeps is written before it is forgotten
+func (recorder *recorder) forgetIdleFlows(now time.Time) (err error) {
 	for cookie, idleFlow := range recorder.flows {
-		if (idleFlow.state != heldFlowState) && (now.Sub(idleFlow.lastPacket) >= flowIdleTimeout) {
-			delete(recorder.flows, cookie)
+		if (idleFlow.state == heldFlowState) || (now.Sub(idleFlow.lastPacket) < flowIdleTimeout) {
+			continue
 		}
+
+		if (idleFlow.connection != nil) && !idleFlow.connection.isClosed {
+			isOpen, lookupErr := capturebpf.HasFlow(cookie, recorder.captureBpfMaps)
+
+			if lookupErr != nil {
+				recorder.logger.Debug("Could not look up flow", "error", lookupErr, "cookie", cookie)
+			}
+
+			if isOpen {
+				continue
+			}
+
+			err = recorder.leave(cookie, idleFlow, closedReason, now)
+
+			if err != nil {
+				return
+			}
+		}
+
+		delete(recorder.flows, cookie)
 	}
+
+	return
 }
 
 // warn when packets were lost since the last look, the reader was slower than the recorded sockets
@@ -401,14 +460,24 @@ func (recorder *recorder) countDropped() {
 	recorder.dropped = dropped
 }
 
-// the capture stops: the held flows get a last lookup and are written, then the file is flushed
+// the capture stops: the held flows get a last lookup and are written, in plaintext mode with everything the connections still keep, then the file is flushed
 func (recorder *recorder) finish() (err error) {
-	for _, cookie := range slices.Clone(recorder.holding) {
-		heldFlow := recorder.flows[cookie]
-		err = recorder.release(cookie, heldFlow, recorder.lookup(cookie, heldFlow), stoppedReason)
+	if recorder.plaintext {
+		// in a fixed order, so two captures of the same traffic end the same way
+		for _, cookie := range slices.Sorted(maps.Keys(recorder.flows)) {
+			err = recorder.leave(cookie, recorder.flows[cookie], stoppedReason, time.Now())
 
-		if err != nil {
-			return
+			if err != nil {
+				return
+			}
+		}
+	} else {
+		for _, cookie := range slices.Clone(recorder.holding) {
+			err = recorder.giveUp(cookie, recorder.flows[cookie], stoppedReason)
+
+			if err != nil {
+				return
+			}
 		}
 	}
 
@@ -419,71 +488,12 @@ func (recorder *recorder) finish() (err error) {
 	}
 
 	recorder.countDropped()
+
+	if recorder.plaintext {
+		recorder.logger.Info("Plaintext capture written", "packets", recorder.packets, "bytes", recorder.bytes, "decryptedSessions", recorder.keyedSessions, "encryptedSessions", recorder.keylessSessions, "missingBytes", recorder.missingBytes, "droppedPackets", recorder.dropped)
+		return
+	}
+
 	recorder.logger.Info("Capture written", "packets", recorder.packets, "bytes", recorder.bytes, "sessionsWithSecrets", recorder.keyedSessions, "sessionsWithoutSecrets", recorder.keylessSessions, "droppedPackets", recorder.dropped)
-	return
-}
-
-// the TCP payload of a packet that starts at its IP header, nil for everything else: not TCP, a later fragment, cut off by the snaplen
-func tcpPayload(data []byte) (payload []byte) {
-	if len(data) == 0 {
-		return
-	}
-
-	tcpOffset := 0
-
-	switch data[0] >> 4 {
-	case ipv4Version:
-		headerLength := int(data[0]&0x0F) * 4
-
-		if (headerLength < ipv4MinHeaderLength) || (len(data) < headerLength) || (data[ipv4ProtocolOffset] != syscall.IPPROTO_TCP) {
-			return
-		}
-
-		// only the first fragment has the TCP header
-		if (data[ipv4FragmentOffset]&ipv4FragmentMask != 0) || (data[ipv4FragmentOffset+1] != 0) {
-			return
-		}
-
-		tcpOffset = headerLength
-	case ipv6Version:
-		if len(data) < ipv6HeaderLength {
-			return
-		}
-
-		nextHeader := data[ipv6NextHeaderOffset]
-		tcpOffset = ipv6HeaderLength
-
-		// the options a socket can set come before the TCP header: next header, then the length in units of 8 bytes without the first unit
-		for range ipv6MaxExtensions {
-			if (nextHeader != ipv6HopByHop) && (nextHeader != ipv6Routing) && (nextHeader != ipv6DestinationOption) {
-				break
-			}
-
-			if len(data) < tcpOffset+ipv6ExtensionUnit {
-				return
-			}
-
-			nextHeader = data[tcpOffset]
-			tcpOffset += (int(data[tcpOffset+1]) + 1) * ipv6ExtensionUnit
-		}
-
-		if nextHeader != syscall.IPPROTO_TCP {
-			return
-		}
-	default:
-		return
-	}
-
-	if len(data) < tcpOffset+tcpMinHeaderLength {
-		return
-	}
-
-	payloadOffset := tcpOffset + int(data[tcpOffset+tcpDataOffsetOffset]>>4)*4
-
-	if (payloadOffset < tcpOffset+tcpMinHeaderLength) || (len(data) <= payloadOffset) {
-		return
-	}
-
-	payload = data[payloadOffset:]
 	return
 }

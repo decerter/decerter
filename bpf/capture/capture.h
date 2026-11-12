@@ -172,6 +172,13 @@ uint16_t capture_packet(struct __sk_buff *skb, uint8_t direction)
 		uint8_t rest[CHUNK_SIZE];
 		uint32_t offset = header.captured_length - rest_length;
 
+		//bpf_skb_load_bytes takes no length that can be zero, and the verifier of 6.6 does not learn from the check above that rest_length is at least 1
+		//so the same value is built in a way that shows its bounds, the barrier keeps clang from folding it back
+		rest_length -= 1;
+		barrier_var(rest_length);
+		rest_length &= CHUNK_SIZE - 1;
+		rest_length += 1;
+
 		if ((bpf_skb_load_bytes(skb, offset, rest, rest_length) != 0) || (bpf_dynptr_write(&record, sizeof(struct packet_header) + offset, rest, rest_length, 0) != 0))
 		{
 			bpf_ringbuf_discard_dynptr(&record, 0);

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"testing"
 
 	"github.com/decerter/decerter/internal/pcapng"
@@ -26,6 +27,7 @@ const (
 	tlsKeyLogType      uint32 = 0x544C534B
 	timestamp          uint64 = 1794456844702912486
 	keyLog             string = "CLIENT_RANDOM 00 11\n"
+	comment            string = "decerter: note"
 )
 
 type block struct {
@@ -156,6 +158,7 @@ func testWritePacket() (err error) {
 		{Packet: pcapng.Packet{Timestamp: timestamp, Direction: pcapng.OutboundDirection, OriginalLength: 5, Data: []byte{0x45, 1, 2, 3, 4}}, Flags: 2},
 		{Packet: pcapng.Packet{Timestamp: timestamp + 1, Direction: pcapng.InboundDirection, OriginalLength: 4000, Data: bytes.Repeat([]byte{0x60}, int(snaplen))}, Flags: 1},
 		{Packet: pcapng.Packet{Timestamp: timestamp + 2, Direction: pcapng.InboundDirection, OriginalLength: 0, Data: nil}, Flags: 1},
+		{Packet: pcapng.Packet{Timestamp: timestamp + 3, Direction: pcapng.OutboundDirection, OriginalLength: 5, Data: []byte{0x45, 1, 2, 3, 4}, Comment: comment}, Flags: 2},
 	}
 	packets := []pcapng.Packet{}
 
@@ -184,9 +187,21 @@ func testWritePacket() (err error) {
 			return
 		}
 
-		// interface id, timestamp high and low, captured length, original length, data, epb_flags option, opt_endofopt
-		if len(packetBlock.Body) != 20+paddedLength+8+4 {
-			err = fmt.Errorf("enhanced packet block body length was not %d instead: %d", 20+paddedLength+8+4, len(packetBlock.Body))
+		expectedOptions := []byte{}
+
+		// opt_comment (code 1) with the text padded to 32 bits, only when the packet has a comment
+		if positive.Packet.Comment != "" {
+			expectedOptions = append(expectedOptions, 1, 0, byte(len(positive.Packet.Comment)), 0)
+			expectedOptions = append(expectedOptions, positive.Packet.Comment...)
+			expectedOptions = append(expectedOptions, make([]byte, (4-len(positive.Packet.Comment)%4)%4)...)
+		}
+
+		expectedOptions = binary.LittleEndian.AppendUint32(append(expectedOptions, 2, 0, 4, 0), positive.Flags)
+		expectedOptions = append(expectedOptions, 0, 0, 0, 0)
+
+		// interface id, timestamp high and low, captured length, original length, data, the options: opt_comment, epb_flags, opt_endofopt
+		if len(packetBlock.Body) != 20+paddedLength+len(expectedOptions) {
+			err = fmt.Errorf("enhanced packet block body length was not %d instead: %d", 20+paddedLength+len(expectedOptions), len(packetBlock.Body))
 			return
 		}
 
@@ -201,9 +216,6 @@ func testWritePacket() (err error) {
 			err = fmt.Errorf("packet data was not %x instead: %x", positive.Packet.Data, packetBlock.Body[20:20+capturedLength])
 			return
 		}
-
-		expectedOptions := binary.LittleEndian.AppendUint32([]byte{2, 0, 4, 0}, positive.Flags)
-		expectedOptions = append(expectedOptions, 0, 0, 0, 0)
 
 		if !bytes.Equal(packetBlock.Body[20+paddedLength:], expectedOptions) {
 			err = fmt.Errorf("packet options were not %x instead: %x", expectedOptions, packetBlock.Body[20+paddedLength:])
@@ -286,6 +298,14 @@ func TestWritePacketNegative(state *testing.T) {
 			state.Errorf("Test of pcapng.Writer.WritePacket function failed, error should be %v, error: %v", pcapng.ErrPacketSize, err)
 			return
 		}
+	}
+
+	// the length of an option is 16 bits
+	_, err := write([]pcapng.Packet{{Timestamp: timestamp, Direction: pcapng.OutboundDirection, OriginalLength: 1, Data: []byte{1}, Comment: strings.Repeat("c", 65536)}}, nil)
+
+	if !errors.Is(err, pcapng.ErrCommentSize) {
+		state.Errorf("Test of pcapng.Writer.WritePacket function failed, error should be %v, error: %v", pcapng.ErrCommentSize, err)
+		return
 	}
 }
 

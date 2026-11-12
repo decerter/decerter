@@ -47,6 +47,7 @@ const (
 	sectionUserApplicationCode   uint16 = 4
 	interfaceNameCode            uint16 = 2
 	interfaceTimestampResolution uint16 = 9
+	commentCode                  uint16 = 1
 	packetFlagsCode              uint16 = 2
 )
 
@@ -65,11 +66,13 @@ const (
 
 // one captured packet, Data starts at the IP header and can be shorter than OriginalLength when the snaplen cut it
 // Timestamp is nanoseconds since the Unix epoch
+// Comment is shown with the packet by Wireshark and tshark (opt_comment), empty for none
 type Packet struct {
 	Timestamp      uint64
 	Direction      Direction
 	OriginalLength uint32
 	Data           []byte
+	Comment        string
 }
 
 // every block is written in little endian byte order, the reader takes the order from the magic of the section header
@@ -164,6 +167,11 @@ func enhancedPacketBlock(block []byte, packet Packet) (result []byte) {
 	result = appendUint32(result, uint32(len(packet.Data)))
 	result = appendUint32(result, packet.OriginalLength)
 	result = appendPadded(result, packet.Data)
+
+	if packet.Comment != "" {
+		result = appendOption(result, commentCode, []byte(packet.Comment))
+	}
+
 	result = appendOption(result, packetFlagsCode, binary.LittleEndian.AppendUint32(nil, flags))
 	result = appendEndOfOptions(result)
 	result = finishBlock(result)

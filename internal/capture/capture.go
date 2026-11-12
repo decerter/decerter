@@ -70,8 +70,16 @@ func OpenFile(path string) (file *os.File, err error) {
 // read packet_map and write the packets as pcapng to output until the context is cancelled, then write what still waits and flush
 // secretsBpfMaps is nil without the secrets uprobe, the packets are written without keys then
 // a TLS flow is written behind the other flows: its packets wait from the ClientHello on until its secrets are there, so the file is ordered by time inside a flow but not across flows
-func Write(ctx context.Context, output io.Writer, snaplen uint32, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, logger *slog.Logger) (err error) {
-	writer, writerErr := pcapng.New(output, snaplen)
+// plaintext writes synthesized packets instead: the TCP streams are put in order, the TLS sessions decrypted and the payload written in new packets with the addresses and ports of the flow, no secrets are in the file
+// the snaplen still cuts what the programs copy, a cut TCP packet is a hole in its stream; a synthesized packet is never cut
+func Write(ctx context.Context, output io.Writer, snaplen uint32, plaintext bool, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, logger *slog.Logger) (err error) {
+	writerSnaplen := snaplen
+
+	if plaintext {
+		writerSnaplen = max(snaplen, SynthesizedLength)
+	}
+
+	writer, writerErr := pcapng.New(output, writerSnaplen)
 
 	if err = writerErr; err != nil {
 		return
@@ -111,7 +119,7 @@ func Write(ctx context.Context, output io.Writer, snaplen uint32, captureBpfMaps
 	})
 	defer stop()
 
-	recorder := newRecorder(&writer, bootOffset, captureBpfMaps, secretsBpfMaps, time.Now(), logger)
+	recorder := newRecorder(&writer, plaintext, bootOffset, captureBpfMaps, secretsBpfMaps, time.Now(), logger)
 	var record ringbuf.Record
 	var drainDeadline time.Time
 

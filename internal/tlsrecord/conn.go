@@ -213,6 +213,7 @@ func (conn *Conn) process(half *half, records []Record) (result []Record, err er
 			ContentType: contentType,
 			Decrypted:   false,
 			Sequence:    0,
+			Length:      length,
 			Payload:     payload,
 		}
 		// TLS 1.3 sends ChangeCipherSpec only for middleboxes and never protects it (RFC 8446 appendix D.4)
@@ -251,6 +252,7 @@ func (conn *Conn) open(half *half, contentType ContentType, header []byte, paylo
 		ContentType: contentType,
 		Decrypted:   true,
 		Sequence:    half.sequence,
+		Length:      len(header) + len(payload),
 		Payload:     nil,
 	}
 

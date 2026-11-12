@@ -42,11 +42,13 @@ const (
 
 // one record in the order its direction sent it, Payload is the plaintext when Decrypted and the bytes on the wire otherwise
 // Sequence is the record sequence number under the keys that decrypted it
+// Length is the bytes the record took in the stream of its direction, its header included, so a reader knows how far the stream is read
 type Record struct {
 	Direction   Direction
 	ContentType ContentType
 	Decrypted   bool
 	Sequence    uint64
+	Length      int
 	Payload     []byte
 }
 
