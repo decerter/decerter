@@ -3,11 +3,13 @@
 package redirect
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"net/netip"
 	"slices"
@@ -350,8 +352,8 @@ func forgetUDPFlow(cookie uint64, client bpfEndpoint, bpfMaps map[bpf.BpfMapName
 	return
 }
 
-// For debugging
-func Read(ctx context.Context, flowMap *ebpf.Map) {
+// For debugging, the table goes to output every 5 seconds until the context is cancelled or output can't be written
+func Read(ctx context.Context, flowMap *ebpf.Map, output io.Writer) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -363,6 +365,7 @@ func Read(ctx context.Context, flowMap *ebpf.Map) {
 			var (
 				cookie  uint64
 				bpfFlow bpfFlow
+				table   bytes.Buffer
 			)
 
 			flows := map[uint64]Flow{}
@@ -373,22 +376,27 @@ func Read(ctx context.Context, flowMap *ebpf.Map) {
 			}
 
 			if err := iterator.Err(); err != nil {
-				fmt.Printf("%s iterate error: %s\n", bpfMapFlowMap, err)
-				continue
+				fmt.Fprintf(&table, "%s iterate error: %s\n", bpfMapFlowMap, err)
+			} else {
+				fmt.Fprintf(&table, "\n%-20s %-5s %-47s %-10s %-8s %-8s %-16s %-10s %-47s\n", "Cookie", "Proto", "Destination", "Redirected", "PID", "UID", "Comm", "Cgroup ID", "UDP Client")
+
+				for _, sortedCookie := range slices.SortedFunc(maps.Keys(flows), cmp.Compare) {
+					flow := flows[sortedCookie]
+					client := "-"
+
+					// only UDP flows carry the client endpoint
+					if flow.Client.IsValid() {
+						client = flow.Client.String()
+					}
+
+					fmt.Fprintf(&table, "%-20d %-5s %-47s %-10t %-8d %-8d %-16s %-10d %-47s\n", sortedCookie, ProtocolName(flow.IPProtocol), flow.OriginalDestination, flow.Redirected, flow.Tgid, flow.UID, flow.Comm, flow.CgroupID, client)
+				}
 			}
 
-			fmt.Printf("\n%-20s %-5s %-47s %-10s %-8s %-8s %-16s %-10s %-47s\n", "Cookie", "Proto", "Destination", "Redirected", "PID", "UID", "Comm", "Cgroup ID", "UDP Client")
+			_, writeErr := output.Write(table.Bytes())
 
-			for _, sortedCookie := range slices.SortedFunc(maps.Keys(flows), cmp.Compare) {
-				flow := flows[sortedCookie]
-				client := "-"
-
-				// only UDP flows carry the client endpoint
-				if flow.Client.IsValid() {
-					client = flow.Client.String()
-				}
-
-				fmt.Printf("%-20d %-5s %-47s %-10t %-8d %-8d %-16s %-10d %-47s\n", sortedCookie, ProtocolName(flow.IPProtocol), flow.OriginalDestination, flow.Redirected, flow.Tgid, flow.UID, flow.Comm, flow.CgroupID, client)
+			if writeErr != nil {
+				return
 			}
 		}
 	}

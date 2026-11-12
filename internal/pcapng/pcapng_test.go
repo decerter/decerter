@@ -48,6 +48,17 @@ func (fullWriter fullWriter) Write(data []byte) (count int, err error) {
 	return
 }
 
+// a writer that keeps every write on its own, to see what reached the output and when
+type writeRecorder struct {
+	writes [][]byte
+}
+
+func (writeRecorder *writeRecorder) Write(data []byte) (count int, err error) {
+	writeRecorder.writes = append(writeRecorder.writes, bytes.Clone(data))
+	count = len(data)
+	return
+}
+
 // walk the blocks of a section: every block is a multiple of 32 bits long and has its total length at both ends
 func readBlocks(data []byte) (blocks []block, err error) {
 	for len(data) > 0 {
@@ -80,7 +91,7 @@ func readBlocks(data []byte) (blocks []block, err error) {
 
 func write(packets []pcapng.Packet, keyLogs []string) (blocks []block, err error) {
 	output := bytes.Buffer{}
-	writer, newErr := pcapng.New(&output, snaplen)
+	writer, newErr := pcapng.New(&output, snaplen, false)
 
 	if err = newErr; err != nil {
 		return
@@ -254,6 +265,63 @@ func testWriteSecrets() (err error) {
 	return
 }
 
+// every block has to reach the output on its own when it is written, the reader of a pipe gets nothing else
+func testStream() (err error) {
+	output := writeRecorder{writes: nil}
+	writer, newErr := pcapng.New(&output, snaplen, true)
+
+	if err = newErr; err != nil {
+		return
+	}
+
+	err = writer.WriteSecrets([]byte(keyLog))
+
+	if err != nil {
+		return
+	}
+
+	err = writer.WritePacket(pcapng.Packet{Timestamp: timestamp, Direction: pcapng.InboundDirection, OriginalLength: 3, Data: []byte{1, 2, 3}, Comment: ""})
+
+	if err != nil {
+		return
+	}
+
+	expectedTypes := []uint32{sectionHeaderType, interfaceType, secretsType, enhancedPacketType}
+
+	if len(output.writes) != len(expectedTypes) {
+		err = fmt.Errorf("write count was not %d instead: %d", len(expectedTypes), len(output.writes))
+		return
+	}
+
+	for index, data := range output.writes {
+		blocks, readErr := readBlocks(data)
+
+		if err = readErr; err != nil {
+			return
+		}
+
+		if (len(blocks) != 1) || (blocks[0].Type != expectedTypes[index]) {
+			err = fmt.Errorf("write %d was not one block of type 0x%08x instead: %d blocks", index, expectedTypes[index], len(blocks))
+			return
+		}
+	}
+
+	// a file is buffered until Flush
+	output = writeRecorder{writes: nil}
+	writer, err = pcapng.New(&output, snaplen, false)
+
+	if err != nil {
+		return
+	}
+
+	if len(output.writes) != 0 {
+		err = fmt.Errorf("write count of a file before Flush was not 0 instead: %d", len(output.writes))
+		return
+	}
+
+	return
+}
+
 // Test if pcapng.New returns with the expected output.
 func TestNewPositive(state *testing.T) {
 	err := testNewHeader()
@@ -266,7 +334,7 @@ func TestNewPositive(state *testing.T) {
 
 // Test if pcapng.New returns with the expected errors.
 func TestNewNegative(state *testing.T) {
-	_, err := pcapng.New(&bytes.Buffer{}, 0)
+	_, err := pcapng.New(&bytes.Buffer{}, 0, false)
 
 	if !errors.Is(err, pcapng.ErrSnaplen) {
 		state.Errorf("Test of pcapng.New function failed, error should be %v, error: %v", pcapng.ErrSnaplen, err)
@@ -319,9 +387,19 @@ func TestWriteSecretsPositive(state *testing.T) {
 	}
 }
 
+// Test if pcapng.Writer in stream mode returns with the expected output.
+func TestStreamPositive(state *testing.T) {
+	err := testStream()
+
+	if err != nil {
+		state.Errorf("Test of pcapng.Writer stream mode failed, error: %s", err.Error())
+		return
+	}
+}
+
 // Test if pcapng.Writer.Flush returns with the expected errors.
 func TestFlushNegative(state *testing.T) {
-	writer, err := pcapng.New(fullWriter{}, snaplen)
+	writer, err := pcapng.New(fullWriter{}, snaplen, false)
 
 	if err != nil {
 		state.Errorf("Test of pcapng.Writer.Flush failed, cannot create writer, error: %s", err.Error())

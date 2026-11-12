@@ -17,14 +17,17 @@ const (
 
 // writes one pcapng section with one LINKTYPE_RAW interface: packets with nanosecond timestamps and TLS key logs
 // block is the block being built, its memory is used again for the next one
+// stream hands every block to the output when it is written, for a reader at the other end of a pipe
 type Writer struct {
 	output  *bufio.Writer
 	snaplen uint32
+	stream  bool
 	block   []byte
 }
 
 // start the section: the Section Header Block and the Interface Description Block, no packet has more than snaplen bytes
-func New(output io.Writer, snaplen uint32) (writer Writer, err error) {
+// stream writes each block through at once, a file is written in larger pieces and is complete after Flush
+func New(output io.Writer, snaplen uint32, stream bool) (writer Writer, err error) {
 	if snaplen == 0 {
 		err = ErrSnaplen
 		return
@@ -33,6 +36,7 @@ func New(output io.Writer, snaplen uint32) (writer Writer, err error) {
 	writer = Writer{
 		output:  bufio.NewWriterSize(output, bufferLength),
 		snaplen: snaplen,
+		stream:  stream,
 		block:   nil,
 	}
 	writer.block = sectionHeaderBlock(writer.block)
@@ -72,13 +76,17 @@ func (writer *Writer) WriteSecrets(keyLog []byte) (err error) {
 	return
 }
 
-// every block goes through here to the buffer, the place to flush each block for a live stream
+// every block goes through here to the buffer, a stream flushes it so the reader sees each block when it is written
 func (writer *Writer) writeBlock() (err error) {
 	_, err = writer.output.Write(writer.block)
 
 	if err != nil {
 		err = fmt.Errorf("%w: %w", ErrWrite, err)
 		return
+	}
+
+	if writer.stream {
+		err = writer.Flush()
 	}
 
 	return

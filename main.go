@@ -50,7 +50,7 @@ func main() {
 	flag.BoolVar(&keylog, "keylog", false, "print the TLS secrets of the selected processes on stdout in NSS key log format until stopped, logs go to stderr; only the libssl secrets uprobe is attached, nothing is redirected (default is false)")
 	flag.BoolVar(&decrypt, "decrypt", false, "decrypt the TLS records of the redirected tcp flows with the secrets of the libssl uprobe and print the plaintext of the application data on stdout, escaped and at most 2048 bytes per record; the flows are relayed unchanged (default is false)")
 	flag.StringVar(&libssl, "libssl", "", "path of the libssl.so the secrets uprobe is attached to, libcrypto.so.3 is read from the same directory (default is the libssl.so.3 of the dynamic linker cache; a process that bundles or statically links its own libssl is not covered)")
-	flag.StringVar(&capturePath, "capture", "", "write the packets of the selected flows and the TLS secrets of their sessions to this pcapng file until stopped, Wireshark and tshark decrypt it without a key log; nothing is redirected, the flows reach their servers directly; the file holds secrets and is created with mode 0600 (default is off)")
+	flag.StringVar(&capturePath, "capture", "", "write the packets of the selected flows and the TLS secrets of their sessions to this pcapng file until stopped, Wireshark and tshark decrypt it without a key log; nothing is redirected, the flows reach their servers directly; the file holds secrets and is created with mode 0600; - writes a live pcapng stream to stdout for tshark -i - or wireshark -k -i -, each block when it is written, stdout must not be a terminal and decerter stops when the reader goes away (default is off)")
 	flag.BoolVar(&plaintext, "plaintext", false, "with -capture: write synthesized packets with the decrypted payload instead of the captured packets, so tcpdump and every other tool reads the plaintext; the tcp streams are put back in order and the TLS sessions decrypted, a flow keeps its addresses and ports and gets new sequence numbers, a flow that is not TLS keeps its payload; the file holds no secrets but the plaintext (default is false)")
 	flag.Func("snaplen", "most bytes copied of a captured packet, counted from the IP header, a packet cut short can't be decrypted and is a hole in its tcp stream with -plaintext (default is 262144, the largest value)", parseSnaplen)
 	flag.Parse()
@@ -334,9 +334,13 @@ func run() (err error) {
 
 		decerter.StartFlowTable()
 
-		// the capture writer stops decerter when it can't write the file any more
+		// the capture writer stops decerter when it can't write the file any more, and a stream when its reader is gone
 		<-decerter.Done()
-		logger.Info("Got shutdown signal", "cause", context.Cause(ctx))
+
+		if ctx.Err() != nil {
+			logger.Info("Got shutdown signal", "cause", context.Cause(ctx))
+		}
+
 		return
 	}
 

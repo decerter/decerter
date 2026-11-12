@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/decerter/decerter/internal/attach"
@@ -342,14 +343,49 @@ func (app *App) StartCapture() (err error) {
 	default:
 	}
 
+	stream := app.capturePath == capture.StreamPath
+
 	// capture writer, writes the packets that wait and flushes the file when the context is cancelled
 	app.waitGroup.Go(func() {
-		writeErr := errors.Join(capture.Write(app.ctx, file, app.snaplen, app.plaintext, app.captureBpfMaps, app.secretsBpfMaps, app.logger), file.Close())
+		writeErr := capture.Write(app.ctx, file, stream, app.snaplen, app.plaintext, app.captureBpfMaps, app.secretsBpfMaps, app.logger)
 
-		if writeErr != nil {
+		// stdout stays open for the stream reader watcher until decerter exits
+		if !stream {
+			writeErr = errors.Join(writeErr, file.Close())
+		}
+
+		switch {
+		case writeErr == nil:
+		// tshark or Wireshark stopped reading, the capture ends with it
+		case stream && errors.Is(writeErr, syscall.EPIPE):
+			if app.ctx.Err() == nil {
+				app.logger.Info("Capture stream reader went away, stopping")
+			}
+
+			app.cancel()
+		default:
 			app.logger.Error("Could not write capture file", "error", writeErr, "fileName", app.capturePath)
 			// read by Shutdown after the wait group, nothing is captured without the writer so decerter stops
 			app.captureErr = writeErr
+			app.cancel()
+		}
+	})
+
+	if !stream {
+		return
+	}
+
+	// stream reader watcher, the writer only sees a closed pipe when it writes and a quiet capture writes nothing
+	app.waitGroup.Go(func() {
+		isGone, waitErr := capture.WaitReaderGone(app.ctx, file)
+
+		if waitErr != nil {
+			app.logger.Warn("Could not watch capture stream reader, decerter stops at the next write after it is gone", "error", waitErr)
+			return
+		}
+
+		if isGone {
+			app.logger.Info("Capture stream reader went away, stopping")
 			app.cancel()
 		}
 	})
@@ -424,9 +460,16 @@ func (app *App) StartFlowTable() {
 		return
 	}
 
+	// stdout carries the capture stream, the table goes to stderr with the logs then
+	output := os.Stdout
+
+	if app.capturePath == capture.StreamPath {
+		output = os.Stderr
+	}
+
 	// flow_map printer
 	app.waitGroup.Go(func() {
-		redirect.Read(app.ctx, app.redirectBpfMaps[redirect.FlowMap])
+		redirect.Read(app.ctx, app.redirectBpfMaps[redirect.FlowMap], output)
 	})
 }
 
