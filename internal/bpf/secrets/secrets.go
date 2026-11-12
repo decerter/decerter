@@ -162,6 +162,12 @@ func CheckLayout(bpfMaps map[bpf.BpfMapName]*ebpf.Map) (count uint32, err error)
 		return
 	}
 
+	count, err = layoutMismatch(layoutError)
+	return
+}
+
+// the error of the layout_error_map entry, nil while no call was rejected
+func layoutMismatch(layoutError bpfLayoutError) (count uint32, err error) {
 	count = layoutError.Count
 
 	if count == 0 {
