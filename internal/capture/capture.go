@@ -39,12 +39,13 @@ const (
 )
 
 // create the capture file for its owner only: it holds secrets, under sudo it goes to the user who called sudo
-// StreamPath is stdout, which must not be a terminal: the stream is binary and holds secrets
+// StreamPath is stdout, which must not be a person's terminal: the stream is binary and holds secrets
+// a terminal in raw mode is accepted: adb exec-out gives the command a pty without output processing, echo or line editing, which carries the stream unchanged
 func OpenFile(path string) (file *os.File, err error) {
 	if path == StreamPath {
-		_, termiosErr := unix.IoctlGetTermios(int(os.Stdout.Fd()), unix.TCGETS)
+		termios, termiosErr := unix.IoctlGetTermios(int(os.Stdout.Fd()), unix.TCGETS)
 
-		if termiosErr == nil {
+		if (termiosErr == nil) && ((termios.Oflag&unix.OPOST != 0) || (termios.Lflag&(unix.ICANON|unix.ECHO) != 0)) {
 			err = ErrTerminal
 			return
 		}

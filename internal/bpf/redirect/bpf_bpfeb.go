@@ -36,7 +36,7 @@ type bpfFlow struct {
 	Redirected uint8
 	Tgid       uint32
 	Uid        uint32
-	Pad32      uint32
+	Mark       uint32
 	CgroupId   uint64
 	Comm       [16]int8
 	Client     bpfEndpoint

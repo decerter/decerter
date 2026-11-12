@@ -22,6 +22,7 @@ type Filter struct {
 	DestinationPorts []DestinationPort
 }
 
+// Mark is the SO_MARK of the app's socket, on Android netd's fwmark of the app's network, 0 when the socket has none
 type Flow struct {
 	OriginalDestination netip.AddrPort
 	IPProtocol          uint8
@@ -30,6 +31,7 @@ type Flow struct {
 	UID                 uint32
 	CgroupID            uint64
 	Comm                string
+	Mark                uint32
 	Client              netip.AddrPort
 }
 

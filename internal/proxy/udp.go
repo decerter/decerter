@@ -177,12 +177,17 @@ func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.Add
 	}
 
 	// the own tgid is excluded in connect4/6, so this socket is not redirected again
-	upstream, dialErr := net.DialUDP("udp", nil, net.UDPAddrFromAddrPort(flow.OriginalDestination))
+	dialer := net.Dialer{
+		Control: markControl(flow.Mark),
+	}
+	upstreamConnection, dialErr := dialer.DialContext(ctx, "udp", flow.OriginalDestination.String())
 
 	if err = dialErr; err != nil {
 		logger.Warn("Could not dial original destination", "error", err)
 		return
 	}
+
+	upstream := upstreamConnection.(*net.UDPConn)
 
 	// a connected client only accepts the address it connected to, which is the proxy address the datagram went to
 	session = &UDPSession{

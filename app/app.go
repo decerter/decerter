@@ -5,10 +5,15 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
+	"os/signal"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -19,6 +24,7 @@ import (
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/bpf/secrets"
 	"github.com/decerter/decerter/internal/capture"
+	"github.com/decerter/decerter/internal/platform"
 	"github.com/decerter/decerter/internal/proxy"
 	"github.com/decerter/decerter/internal/route"
 	"github.com/decerter/decerter/internal/tls/openssl"
@@ -33,7 +39,15 @@ const (
 	releaseDelay time.Duration = 2 * time.Second
 	// how often released flows are looked for, a flow lives at most releaseDelay + releaseSweep after the close
 	releaseSweep time.Duration = time.Second
+	// in the platform's data directory: the netd hooks decerter shared, and the lock held while decerter runs
+	netdStateName string = "netd-hooks.json"
+	lockName      string = "decerter.lock"
 )
+
+type cgroupAttachment struct {
+	program    bpf.BpfProgramName
+	attachType ebpf.AttachType
+}
 
 type App struct {
 	ctx                 context.Context
@@ -49,6 +63,7 @@ type App struct {
 	capturePath         string
 	plaintext           bool
 	snaplen             uint32
+	platform            platform.Platform
 	logger              *slog.Logger
 	redirectBpfMaps     map[bpf.BpfMapName]*ebpf.Map
 	redirectBpfPrograms map[bpf.BpfProgramName]*ebpf.Program
@@ -59,6 +74,7 @@ type App struct {
 	tcpListener         *net.TCPListener
 	udpConnection       *net.UDPConn
 	captureErr          error
+	secretsErr          error
 	closeFunctions      [](func() error)
 }
 
@@ -67,7 +83,8 @@ type App struct {
 // libssl overrides the resolved libssl path, empty means search the standard directories
 // capturePath is the -capture mode: nothing is redirected, the packets of the selected flows and the secrets of their TLS sessions are written to this pcapng file, at most snaplen bytes of a packet
 // plaintext is the -plaintext option of capture mode: the file gets synthesized packets with the decrypted payload instead of the captured packets and the secrets
-func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, decrypt bool, libssl string, capturePath string, plaintext bool, snaplen uint32, logger *slog.Logger) (app App) {
+// currentPlatform decides where the netd hook state is kept and whether hooks held exclusively by another program may be shared, only on Android
+func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, decrypt bool, libssl string, capturePath string, plaintext bool, snaplen uint32, currentPlatform platform.Platform, logger *slog.Logger) (app App) {
 	appCtx, cancel := context.WithCancel(ctx)
 	app = App{
 		ctx:                 appCtx,
@@ -83,6 +100,7 @@ func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleT
 		capturePath:         capturePath,
 		plaintext:           plaintext,
 		snaplen:             snaplen,
+		platform:            currentPlatform,
 		logger:              logger,
 		redirectBpfMaps:     nil,
 		redirectBpfPrograms: nil,
@@ -93,6 +111,7 @@ func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleT
 		tcpListener:         nil,
 		udpConnection:       nil,
 		captureErr:          nil,
+		secretsErr:          nil,
 		closeFunctions:      [](func() error){},
 	}
 	return
@@ -258,15 +277,22 @@ func (app *App) StartProxy() (err error) {
 	return
 }
 
+// the programs that learn clients, restore addresses and clean up come first, so the first redirected socket already has them
 // in capture mode nothing is redirected, so the programs that learn the udp client and restore the original address have nothing to do and stay detached
-func (app *App) AttachRedirect() (err error) {
-	type attachment struct {
-		program    bpf.BpfProgramName
-		attachType ebpf.AttachType
+func (app *App) redirectAttachments() (attachments []cgroupAttachment) {
+	if app.capturePath != "" {
+		attachments = []cgroupAttachment{
+			{program: redirect.ClientSockops, attachType: ebpf.AttachCGroupSockOps},
+			{program: redirect.ForgetReleasedSocket, attachType: ebpf.AttachCgroupInetSockRelease},
+			{program: redirect.RedirectConnect4, attachType: ebpf.AttachCGroupInet4Connect},
+			{program: redirect.RedirectConnect6, attachType: ebpf.AttachCGroupInet6Connect},
+			{program: redirect.RedirectSendmsg4, attachType: ebpf.AttachCGroupUDP4Sendmsg},
+			{program: redirect.RedirectSendmsg6, attachType: ebpf.AttachCGroupUDP6Sendmsg},
+		}
+		return
 	}
 
-	// the programs that learn clients, restore addresses and clean up come first, so the first redirected socket already has them
-	attachments := []attachment{
+	attachments = []cgroupAttachment{
 		{program: redirect.ClientSockops, attachType: ebpf.AttachCGroupSockOps},
 		{program: redirect.LearnUdpClient, attachType: ebpf.AttachCGroupInetEgress},
 		{program: redirect.ForgetReleasedSocket, attachType: ebpf.AttachCgroupInetSockRelease},
@@ -279,19 +305,24 @@ func (app *App) AttachRedirect() (err error) {
 		{program: redirect.RedirectSendmsg4, attachType: ebpf.AttachCGroupUDP4Sendmsg},
 		{program: redirect.RedirectSendmsg6, attachType: ebpf.AttachCGroupUDP6Sendmsg},
 	}
+	return
+}
 
-	if app.capturePath != "" {
-		attachments = []attachment{
-			{program: redirect.ClientSockops, attachType: ebpf.AttachCGroupSockOps},
-			{program: redirect.ForgetReleasedSocket, attachType: ebpf.AttachCgroupInetSockRelease},
-			{program: redirect.RedirectConnect4, attachType: ebpf.AttachCGroupInet4Connect},
-			{program: redirect.RedirectConnect6, attachType: ebpf.AttachCGroupInet6Connect},
-			{program: redirect.RedirectSendmsg4, attachType: ebpf.AttachCGroupUDP4Sendmsg},
-			{program: redirect.RedirectSendmsg6, attachType: ebpf.AttachCGroupUDP6Sendmsg},
-		}
+// only capture mode copies packets
+func (app *App) captureAttachments() (attachments []cgroupAttachment) {
+	if app.capturePath == "" {
+		return
 	}
 
-	for _, attachment := range attachments {
+	attachments = []cgroupAttachment{
+		{program: capturebpf.CaptureIngress, attachType: ebpf.AttachCGroupInetIngress},
+		{program: capturebpf.CaptureEgress, attachType: ebpf.AttachCGroupInetEgress},
+	}
+	return
+}
+
+func (app *App) AttachRedirect() (err error) {
+	for _, attachment := range app.redirectAttachments() {
 		closeFunction, attachErr := attach.AddCgroup(attach.CgroupRoot, app.redirectBpfPrograms[attachment.program], attachment.attachType)
 
 		if err = attachErr; err != nil {
@@ -335,11 +366,12 @@ func (app *App) StartCapture() (err error) {
 		return
 	}
 
+	// the one warning about missing secrets in capture mode, with the reason from LoadSecretsBpfObjects
 	switch {
 	case (app.secretsBpfMaps == nil) && app.plaintext:
-		app.logger.Warn("Capturing without TLS secrets, TLS flows will be written encrypted")
+		app.logger.Warn("Capturing without TLS secrets, TLS flows will be written encrypted", "reason", app.secretsErr)
 	case app.secretsBpfMaps == nil:
-		app.logger.Warn("Capturing without TLS secrets, the file will have no keys")
+		app.logger.Warn("Capturing without TLS secrets, the file will have no keys", "reason", app.secretsErr)
 	default:
 	}
 
@@ -356,8 +388,8 @@ func (app *App) StartCapture() (err error) {
 
 		switch {
 		case writeErr == nil:
-		// tshark or Wireshark stopped reading, the capture ends with it
-		case stream && errors.Is(writeErr, syscall.EPIPE):
+		// tshark or Wireshark stopped reading, the capture ends with it; behind adb exec-out stdout is a pty, which fails with EIO when adb is gone
+		case stream && (errors.Is(writeErr, syscall.EPIPE) || errors.Is(writeErr, syscall.EIO)):
 			if app.ctx.Err() == nil {
 				app.logger.Info("Capture stream reader went away, stopping")
 			}
@@ -395,15 +427,7 @@ func (app *App) StartCapture() (err error) {
 
 // both programs see every packet of every socket and copy the ones of recorded sockets, they are attached before AttachRedirect records the first flow
 func (app *App) AttachCapture() (err error) {
-	attachments := []struct {
-		program    bpf.BpfProgramName
-		attachType ebpf.AttachType
-	}{
-		{program: capturebpf.CaptureIngress, attachType: ebpf.AttachCGroupInetIngress},
-		{program: capturebpf.CaptureEgress, attachType: ebpf.AttachCGroupInetEgress},
-	}
-
-	for _, attachment := range attachments {
+	for _, attachment := range app.captureAttachments() {
 		closeFunction, attachErr := attach.AddCgroup(attach.CgroupRoot, app.captureBpfPrograms[attachment.program], attachment.attachType)
 
 		if err = attachErr; err != nil {
@@ -475,18 +499,18 @@ func (app *App) StartFlowTable() {
 
 // resolve libssl, detect the OpenSSL version and pick the offsets, then load the secrets object; an unknown version fails here, so this runs before anything is attached
 // in run and capture mode the redirect object has to be loaded already, the secrets object shares its uid_map and tgid_map; in keylog mode it owns them
-// on an architecture without the secrets object keylog mode fails, run and capture mode go on without TLS secrets
+// on an architecture without the secrets object, and on Android without -libssl, keylog mode fails, run and capture mode go on without TLS secrets
 func (app *App) LoadSecretsBpfObjects() (err error) {
-	err = secrets.CheckSupported()
+	supportedErr := secrets.CheckSupported()
 
-	if err != nil {
-		if app.keylog {
-			app.logger.Error("Could not load secrets uprobe", "error", err)
-			return
-		}
+	if supportedErr != nil {
+		err = app.withoutSecrets(supportedErr)
+		return
+	}
 
-		app.logger.Warn("Could not load secrets uprobe, running without TLS secrets", "error", err)
-		err = nil
+	// Android has no system OpenSSL, apps use BoringSSL from Conscrypt; a libssl given with -libssl is still tried
+	if (app.platform.Type == platform.AndroidType) && (app.libssl == "") {
+		err = app.withoutSecrets(ErrNoAndroidSecrets)
 		return
 	}
 
@@ -532,6 +556,23 @@ func (app *App) LoadSecretsBpfObjects() (err error) {
 	app.secretsBpfPrograms = bpfPrograms
 	app.closeFunctions = append(app.closeFunctions, closeFunction)
 	app.logger.Info("Loaded secrets uprobe", "libssl", libsslPath, "version", version)
+	return
+}
+
+// keylog mode can't run without secrets; run mode warns once here, capture mode once in StartCapture, where it says what the file is missing
+func (app *App) withoutSecrets(reason error) (err error) {
+	if app.keylog {
+		err = reason
+		app.logger.Error("Could not load secrets uprobe", "error", err)
+		return
+	}
+
+	app.secretsErr = reason
+
+	if app.capturePath == "" {
+		app.logger.Warn("Could not load secrets uprobe, running without TLS secrets", "error", reason)
+	}
+
 	return
 }
 
@@ -604,6 +645,173 @@ func (app *App) AttachSecrets() (err error) {
 	}
 
 	app.logger.Info("Attached secrets uprobe", "libssl", app.libssl, "symbols", secrets.SymbolHooks(), "uids", app.filter.UIDs, "pids", app.filter.Tgids)
+	return
+}
+
+// on Android: create the data directory, take the lock and, when a decerter before was killed while it shared netd's hooks, put them back before anything else
+// the lock is released last in Shutdown, after the hooks are back
+// SIGPIPE is ignored there, a closed adb session must not kill decerter before it restored the hooks; logs to a closed stderr are lost then
+func (app *App) PreparePlatform() (err error) {
+	if app.platform.Type != platform.AndroidType {
+		return
+	}
+
+	app.logger.Debug("Running on Android", "sdk", app.platform.SDK, "release", app.platform.Release, "dataDirectory", app.platform.DataDirectory)
+	signal.Ignore(syscall.SIGPIPE)
+	err = app.lockDataDirectory()
+
+	if err != nil {
+		return
+	}
+
+	err = app.restoreNetdState(true)
+	return
+}
+
+func (app *App) lockDataDirectory() (err error) {
+	err = platform.CreateDataDirectory(app.platform.DataDirectory)
+
+	if err != nil {
+		app.logger.Error("Could not create data directory", "error", err)
+		return
+	}
+
+	unlock, lockErr := attach.LockNetdState(filepath.Join(app.platform.DataDirectory, lockName))
+
+	if err = lockErr; err != nil {
+		app.logger.Error("Could not lock data directory", "error", err)
+		return
+	}
+
+	app.closeFunctions = append(app.closeFunctions, unlock)
+	return
+}
+
+// the -android-restore entry point: put netd's hooks back from the state a killed decerter left, refused while another decerter runs
+func (app *App) RestoreNetdHooks() (err error) {
+	if app.platform.Type != platform.AndroidType {
+		app.logger.Info("Not on Android, nothing to restore")
+		return
+	}
+
+	err = app.lockDataDirectory()
+
+	if err != nil {
+		return
+	}
+
+	err = app.restoreNetdState(false)
+	return
+}
+
+// isStale is the check at start, a state file then means the decerter before did not exit cleanly
+// the state file is removed only when every hook is back
+func (app *App) restoreNetdState(isStale bool) (err error) {
+	statePath := filepath.Join(app.platform.DataDirectory, netdStateName)
+	state, readErr := attach.ReadNetdState(statePath)
+
+	if errors.Is(readErr, fs.ErrNotExist) {
+		if !isStale {
+			app.logger.Info("No netd hook state, nothing to restore", "fileName", statePath)
+		}
+
+		return
+	}
+
+	if err = readErr; err != nil {
+		app.logger.Error("Could not read netd hook state", "error", err, "fileName", statePath)
+		return
+	}
+
+	if isStale {
+		app.logger.Warn("Found the netd hook state of a decerter that did not exit cleanly, restoring netd's hooks first", "fileName", statePath, "pid", state.Pid)
+	}
+
+	restored, restoreErr := attach.RestoreHooks(state.Cgroup, state.Hooks)
+	app.logRestoredHooks(restored)
+
+	if err = restoreErr; err != nil {
+		app.logger.Error("Could not restore netd hooks, the state file is kept for decerter -android-restore", "error", err, "fileName", statePath)
+		return
+	}
+
+	err = attach.RemoveNetdState(statePath)
+
+	if err != nil {
+		app.logger.Error("Could not remove netd hook state", "error", err, "fileName", statePath)
+		return
+	}
+
+	app.logger.Info("Netd hooks are exclusive again", "hooks", len(state.Hooks), "restored", len(restored))
+	return
+}
+
+func (app *App) logRestoredHooks(restored []attach.SharedHook) {
+	for _, hook := range restored {
+		app.logger.Info("Restored netd cgroup hook", "attachType", hook.AttachTypeName, "program", hook.ProgramName, "programId", hook.ProgramID, "flags", hook.Flags, "gap", hook.Gap)
+	}
+}
+
+// a hook held by one program without BPF_F_ALLOW_MULTI refuses decerter's links: on Android that is netd, its program is attached again in multi mode before decerter's links and put back by Shutdown after them
+// on Linux the owner is unknown, so decerter refuses to start instead of changing it; usually nothing is held and this does nothing
+// called right before the first cgroup link is attached
+func (app *App) ShareNetdHooks() (err error) {
+	attachTypes := []ebpf.AttachType{}
+
+	for _, attachment := range slices.Concat(app.captureAttachments(), app.redirectAttachments()) {
+		attachTypes = append(attachTypes, attachment.attachType)
+	}
+
+	hooks, queryErr := attach.ExclusiveHooks(attach.CgroupRoot, attachTypes)
+
+	if err = queryErr; err != nil {
+		app.logger.Error("Could not query cgroup hooks", "error", err)
+		return
+	}
+
+	if len(hooks) == 0 {
+		app.logger.Debug("No exclusive cgroup hooks")
+		return
+	}
+
+	if app.platform.Type != platform.AndroidType {
+		held := []string{}
+
+		for _, hook := range hooks {
+			held = append(held, fmt.Sprintf("%s by program %d %s", hook.AttachTypeName, hook.ProgramID, hook.ProgramName))
+		}
+
+		err = fmt.Errorf("%w: %s", attach.ErrExclusiveHook, strings.Join(held, ", "))
+		app.logger.Error("Could not attach to cgroup", "error", err, "cgroup", attach.CgroupRoot)
+		return
+	}
+
+	statePath := filepath.Join(app.platform.DataDirectory, netdStateName)
+	shared, shareErr := attach.ShareHooks(attach.CgroupRoot, hooks, statePath)
+
+	if err = shareErr; err != nil {
+		app.logger.Error("Could not share netd hooks", "error", err, "fileName", statePath)
+		return
+	}
+
+	for _, hook := range shared {
+		app.logger.Info("Shared netd cgroup hook", "attachType", hook.AttachTypeName, "program", hook.ProgramName, "programId", hook.ProgramID, "pin", hook.PinPath, "gap", hook.Gap)
+	}
+
+	// runs after every cgroup link is closed, they are appended later
+	app.closeFunctions = append(app.closeFunctions, func() (closeErr error) {
+		restored, restoreErr := attach.RestoreHooks(attach.CgroupRoot, shared)
+		app.logRestoredHooks(restored)
+
+		if closeErr = restoreErr; closeErr != nil {
+			app.logger.Error("Could not restore netd hooks, the state file is kept for decerter -android-restore", "error", closeErr, "fileName", statePath)
+			return
+		}
+
+		closeErr = attach.RemoveNetdState(statePath)
+		return
+	})
+
 	return
 }
 

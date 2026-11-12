@@ -389,7 +389,7 @@ func Read(ctx context.Context, flowMap *ebpf.Map, output io.Writer) {
 						client = flow.Client.String()
 					}
 
-					fmt.Fprintf(&table, "%-20d %-5s %-47s %-10t %-8d %-8d %-16s %-10d %-47s\n", sortedCookie, ProtocolName(flow.IPProtocol), flow.OriginalDestination, flow.Redirected, flow.Tgid, flow.UID, flow.Comm, flow.CgroupID, client)
+					fmt.Fprintf(&table, "%-20d %-5s %-47s %-10t %-8d %-8d %-16s %-10d %#-10x %-47s\n", sortedCookie, ProtocolName(flow.IPProtocol), flow.OriginalDestination, flow.Redirected, flow.Tgid, flow.UID, flow.Comm, flow.CgroupID, flow.Mark, client)
 				}
 			}
 
@@ -411,6 +411,7 @@ func flowFromBpf(bpfFlow bpfFlow) (flow Flow) {
 		UID:                 bpfFlow.Uid,
 		CgroupID:            bpfFlow.CgroupId,
 		Comm:                commToString(bpfFlow.Comm),
+		Mark:                bpfFlow.Mark,
 		Client:              netip.AddrPort{},
 	}
 

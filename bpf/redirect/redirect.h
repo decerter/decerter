@@ -228,6 +228,14 @@ uint16_t check_flow(struct bpf_sock_addr *ctx, struct flow *flow)
 	flow->uid = uid;
 	flow->cgroup_id = bpf_get_current_cgroup_id();
 
+	//netd sets the fwmark of the app's network before connect, the upstream socket of the proxy needs it to leave over the same network
+	struct bpf_sock *sk = ctx->sk;
+
+	if (sk)
+	{
+		flow->mark = sk->mark;
+	}
+
 	//comm of the thread group leader like /proc/<tgid>/comm, read here so a process that exits before the proxy accepts keeps its name
 	//bpf_get_current_comm would give the name of the calling thread, it is only the fallback if the read fails
 	struct task_struct *task = bpf_get_current_task_btf();

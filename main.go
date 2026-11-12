@@ -19,11 +19,13 @@ import (
 	"github.com/decerter/decerter/app"
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
 	"github.com/decerter/decerter/internal/bpf/redirect"
+	"github.com/decerter/decerter/internal/platform"
 )
 
 var (
 	errModeConflict     = errors.New("-capture can't be combined with -keylog or -decrypt")
 	errPlaintextCapture = errors.New("-plaintext needs -capture")
+	errRestoreAlone     = errors.New("-android-restore can't be combined with -capture, -keylog or -decrypt")
 )
 
 var (
@@ -37,6 +39,7 @@ var (
 	capturePath    string
 	plaintext      bool
 	snaplen        uint32 = capturebpf.MaxSnaplen
+	androidRestore bool
 )
 
 func main() {
@@ -49,9 +52,10 @@ func main() {
 	flag.BoolVar(&flowTable, "flow-table", false, "print the flow_map table every 5 seconds, for debugging")
 	flag.BoolVar(&keylog, "keylog", false, "print the TLS secrets of the selected processes on stdout in NSS key log format until stopped, logs go to stderr; only the libssl secrets uprobe is attached, nothing is redirected (default is false)")
 	flag.BoolVar(&decrypt, "decrypt", false, "decrypt the TLS records of the redirected tcp flows with the secrets of the libssl uprobe and print the plaintext of the application data on stdout, escaped and at most 2048 bytes per record; the flows are relayed unchanged (default is false)")
-	flag.StringVar(&libssl, "libssl", "", "path of the libssl.so the secrets uprobe is attached to, libcrypto.so.3 is read from the same directory (default is the libssl.so.3 of the dynamic linker cache; a process that bundles or statically links its own libssl is not covered)")
-	flag.StringVar(&capturePath, "capture", "", "write the packets of the selected flows and the TLS secrets of their sessions to this pcapng file until stopped, Wireshark and tshark decrypt it without a key log; nothing is redirected, the flows reach their servers directly; the file holds secrets and is created with mode 0600; - writes a live pcapng stream to stdout for tshark -i - or wireshark -k -i -, each block when it is written, stdout must not be a terminal and decerter stops when the reader goes away (default is off)")
+	flag.StringVar(&libssl, "libssl", "", "path of the libssl.so the secrets uprobe is attached to, libcrypto.so.3 is read from the same directory (default is the libssl.so.3 of the dynamic linker cache; a process that bundles or statically links its own libssl is not covered; Android has no system OpenSSL, run and capture mode go on there without TLS secrets unless this is given)")
+	flag.StringVar(&capturePath, "capture", "", "write the packets of the selected flows and the TLS secrets of their sessions to this pcapng file until stopped, Wireshark and tshark decrypt it without a key log; nothing is redirected, the flows reach their servers directly; the file holds secrets and is created with mode 0600; - writes a live pcapng stream to stdout for tshark -i - or wireshark -k -i -, each block when it is written, stdout must not be an interactive terminal (the raw pty of adb exec-out is fine) and decerter stops when the reader goes away (default is off)")
 	flag.BoolVar(&plaintext, "plaintext", false, "with -capture: write synthesized packets with the decrypted payload instead of the captured packets, so tcpdump and every other tool reads the plaintext; the tcp streams are put back in order and the TLS sessions decrypted, a flow keeps its addresses and ports and gets new sequence numbers, a flow that is not TLS keeps its payload; the file holds no secrets but the plaintext (default is false)")
+	flag.BoolVar(&androidRestore, "android-restore", false, "put netd's cgroup hooks back to exclusive mode from the state a killed decerter left in the data directory (/data/local/tmp/decerter.d), then exit; needed after a SIGKILL, before netd restarts; refused while another decerter runs, does nothing outside of Android (default is false)")
 	flag.Func("snaplen", "most bytes copied of a captured packet, counted from the IP header, a packet cut short can't be decrypted and is a hole in its tcp stream with -plaintext (default is 262144, the largest value)", parseSnaplen)
 	flag.Parse()
 	err := run()
@@ -230,7 +234,8 @@ func parseSnaplen(value string) (err error) {
 }
 
 func run() (err error) {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	// SIGHUP: on Android a closed adb shell must still let decerter put netd's hooks back
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer cancel()
 	logger := slog.Default()
 
@@ -247,11 +252,29 @@ func run() (err error) {
 		return
 	}
 
-	decerter := app.New(ctx, filter, proxyPort, udpIdleTimeout, flowTable, keylog, decrypt, libssl, capturePath, plaintext, snaplen, logger)
+	if androidRestore && ((capturePath != "") || keylog || decrypt) {
+		err = errRestoreAlone
+		logger.Error("Could not start", "error", err)
+		return
+	}
+
+	decerter := app.New(ctx, filter, proxyPort, udpIdleTimeout, flowTable, keylog, decrypt, libssl, capturePath, plaintext, snaplen, platform.Detect("/"), logger)
 
 	defer func() {
 		err = errors.Join(err, decerter.Shutdown())
 	}()
+
+	if androidRestore {
+		err = decerter.RestoreNetdHooks()
+		return
+	}
+
+	// on Android a decerter killed before puts netd's hooks back first
+	err = decerter.PreparePlatform()
+
+	if err != nil {
+		return
+	}
 
 	// keylog mode loads and attaches only the libssl secrets uprobe and prints key log lines
 	if keylog {
@@ -319,6 +342,12 @@ func run() (err error) {
 			return
 		}
 
+		err = decerter.ShareNetdHooks()
+
+		if err != nil {
+			return
+		}
+
 		err = decerter.AttachCapture()
 
 		if err != nil {
@@ -358,6 +387,12 @@ func run() (err error) {
 
 	// the uprobe is attached first, so the first redirected connection already leaves its secrets in secrets_map
 	err = decerter.AttachSecrets()
+
+	if err != nil {
+		return
+	}
+
+	err = decerter.ShareNetdHooks()
 
 	if err != nil {
 		return

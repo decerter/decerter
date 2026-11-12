@@ -37,6 +37,7 @@ struct prefix_key {
 //redirected: 1 if the destination was rewritten to the proxy, 0 if the flow is only recorded
 //comm: name of the process (thread group leader) at connect/sendmsg time, NUL terminated
 //client: source endpoint of a redirected UDP socket as the proxy sees it, learned from its first datagram to the proxy, zero for TCP (sockops keeps it in client_map only)
+//mark: SO_MARK of the socket at connect/sendmsg time, on Android netd's fwmark that selects the network, the proxy sets it on its upstream socket, 0 when the socket has none
 //released_ns: bpf_ktime_get_ns() (CLOCK_MONOTONIC) when a redirected UDP socket was released, in capture mode when any recorded socket was released or reached TCP_CLOSE, 0 while it is open, Go removes the flow a grace time later
 struct flow {
 	uint32_t ip[4];
@@ -45,7 +46,7 @@ struct flow {
 	uint8_t redirected;
 	uint32_t tgid;
 	uint32_t uid;
-	uint32_t pad32;
+	uint32_t mark;
 	uint64_t cgroup_id;
 	char comm[TASK_COMM_LEN];
 	struct endpoint client;

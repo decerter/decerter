@@ -4,6 +4,9 @@
 
 # Build Default Variables
 VMLINUX ?= ./bpf/vmlinux.h
+VMLINUX_ARM64 ?= ./bpf/vmlinux-arm64.h
+BPFTOOL ?= bpftool
+ADB ?= adb
 BPF_CFLAGS ?=
 CLANG ?= clang-21
 LLVM_STRIP ?= llvm-strip-21
@@ -23,7 +26,18 @@ help: ## Show this help
 ### Generate Files ###
 .PHONY: generate-vmlinux
 generate-vmlinux: ## Generate vmlinux.h, location can be changed with VMLINUX variable, default is ./bpf/vmlinux.h
-	bpftool btf dump file /sys/kernel/btf/vmlinux format c > ${VMLINUX}
+	$(BPFTOOL) btf dump file /sys/kernel/btf/vmlinux format c > ${VMLINUX}
+
+# the BTF is read as the adb shell user first (adb root, or a device where shell may read it), then through su -c (Magisk, KernelSU)
+# bpftool checks what exec-out gave, a cat that failed leaves an error message instead of BTF
+.PHONY: generate-vmlinux-arm64
+generate-vmlinux-arm64: ## Generate vmlinux.h for the arm64 uprobe build from the BTF of the device adb is connected to, location can be changed with VMLINUX_ARM64 variable, default is ./bpf/vmlinux-arm64.h
+	@arch="$$($(ADB) shell uname -m | tr -d '\r')"; \
+	[ "$$arch" = aarch64 ] || echo "warning: the device is $$arch, not aarch64, the header is not for arm64" >&2; \
+	{ $(ADB) exec-out cat /sys/kernel/btf/vmlinux > ${VMLINUX_ARM64}.btf && $(BPFTOOL) btf dump file ${VMLINUX_ARM64}.btf format c > ${VMLINUX_ARM64}.tmp 2>/dev/null; } || \
+	{ $(ADB) exec-out su -c 'cat /sys/kernel/btf/vmlinux' > ${VMLINUX_ARM64}.btf && $(BPFTOOL) btf dump file ${VMLINUX_ARM64}.btf format c > ${VMLINUX_ARM64}.tmp; } && \
+	mv ${VMLINUX_ARM64}.tmp ${VMLINUX_ARM64} && echo "wrote ${VMLINUX_ARM64} from the BTF of $$($(ADB) shell uname -r | tr -d '\r') $$arch"; \
+	status=$$?; rm -f ${VMLINUX_ARM64}.btf ${VMLINUX_ARM64}.tmp; exit $$status
 
 .PHONY: generate-libbpf-headers
 generate-libbpf-headers: ## Vendor libbpf headers of LIBBPF_VERSION into bpf/include/bpf

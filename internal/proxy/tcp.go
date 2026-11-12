@@ -136,6 +136,7 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 	// the own tgid is excluded in connect4/6, so this dial is not redirected again
 	dialer := net.Dialer{
 		Timeout: dialTimeout,
+		Control: markControl(flow.Mark),
 	}
 	upstreamConnection, dialErr := dialer.DialContext(ctx, "tcp", flow.OriginalDestination.String())
 
