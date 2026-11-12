@@ -8,9 +8,13 @@ import (
 	"cmp"
 	"errors"
 	"fmt"
+	"io/fs"
+	"math"
 	"net/netip"
+	"os"
 	"reflect"
 	"slices"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -512,4 +516,151 @@ func passes(selection filter.Selection, values filter.Values) (isPassed bool) {
 
 	isPassed = true
 	return
+}
+
+// Test if filter.Parse returns with the expected output for every escape of a string.
+func TestEscapePositive(state *testing.T) {
+	positiveCases := []struct {
+		Filter   string
+		Expected string
+	}{
+		{Filter: `tls.sni == "\a\b\f\n\r\t\v\'"`, Expected: "\a\b\f\n\r\t\v'"},
+		{Filter: `tls.sni == "\101\x41ü\U0001F600"`, Expected: "AAü😀"},
+		// an octal escape takes at most three digits, the fourth is a character of its own
+		{Filter: `tls.sni == "\1011"`, Expected: "A1"},
+		// a raw string keeps every backslash
+		{Filter: `tls.sni == r"a\n\"b"`, Expected: `a\n\"b`},
+	}
+
+	for _, positive := range positiveCases {
+		parsed, err := filter.Parse(positive.Filter)
+
+		if err != nil {
+			state.Errorf("Test of filter.Parse function failed, filter: %s, error: %s", positive.Filter, err.Error())
+			return
+		}
+
+		result := parsed.Evaluate(curlValues.WithClientHello(true, 0x0304, positive.Expected, nil))
+
+		if result != filter.TrueResult {
+			state.Errorf("Test of filter.Parse function failed, filter: %s, result for %q should be %v, result: %v", positive.Filter, positive.Expected, filter.TrueResult, result)
+			return
+		}
+	}
+}
+
+// Test if filter.Parse returns with the expected errors for wrong escapes and slips.
+func TestEscapeNegative(state *testing.T) {
+	negativeCases := []struct {
+		Filter string
+		Column int
+		Length int
+		Err    error
+	}{
+		{Filter: `tls.sni == "\400"`, Column: 13, Length: 4, Err: filter.ErrEscape},
+		{Filter: `tls.sni == "\xg"`, Column: 13, Length: 2, Err: filter.ErrEscape},
+		{Filter: `tls.sni == "\u12"`, Column: 13, Length: 4, Err: filter.ErrEscape},
+		{Filter: `tls.sni == "\UFFFFFFFF"`, Column: 13, Length: 10, Err: filter.ErrEscape},
+		{Filter: `tls.sni == "\uD800"`, Column: 13, Length: 6, Err: filter.ErrEscape},
+		{Filter: `tls.sni == "\é"`, Column: 13, Length: 2, Err: filter.ErrEscape},
+		{Filter: `tls.sni == "x\`, Column: 12, Length: 3, Err: filter.ErrSyntax},
+		{Filter: `tcp & udp`, Column: 5, Length: 1, Err: filter.ErrSyntax},
+		{Filter: `tcp | udp`, Column: 5, Length: 1, Err: filter.ErrSyntax},
+		{Filter: `tcp $ udp`, Column: 5, Length: 1, Err: filter.ErrSyntax},
+	}
+
+	for _, negative := range negativeCases {
+		_, err := filter.Parse(negative.Filter)
+		positionErr, ok := errors.AsType[*filter.PositionError](err)
+
+		if !ok || !errors.Is(err, negative.Err) || (positionErr.Column != negative.Column) || (positionErr.Length != negative.Length) {
+			state.Errorf("Test of filter.Parse function failed, filter: %s, error should be %v at column %d length %d, error: %v %+v", negative.Filter, negative.Err, negative.Column, negative.Length, err, positionErr)
+			return
+		}
+	}
+}
+
+// Test if filter.PositionError returns with the expected output.
+func TestPositionErrorPositive(state *testing.T) {
+	positiveCases := []struct {
+		Filter  string
+		Message string
+		Marker  string
+	}{
+		{Filter: `proc.comm = "curl"`, Message: `column 11: syntax error: unexpected "=", equality is ==`, Marker: "proc.comm = \"curl\"\n          ^"},
+		{Filter: `proc.cmd == "curl"`, Message: `column 1: unknown field: "proc.cmd" is not a field of the filter`, Marker: "proc.cmd == \"curl\"\n^~~~~~~~"},
+		// columns count characters, not bytes
+		{Filter: `tls.sni == "ü" && x`, Message: `column 19: unknown field: "x" is not a field of the filter`, Marker: "tls.sni == \"ü\" && x\n                  ^"},
+	}
+
+	for _, positive := range positiveCases {
+		_, err := filter.Parse(positive.Filter)
+		positionErr, ok := errors.AsType[*filter.PositionError](err)
+
+		if !ok {
+			state.Errorf("Test of filter.PositionError failed, filter: %s, error should be a position error, error: %v", positive.Filter, err)
+			return
+		}
+
+		if (positionErr.Error() != positive.Message) || (positionErr.Marker() != positive.Marker) {
+			state.Errorf("Test of filter.PositionError failed, filter: %s, message should be %q marker %q, message: %q marker: %q", positive.Filter, positive.Message, positive.Marker, positionErr.Error(), positionErr.Marker())
+			return
+		}
+	}
+
+	parsed, err := filter.Parse(`tcp  &&  udp`)
+
+	if (err != nil) || (parsed.String() != `tcp  &&  udp`) {
+		state.Errorf("Test of filter.Filter.String function failed, text should be %q, text: %q, error: %v", `tcp  &&  udp`, parsed.String(), err)
+		return
+	}
+}
+
+// Test if filter.ReadCmdline and filter.ReadExe return with the expected output.
+func TestReadProcessPositive(state *testing.T) {
+	tgid := uint32(os.Getpid())
+	cmdline, err := filter.ReadCmdline(tgid)
+
+	if err != nil {
+		state.Errorf("Test of filter.ReadCmdline function failed, error: %s", err.Error())
+		return
+	}
+
+	// the arguments are joined by spaces, without the trailing NUL
+	if cmdline != strings.Join(os.Args, " ") {
+		state.Errorf("Test of filter.ReadCmdline function failed, cmdline should be %q, cmdline: %q", strings.Join(os.Args, " "), cmdline)
+		return
+	}
+
+	exe, err := filter.ReadExe(tgid)
+
+	if err != nil {
+		state.Errorf("Test of filter.ReadExe function failed, error: %s", err.Error())
+		return
+	}
+
+	executable, err := os.Executable()
+
+	if (err != nil) || (exe != executable) {
+		state.Errorf("Test of filter.ReadExe function failed, exe should be %q, exe: %q, error: %v", executable, exe, err)
+		return
+	}
+}
+
+// Test if filter.ReadCmdline and filter.ReadExe return with the expected errors.
+func TestReadProcessNegative(state *testing.T) {
+	// no process has this tgid, the kernel's pid_max is at most 2^22
+	_, err := filter.ReadCmdline(math.MaxUint32)
+
+	if !errors.Is(err, filter.ErrProcess) || !errors.Is(err, fs.ErrNotExist) {
+		state.Errorf("Test of filter.ReadCmdline function failed, error should be %v, error: %v", filter.ErrProcess, err)
+		return
+	}
+
+	_, err = filter.ReadExe(math.MaxUint32)
+
+	if !errors.Is(err, filter.ErrProcess) || !errors.Is(err, fs.ErrNotExist) {
+		state.Errorf("Test of filter.ReadExe function failed, error should be %v, error: %v", filter.ErrProcess, err)
+		return
+	}
 }
