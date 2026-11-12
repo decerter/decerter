@@ -1,0 +1,6 @@
+SPDX-License-Identifier: AGPL-3.0-only
+
+Test-only server certificates and keys, copied unchanged from eproxy
+(branch tls-proto-type, working tree, test/crypto/assets/server/server_{rsa,ecdsa}.{crt,key}).
+Both are self-signed, valid until 2033-12-26 and have no subjectAltName, so curl checks them
+with --pinnedpubkey instead of a host name. The keys protect nothing outside the e2e tests.

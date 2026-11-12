@@ -88,3 +88,9 @@ build-arm64: ## Run static go build for linux/arm64 from the committed bpf objec
 .PHONY: run
 run: build ## Run decerter with sudo
 	sudo ./decerter $(ARGS)
+
+### Test ###
+# root loads the bpf programs; curl runs as the local user test, which decerter selects, and as nobody, which it doesn't
+.PHONY: test-e2e
+test-e2e: ## Run the e2e tests with sudo, needs root and the local users test and nobody
+	sudo go test -tags=e2e -count=1 ./test/e2e/
