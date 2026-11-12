@@ -31,7 +31,7 @@ type bpfFlow struct {
 		IpProtocol uint8
 		Padding    uint8
 	}
-	Pad32End   uint32
+	Gid        uint32
 	ReleasedNs uint64
 }
 

@@ -66,10 +66,17 @@ struct packet_info {
 
 //cidr_filter: 1 if the destination address has to match cidr_map, 0 if every address passes
 //port_filter: 1 if the destination port + IP protocol has to match port_map, 0 if every port passes
+//comm_filter: 1 if the process name has to match comm_map, 0 if every name passes
 struct filter_config {
 	uint8_t cidr_filter;
 	uint8_t port_filter;
-	uint16_t padding;
+	uint8_t comm_filter;
+	uint8_t padding;
+};
+
+//comm: name of the process like struct flow's, NUL padded to TASK_COMM_LEN
+struct comm_key {
+	char comm[TASK_COMM_LEN];
 };
 
 //port: destination port in host byte order, ip_protocol: IPPROTO_TCP or IPPROTO_UDP
@@ -113,6 +120,14 @@ struct {
 	__type(value, uint8_t);
 } port_map SEC(".maps");
 
+//Key: process name of the comm filter, Value: 1, only read while filter_config.comm_filter is set
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 1024);
+	__type(key, struct comm_key);
+	__type(value, uint8_t);
+} comm_map SEC(".maps");
+
 //Key: client endpoint of a redirected TCP connection or UDP socket: IP address + layer 4 port + IP protocol, Value: socket cookie
 struct {
 	__uint(type, BPF_MAP_TYPE_LRU_HASH);
@@ -142,8 +157,8 @@ bool is_selected_process(uint32_t tgid, uint32_t uid)
 	return false;
 }
 
-//Check if the destination of the flow passes the port and the CIDR filter, a filter that is not set passes everything
-bool is_selected_destination(struct flow *flow)
+//Check if the flow passes the port, the CIDR and the comm filter, a filter that is not set passes everything, comm has to be filled
+bool is_selected_flow(struct flow *flow)
 {
 	if (!flow)
 	{
@@ -186,10 +201,22 @@ bool is_selected_destination(struct flow *flow)
 		}
 	}
 
+	if (filter_config->comm_filter)
+	{
+		struct comm_key key = {};
+
+		__builtin_memcpy(key.comm, flow->comm, sizeof(key.comm));
+
+		if (!bpf_map_lookup_elem(&comm_map, &key))
+		{
+			return false;
+		}
+	}
+
 	return true;
 }
 
-//Check if the flow is in scope: a selected process and a destination that passes the filters, and fill its protocol, port and process, its destination address is already filled
+//Check if the flow is in scope: a selected process and a destination and name that pass the filters, and fill its protocol, port and process, its destination address is already filled
 uint16_t check_flow(struct bpf_sock_addr *ctx, struct flow *flow)
 {
 	if ((!ctx) || (!flow))
@@ -199,7 +226,8 @@ uint16_t check_flow(struct bpf_sock_addr *ctx, struct flow *flow)
 
 	uint64_t pid_tgid = bpf_get_current_pid_tgid();
 	uint32_t tgid = pid_tgid >> 32;
-	uint32_t uid = bpf_get_current_uid_gid();
+	uint64_t uid_gid = bpf_get_current_uid_gid();
+	uint32_t uid = uid_gid;
 
 	//most connects and sends of the system leave here
 	if (!is_selected_process(tgid, uid))
@@ -210,9 +238,18 @@ uint16_t check_flow(struct bpf_sock_addr *ctx, struct flow *flow)
 	flow->ip_protocol = ctx->protocol;
 	flow->port = bpf_ntohs(ctx->user_port);
 
+	//comm of the thread group leader like /proc/<tgid>/comm, read here so a process that exits before the proxy accepts keeps its name, and the comm filter can check it
+	//bpf_get_current_comm would give the name of the calling thread, it is only the fallback if the read fails
+	struct task_struct *task = bpf_get_current_task_btf();
+
+	if (BPF_CORE_READ_STR_INTO(&flow->comm, task, group_leader, comm) < 0)
+	{
+		bpf_get_current_comm(&flow->comm, sizeof(flow->comm));
+	}
+
 	//a socket with a flow of an earlier destination keeps it, restore_destination4/6 only touch the proxy address
 	//in capture mode that flow would get the packets to the new destination captured, so it is removed
-	if (!is_selected_destination(flow))
+	if (!is_selected_flow(flow))
 	{
 		if (record_only)
 		{
@@ -226,6 +263,7 @@ uint16_t check_flow(struct bpf_sock_addr *ctx, struct flow *flow)
 
 	flow->tgid = tgid;
 	flow->uid = uid;
+	flow->gid = uid_gid >> 32;
 	flow->cgroup_id = bpf_get_current_cgroup_id();
 
 	//netd sets the fwmark of the app's network before connect, the upstream socket of the proxy needs it to leave over the same network
@@ -234,15 +272,6 @@ uint16_t check_flow(struct bpf_sock_addr *ctx, struct flow *flow)
 	if (sk)
 	{
 		flow->mark = sk->mark;
-	}
-
-	//comm of the thread group leader like /proc/<tgid>/comm, read here so a process that exits before the proxy accepts keeps its name
-	//bpf_get_current_comm would give the name of the calling thread, it is only the fallback if the read fails
-	struct task_struct *task = bpf_get_current_task_btf();
-
-	if (BPF_CORE_READ_STR_INTO(&flow->comm, task, group_leader, comm) < 0)
-	{
-		bpf_get_current_comm(&flow->comm, sizeof(flow->comm));
 	}
 
 	return REDIRECT;

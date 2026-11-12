@@ -12,6 +12,7 @@ import (
 	"github.com/decerter/decerter/internal/bpf"
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
 	"github.com/decerter/decerter/internal/bpf/secrets"
+	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/pcapng"
 	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
@@ -52,6 +53,7 @@ const (
 )
 
 // what the writer keeps of one recorded socket
+// scope is the decision of the scope filter, opening what a flow keeps until it is decided
 // conn reads the ClientHello and is nil once the client_random is known, isDTLS tells a DTLS session over UDP from a TLS session over TCP
 // held are the packets that wait from the ClientHello on, heldBytes their length
 // pollPause and nextPoll spread the lookups of the secrets, holdStart is when the ClientHello came
@@ -73,9 +75,12 @@ type flow struct {
 	nextPoll        time.Time
 	lastPacket      time.Time
 	connection      *connection
+	scope           scopeState
+	opening         *opening
 }
 
 // the state of the capture writer, only the goroutine of Write uses it
+// scope decides which flows go into the file, nil writes every recorded flow; pending are the cookies of the flows it has not decided yet
 // holding are the cookies of the held flows in the order their hold started, heldBytes the packets of all of them
 // nextWake is when tick has to run again: the next lookup of a held flow, or idleWake away when nothing is held
 // plaintext is the -plaintext mode: synthesized packets with the decrypted payload are written instead of the captured ones, buffer is the packet being built and parts what a stream gave for the packet being read
@@ -89,6 +94,8 @@ type recorder struct {
 	captureBpfMaps  map[bpf.BpfMapName]*ebpf.Map
 	secretsBpfMaps  map[bpf.BpfMapName]*ebpf.Map
 	flows           map[uint64]*flow
+	scope           *filter.Filter
+	pending         []uint64
 	holding         []uint64
 	heldBytes       int
 	nextWake        time.Time
@@ -101,7 +108,7 @@ type recorder struct {
 	logger          *slog.Logger
 }
 
-func newRecorder(writer *pcapng.Writer, plaintext bool, bootOffset int64, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, now time.Time, logger *slog.Logger) (newRecorder recorder) {
+func newRecorder(writer *pcapng.Writer, plaintext bool, bootOffset int64, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, scope *filter.Filter, now time.Time, logger *slog.Logger) (newRecorder recorder) {
 	newRecorder = recorder{
 		writer:          writer,
 		plaintext:       plaintext,
@@ -112,6 +119,8 @@ func newRecorder(writer *pcapng.Writer, plaintext bool, bootOffset int64, captur
 		captureBpfMaps:  captureBpfMaps,
 		secretsBpfMaps:  secretsBpfMaps,
 		flows:           map[uint64]*flow{},
+		scope:           scope,
+		pending:         nil,
 		holding:         nil,
 		heldBytes:       0,
 		nextWake:        now.Add(idleWake),
@@ -126,14 +135,15 @@ func newRecorder(writer *pcapng.Writer, plaintext bool, bootOffset int64, captur
 	return
 }
 
-// write the packet, or keep it while its flow waits for the secrets of its TLS session
-// Wireshark uses the secrets only for the packets behind them in the file and has to have them when it reads the ServerHello, so a flow is held from its ClientHello on
+// write the packet, or keep it while its flow waits for its scope decision or the secrets of its TLS session
+// a flow out of scope writes nothing, a flow whose scope needs its ClientHello keeps its packets until it is decided
 func (recorder *recorder) handle(packet capturebpf.Packet, now time.Time) (err error) {
 	currentFlow, ok := recorder.flows[packet.Cookie]
 
 	if !ok {
 		currentFlow = &flow{
 			state:           watchedFlowState,
+			scope:           inScopeState,
 			conn:            nil,
 			isDTLS:          false,
 			isDescribed:     false,
@@ -148,6 +158,7 @@ func (recorder *recorder) handle(packet capturebpf.Packet, now time.Time) (err e
 			nextPoll:        time.Time{},
 			lastPacket:      now,
 			connection:      nil,
+			opening:         nil,
 		}
 
 		// without the secrets uprobe there is nothing to wait for
@@ -156,8 +167,24 @@ func (recorder *recorder) handle(packet capturebpf.Packet, now time.Time) (err e
 		}
 
 		recorder.flows[packet.Cookie] = currentFlow
+		recorder.startScope(packet.Cookie, currentFlow, packet, now)
 	}
 
+	switch currentFlow.scope {
+	case outScopeState:
+		currentFlow.lastPacket = now
+	case pendingScopeState:
+		err = recorder.wait(packet.Cookie, currentFlow, packet, now)
+	default:
+		err = recorder.record(packet.Cookie, currentFlow, packet, now)
+	}
+
+	return
+}
+
+// write the packet of a flow in scope, or keep it while its flow waits for the secrets of its TLS session
+// Wireshark uses the secrets only for the packets behind them in the file and has to have them when it reads the ServerHello, so a flow is held from its ClientHello on
+func (recorder *recorder) record(cookie uint64, currentFlow *flow, packet capturebpf.Packet, now time.Time) (err error) {
 	currentFlow.lastPacket = now
 	direction := pcapng.OutboundDirection
 
@@ -174,7 +201,7 @@ func (recorder *recorder) handle(packet capturebpf.Packet, now time.Time) (err e
 	}
 
 	if recorder.plaintext {
-		err = recorder.synthesize(packet.Cookie, currentFlow, packet, pcapPacket, now)
+		err = recorder.synthesize(cookie, currentFlow, packet, pcapPacket, now)
 		return
 	}
 
@@ -197,7 +224,7 @@ func (recorder *recorder) handle(packet capturebpf.Packet, now time.Time) (err e
 		}
 
 		if isClientHello {
-			recorder.hold(packet.Cookie, currentFlow, isDatagram, now)
+			recorder.hold(cookie, currentFlow, isDatagram, now)
 		}
 	}
 
@@ -213,7 +240,7 @@ func (recorder *recorder) handle(packet capturebpf.Packet, now time.Time) (err e
 	recorder.heldBytes += len(pcapPacket.Data)
 
 	if !currentFlow.hasClientRandom && (len(payload) > 0) {
-		err = recorder.readClientHello(packet.Cookie, currentFlow, payload)
+		err = recorder.readClientHello(cookie, currentFlow, payload)
 
 		if (err != nil) || (currentFlow.state != heldFlowState) {
 			return
@@ -222,9 +249,9 @@ func (recorder *recorder) handle(packet capturebpf.Packet, now time.Time) (err e
 
 	switch {
 	case currentFlow.heldBytes > maxHoldBytes:
-		err = recorder.giveUp(packet.Cookie, currentFlow, holdLimitReason)
+		err = recorder.giveUp(cookie, currentFlow, holdLimitReason)
 	case recorder.heldBytes > maxTotalHoldBytes:
-		err = recorder.giveUp(packet.Cookie, currentFlow, totalLimitReason)
+		err = recorder.giveUp(cookie, currentFlow, totalLimitReason)
 	default:
 	}
 
@@ -281,6 +308,12 @@ func (recorder *recorder) readClientHello(cookie uint64, heldFlow *flow, payload
 // look the secrets of the held flows up and write the flows whose secrets are there or whose time is over, then forget idle flows and count the drops when that is due
 // the secrets are polled from secrets_map and not read from its ringbuf: a session can be in the map before or after its ClientHello is read here, the two ringbufs have no common order, and an event lost to a full ringbuf would leave a flow without keys
 func (recorder *recorder) tick(now time.Time) (err error) {
+	err = recorder.decideLate(now, false)
+
+	if err != nil {
+		return
+	}
+
 	for _, cookie := range slices.Clone(recorder.holding) {
 		heldFlow := recorder.flows[cookie]
 
@@ -432,19 +465,22 @@ func (recorder *recorder) write(packet pcapng.Packet) (err error) {
 }
 
 // a held flow is never idle here, its hold ends after holdTimeout
+// a flow out of scope is kept while its socket is in flow_map, so it is not decided again
 // a flow that sends again later starts as a new one, which only matters for a ClientHello and that is looked for in every flow
 // in plaintext mode a TCP connection can't start again, its streams and its session would be lost: it is kept while its socket is in flow_map, which holds at most 65535 sockets, and what it still keeps is written before it is forgotten
 // a decrypted DTLS session is kept while its socket is there for the same reason, it keeps nothing to write
 func (recorder *recorder) forgetIdleFlows(now time.Time) (err error) {
 	for cookie, idleFlow := range recorder.flows {
-		if (idleFlow.state == heldFlowState) || (now.Sub(idleFlow.lastPacket) < flowIdleTimeout) {
+		if (idleFlow.state == heldFlowState) || (idleFlow.scope == pendingScopeState) || (now.Sub(idleFlow.lastPacket) < flowIdleTimeout) {
 			continue
 		}
 
 		isOpenConnection := (idleFlow.connection != nil) && !idleFlow.connection.isClosed
 		isDecryptedSession := idleFlow.isDTLS && (idleFlow.state == decryptedFlowState)
+		// a flow out of scope that starts again would be decided again in the middle of its stream, without its first bytes
+		isOutOfScope := idleFlow.scope == outScopeState
 
-		if isOpenConnection || isDecryptedSession {
+		if isOpenConnection || isDecryptedSession || isOutOfScope {
 			isOpen, lookupErr := capturebpf.HasFlow(cookie, recorder.captureBpfMaps)
 
 			if lookupErr != nil {
@@ -488,6 +524,13 @@ func (recorder *recorder) countDropped() {
 
 // the capture stops: the held flows get a last lookup and are written, in plaintext mode with everything the connections still keep, then the file is flushed
 func (recorder *recorder) finish() (err error) {
+	// the flows that wait for their scope are decided without the bytes that did not come
+	err = recorder.decideLate(time.Now(), true)
+
+	if err != nil {
+		return
+	}
+
 	if recorder.plaintext {
 		// in a fixed order, so two captures of the same traffic end the same way
 		for _, cookie := range slices.Sorted(maps.Keys(recorder.flows)) {

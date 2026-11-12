@@ -28,12 +28,13 @@ import (
 const (
 	CidrMap              bpf.BpfMapName     = 0  // value: "cidr_map"
 	ClientMap            bpf.BpfMapName     = 1  // value: "client_map"
-	FilterMap            bpf.BpfMapName     = 2  // value: "filter_map"
-	FlowMap              bpf.BpfMapName     = 3  // value: "flow_map"
-	PortMap              bpf.BpfMapName     = 4  // value: "port_map"
-	RouteMap             bpf.BpfMapName     = 5  // value: "route_map"
-	TgidMap              bpf.BpfMapName     = 6  // value: "tgid_map"
-	UidMap               bpf.BpfMapName     = 7  // value: "uid_map"
+	CommMap              bpf.BpfMapName     = 2  // value: "comm_map"
+	FilterMap            bpf.BpfMapName     = 3  // value: "filter_map"
+	FlowMap              bpf.BpfMapName     = 4  // value: "flow_map"
+	PortMap              bpf.BpfMapName     = 5  // value: "port_map"
+	RouteMap             bpf.BpfMapName     = 6  // value: "route_map"
+	TgidMap              bpf.BpfMapName     = 7  // value: "tgid_map"
+	UidMap               bpf.BpfMapName     = 8  // value: "uid_map"
 	ClientSockops        bpf.BpfProgramName = 0  // value: "client_sockops"
 	ForgetReleasedSocket bpf.BpfProgramName = 1  // value: "forget_released_socket"
 	LearnUdpClient       bpf.BpfProgramName = 2  // value: "learn_udp_client"
@@ -96,6 +97,7 @@ func LoadBpfObjects(proxyPort uint16, proxyTgid uint32, recordOnly bool) (bpfMap
 	bpfMaps = map[bpf.BpfMapName]*ebpf.Map{
 		CidrMap:   objs.CidrMap,
 		ClientMap: objs.ClientMap,
+		CommMap:   objs.CommMap,
 		FilterMap: objs.FilterMap,
 		FlowMap:   objs.FlowMap,
 		PortMap:   objs.PortMap,
@@ -165,9 +167,19 @@ func UpdateBpfMaps(filter Filter, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (err err
 		}
 	}
 
+	for _, comm := range filter.Comms {
+		err = bpfMaps[CommMap].Update(commToKey(comm), uint8(1), ebpf.UpdateAny)
+
+		if err != nil {
+			err = fmt.Errorf("update %s %q: %w", bpfMapCommMap, comm, err)
+			return
+		}
+	}
+
 	filterConfig := bpfFilterConfig{
 		CidrFilter: 0,
 		PortFilter: 0,
+		CommFilter: 0,
 		Padding:    0,
 	}
 
@@ -177,6 +189,10 @@ func UpdateBpfMaps(filter Filter, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (err err
 
 	if len(filter.DestinationPorts) > 0 {
 		filterConfig.PortFilter = 1
+	}
+
+	if len(filter.Comms) > 0 {
+		filterConfig.CommFilter = 1
 	}
 
 	err = bpfMaps[FilterMap].Update(uint32(0), filterConfig, ebpf.UpdateAny)
@@ -251,6 +267,21 @@ func FlowByClient(clientAddressPort netip.AddrPort, ipProtocol uint8, bpfMaps ma
 	}
 
 	err = bpfMaps[FlowMap].Lookup(cookie, &bpfFlow)
+
+	if err != nil {
+		err = fmt.Errorf("%w: %s cookie %d: %w", ErrUnknownFlow, bpfMapFlowMap, cookie, err)
+		return
+	}
+
+	flow = flowFromBpf(bpfFlow)
+	return
+}
+
+// the capture writer reads the flow of a packet's socket, the cookie is in every packet_map record
+func FlowByCookie(cookie uint64, flowMap *ebpf.Map) (flow Flow, err error) {
+	var bpfFlow bpfFlow
+
+	err = flowMap.Lookup(cookie, &bpfFlow)
 
 	if err != nil {
 		err = fmt.Errorf("%w: %s cookie %d: %w", ErrUnknownFlow, bpfMapFlowMap, cookie, err)
@@ -409,6 +440,7 @@ func flowFromBpf(bpfFlow bpfFlow) (flow Flow) {
 		Redirected:          (bpfFlow.Redirected == 1),
 		Tgid:                bpfFlow.Tgid,
 		UID:                 bpfFlow.Uid,
+		GID:                 bpfFlow.Gid,
 		CgroupID:            bpfFlow.CgroupId,
 		Comm:                commToString(bpfFlow.Comm),
 		Mark:                bpfFlow.Mark,
@@ -436,6 +468,15 @@ func commToString(comm [16]int8) (name string) {
 	}
 
 	name = string(commBytes)
+	return
+}
+
+// the kernel compares all 16 bytes, a name is NUL padded like struct flow's comm; a name of more than 15 bytes is cut like the kernel cuts it
+func commToKey(comm string) (key bpfCommKey) {
+	for index := range min(len(comm), len(key.Comm)-1) {
+		key.Comm[index] = int8(comm[index])
+	}
+
 	return
 }
 

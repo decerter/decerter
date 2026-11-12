@@ -38,6 +38,7 @@ struct prefix_key {
 //comm: name of the process (thread group leader) at connect/sendmsg time, NUL terminated
 //client: source endpoint of a redirected UDP socket as the proxy sees it, learned from its first datagram to the proxy, zero for TCP (sockops keeps it in client_map only)
 //mark: SO_MARK of the socket at connect/sendmsg time, on Android netd's fwmark that selects the network, the proxy sets it on its upstream socket, 0 when the socket has none
+//gid: primary group id of the process at connect/sendmsg time
 //released_ns: bpf_ktime_get_ns() (CLOCK_MONOTONIC) when a redirected UDP socket was released, in capture mode when any recorded socket was released or reached TCP_CLOSE, 0 while it is open, Go removes the flow a grace time later
 struct flow {
 	uint32_t ip[4];
@@ -50,11 +51,11 @@ struct flow {
 	uint64_t cgroup_id;
 	char comm[TASK_COMM_LEN];
 	struct endpoint client;
-	uint32_t pad32_end;
+	uint32_t gid;
 	uint64_t released_ns;
 };
 
-//Key: socket cookie, Value: original destination + process of the socket, only flows that passed the process and destination filters are here
+//Key: socket cookie, Value: original destination + process of the socket, only flows that passed the process, destination and comm filters are here
 //only an object that defines SHARED_FLOW_MAP before the include gets the map: the redirect object owns it and the capture object shares it through MapReplacements, the secrets object reads no flow
 #ifdef SHARED_FLOW_MAP
 struct {

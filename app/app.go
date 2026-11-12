@@ -25,6 +25,7 @@ import (
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/bpf/secrets"
 	"github.com/decerter/decerter/internal/capture"
+	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/platform"
 	"github.com/decerter/decerter/internal/proxy"
@@ -59,6 +60,9 @@ type App struct {
 	cancel              context.CancelFunc
 	waitGroup           *sync.WaitGroup
 	filter              redirect.Filter
+	scopeFilter         *filter.Filter
+	selection           redirect.Filter
+	scope               *filter.Filter
 	proxyPort           uint16
 	udpIdleTimeout      time.Duration
 	flowTable           bool
@@ -92,13 +96,17 @@ type App struct {
 // capturePath is the -capture mode: nothing is redirected, the packets of the selected flows and the secrets of their TLS sessions are written to this pcapng file, at most snaplen bytes of a packet
 // plaintext is the -plaintext option of capture mode: the file gets synthesized packets with the decrypted payload instead of the captured packets and the secrets
 // currentPlatform decides where the netd hook state is kept and whether hooks held exclusively by another program may be shared, only on Android
-func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, decrypt bool, rules []intercept.Rule, libssl string, capturePath string, plaintext bool, snaplen uint32, currentPlatform platform.Platform, logger *slog.Logger) (app App) {
+// flags is the kernel selection of -uid, -pid, -dst-cidr and -dst-port; scopeFilter the -filter, which narrows it: its kernel terms are added to the maps, the proxy and the capture writer decide the rest per flow; nil is no filter
+func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, decrypt bool, rules []intercept.Rule, libssl string, capturePath string, plaintext bool, snaplen uint32, currentPlatform platform.Platform, logger *slog.Logger) (app App) {
 	appCtx, cancel := context.WithCancel(ctx)
 	app = App{
 		ctx:                 appCtx,
 		cancel:              cancel,
 		waitGroup:           &sync.WaitGroup{},
-		filter:              filter,
+		filter:              flags,
+		scopeFilter:         scopeFilter,
+		selection:           redirect.Filter{},
+		scope:               nil,
 		proxyPort:           proxyPort,
 		udpIdleTimeout:      udpIdleTimeout,
 		flowTable:           flowTable,
@@ -142,17 +150,88 @@ func (app *App) LoadBpfObjects() (err error) {
 	return
 }
 
+// the kernel gets the flags and the kernel terms of the filter, Go keeps the filter when the kernel can't decide all of it
 func (app *App) UpdateBpfMaps() (err error) {
-	err = redirect.UpdateBpfMaps(app.filter, app.redirectBpfMaps)
+	selection, scope, selectErr := app.kernelSelection()
+
+	if err = selectErr; err != nil {
+		app.logger.Error("Could not select flows", "error", err, "filter", app.scopeFilter.String())
+		return
+	}
+
+	app.selection = selection
+	app.scope = scope
+	err = redirect.UpdateBpfMaps(app.selection, app.redirectBpfMaps)
 
 	if err != nil {
 		app.logger.Error("Could not update redirect bpf maps", "error", err)
 		return
 	}
 
-	// the destination filters only narrow the flows of the selected processes
-	if (len(app.filter.UIDs) == 0) && (len(app.filter.Tgids) == 0) {
+	if app.scopeFilter != nil {
+		app.logger.Info("Scope filter", "filter", app.scopeFilter.String(), "decidedInKernel", app.scope == nil, "uids", app.selection.UIDs, "pids", app.selection.Tgids, "comms", app.selection.Comms, "destinationCidrs", app.selection.DestinationCIDRs, "destinationPorts", app.selection.DestinationPorts)
+	}
+
+	// the destination filters only narrow the flows of the selected processes, a filter without a process was refused already
+	if (app.scopeFilter == nil) && (len(app.selection.UIDs) == 0) && (len(app.selection.Tgids) == 0) {
 		app.logger.Warn("No uid or pid given, no flow will be redirected or captured")
+	}
+
+	return
+}
+
+// without a filter the flags are the selection; with one, the kernel terms of its top-level && chain narrow the flags where a map can hold both, and scope is the filter when the kernel can't decide all of it
+// a filter with no process in the flags or in its kernel terms is refused: it would select every process of the machine
+func (app *App) kernelSelection() (selection redirect.Filter, scope *filter.Filter, err error) {
+	if app.scopeFilter == nil {
+		selection = app.filter
+		return
+	}
+
+	flags := filter.Selection{
+		HasProcess:       (len(app.filter.UIDs) > 0) || (len(app.filter.Tgids) > 0),
+		UIDs:             app.filter.UIDs,
+		Tgids:            app.filter.Tgids,
+		HasComm:          len(app.filter.Comms) > 0,
+		Comms:            app.filter.Comms,
+		HasDestination:   len(app.filter.DestinationCIDRs) > 0,
+		DestinationCIDRs: app.filter.DestinationCIDRs,
+		HasPort:          len(app.filter.DestinationPorts) > 0,
+		DestinationPorts: nil,
+	}
+
+	for _, destinationPort := range app.filter.DestinationPorts {
+		flags.DestinationPorts = append(flags.DestinationPorts, filter.Port{Port: destinationPort.Port, IPProtocol: destinationPort.IPProtocol})
+	}
+
+	pushed, isPushExact := app.scopeFilter.Pushdown()
+	merged, isMergeExact := filter.Intersect(flags, pushed)
+
+	if !merged.HasProcess {
+		err = ErrNoProcess
+		return
+	}
+
+	if !isPushExact || !isMergeExact {
+		scope = app.scopeFilter
+	}
+
+	// a part with nothing in it passes no flow, the maps can only say that with an empty process selection
+	if merged.IsEmpty() {
+		app.logger.Warn("The filter and the flags match no flow", "filter", app.scopeFilter.String())
+		return
+	}
+
+	selection = redirect.Filter{
+		UIDs:             merged.UIDs,
+		Tgids:            merged.Tgids,
+		DestinationCIDRs: merged.DestinationCIDRs,
+		DestinationPorts: nil,
+		Comms:            merged.Comms,
+	}
+
+	for _, destinationPort := range merged.DestinationPorts {
+		selection.DestinationPorts = append(selection.DestinationPorts, redirect.DestinationPort{Port: destinationPort.Port, IPProtocol: destinationPort.IPProtocol})
 	}
 
 	return
@@ -276,7 +355,7 @@ func (app *App) StartProxy() (err error) {
 
 	// tcp proxy, closes the listener when the context is cancelled
 	app.waitGroup.Go(func() {
-		proxy.ServeTCP(app.ctx, app.tcpListener, app.redirectBpfMaps, secretsBpfMaps, pipeline, app.waitGroup, app.logger)
+		proxy.ServeTCP(app.ctx, app.tcpListener, app.redirectBpfMaps, secretsBpfMaps, pipeline, app.scope, app.waitGroup, app.logger)
 	})
 
 	connection, udpListenErr := proxy.ListenUDP(app.ctx, app.proxyPort)
@@ -291,7 +370,7 @@ func (app *App) StartProxy() (err error) {
 
 	// udp proxy, closes the socket when the context is cancelled
 	app.waitGroup.Go(func() {
-		proxy.ServeUDP(app.ctx, app.udpConnection, app.udpIdleTimeout, app.redirectBpfMaps, secretsBpfMaps, pipeline, app.waitGroup, app.logger)
+		proxy.ServeUDP(app.ctx, app.udpConnection, app.udpIdleTimeout, app.redirectBpfMaps, secretsBpfMaps, pipeline, app.scope, app.waitGroup, app.logger)
 	})
 
 	return
@@ -354,11 +433,11 @@ func (app *App) AttachRedirect() (err error) {
 	}
 
 	if app.capturePath != "" {
-		app.logger.Info("Recording flows", "cgroup", attach.CgroupRoot, "uids", app.filter.UIDs, "pids", app.filter.Tgids, "destinationCidrs", app.filter.DestinationCIDRs, "destinationPorts", app.filter.DestinationPorts)
+		app.logger.Info("Recording flows", "cgroup", attach.CgroupRoot, "uids", app.selection.UIDs, "pids", app.selection.Tgids, "destinationCidrs", app.selection.DestinationCIDRs, "destinationPorts", app.selection.DestinationPorts, "comms", app.selection.Comms)
 		return
 	}
 
-	app.logger.Info("Redirecting flows", "cgroup", attach.CgroupRoot, "uids", app.filter.UIDs, "pids", app.filter.Tgids, "destinationCidrs", app.filter.DestinationCIDRs, "destinationPorts", app.filter.DestinationPorts, "proxyPort", app.proxyPort)
+	app.logger.Info("Redirecting flows", "cgroup", attach.CgroupRoot, "uids", app.selection.UIDs, "pids", app.selection.Tgids, "destinationCidrs", app.selection.DestinationCIDRs, "destinationPorts", app.selection.DestinationPorts, "comms", app.selection.Comms, "proxyPort", app.proxyPort)
 	return
 }
 
@@ -399,7 +478,7 @@ func (app *App) StartCapture() (err error) {
 
 	// capture writer, writes the packets that wait and flushes the file when the context is cancelled
 	app.waitGroup.Go(func() {
-		writeErr := capture.Write(app.ctx, file, stream, app.snaplen, app.plaintext, app.captureBpfMaps, app.secretsBpfMaps, app.logger)
+		writeErr := capture.Write(app.ctx, file, stream, app.snaplen, app.plaintext, app.captureBpfMaps, app.secretsBpfMaps, app.scope, app.logger)
 
 		// stdout stays open for the stream reader watcher until decerter exits
 		if !stream {
@@ -714,7 +793,7 @@ func (app *App) AttachSecrets() (err error) {
 		}
 
 		app.closeFunctions = append(app.closeFunctions, closeFunction)
-		app.logger.Info("Attached secrets uprobe", "libssl", app.libssl, "symbols", []string{"ssl_log_secret"}, "uids", app.filter.UIDs, "pids", app.filter.Tgids)
+		app.logger.Info("Attached secrets uprobe", "libssl", app.libssl, "symbols", []string{"ssl_log_secret"}, "uids", app.secretsUIDs(), "pids", app.secretsTgids())
 
 		// BoringSSL layout checker
 		app.waitGroup.Go(func() {
@@ -745,7 +824,28 @@ func (app *App) AttachSecrets() (err error) {
 		}
 	}
 
-	app.logger.Info("Attached secrets uprobe", "libssl", app.libssl, "symbols", secrets.SymbolHooks(), "uids", app.filter.UIDs, "pids", app.filter.Tgids)
+	app.logger.Info("Attached secrets uprobe", "libssl", app.libssl, "symbols", secrets.SymbolHooks(), "uids", app.secretsUIDs(), "pids", app.secretsTgids())
+	return
+}
+
+// keylog mode selects with the flags, run and capture mode share the redirect's maps
+func (app *App) secretsUIDs() (uids []uint32) {
+	uids = app.selection.UIDs
+
+	if app.keylog {
+		uids = app.filter.UIDs
+	}
+
+	return
+}
+
+func (app *App) secretsTgids() (tgids []uint32) {
+	tgids = app.selection.Tgids
+
+	if app.keylog {
+		tgids = app.filter.Tgids
+	}
+
 	return
 }
 

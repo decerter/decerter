@@ -3,30 +3,61 @@
 package proxy
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"net/netip"
-	"os"
-	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/decerter/decerter/internal/bpf/redirect"
+	"github.com/decerter/decerter/internal/filter"
 	"golang.org/x/sys/unix"
 )
 
 // the process can be gone by the time the proxy accepts, the flow is still proxied then, comm comes from the bpf flow instead
 func processCmdline(tgid uint32) (cmdline string, err error) {
-	cmdlineBytes, readErr := os.ReadFile("/proc/" + strconv.FormatUint(uint64(tgid), 10) + "/cmdline")
+	cmdline, err = filter.ReadCmdline(tgid)
+	return
+}
 
-	if err = readErr; err != nil {
-		err = fmt.Errorf("%w: %w", ErrProcessInfo, err)
+// what the scope filter knows of a flow when the proxy takes it: the flow of the kernel, the client endpoint (the local end of the app's socket) and /proc; the ClientHello comes later
+// cmdline is empty when it could not be read, exe is only read when the filter asks for it
+func scopeValues(flow redirect.Flow, cmdline string, client netip.AddrPort, scope *filter.Filter) (values filter.Values) {
+	values = filter.Values{
+		PID:         flow.Tgid,
+		UID:         flow.UID,
+		GID:         flow.GID,
+		Comm:        flow.Comm,
+		Cmdline:     cmdline,
+		Exe:         "",
+		IPProtocol:  flow.IPProtocol,
+		Source:      client,
+		Destination: flow.OriginalDestination,
+		TLS:         filter.UnknownTLSState,
+		TLSVersion:  0,
+		ServerName:  "",
+		Protocols:   nil,
+	}
+
+	if (scope != nil) && scope.Uses(filter.ExeField) {
+		exe, exeErr := filter.ReadExe(flow.Tgid)
+
+		if exeErr == nil {
+			values.Exe = exe
+		}
+	}
+
+	return
+}
+
+// a nil scope is everything in scope; an undecided result can only come from a ClientHello field, the caller reads the ClientHello for it
+func isInScope(scope *filter.Filter, values filter.Values) (result filter.Result) {
+	if scope == nil {
+		result = filter.TrueResult
 		return
 	}
 
-	// arguments are NUL separated with a trailing NUL
-	cmdline = string(bytes.ReplaceAll(bytes.TrimRight(cmdlineBytes, "\x00"), []byte{0}, []byte{' '}))
+	result = scope.Evaluate(values)
 	return
 }
 

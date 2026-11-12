@@ -110,7 +110,8 @@ type interception struct {
 
 // relay an intercepted tcp flow until both directions are done, written is what went to each destination
 // TLS needs secretsBpfMaps, without them a TLS flow is relayed raw; plain tcp goes through the rules either way
-func interceptTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn, flow intercept.Flow, pipeline *intercept.Pipeline, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, logger *slog.Logger) (upBytes int64, downBytes int64) {
+// opening are the bytes read before the scope was decided, they are taken first in the order they came
+func interceptTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn, opening []TLSChunk, flow intercept.Flow, pipeline *intercept.Pipeline, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, logger *slog.Logger) (upBytes int64, downBytes int64) {
 	mutex := &sync.Mutex{}
 	interception := &interception{
 		mutex:          mutex,
@@ -144,6 +145,11 @@ func interceptTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPCon
 	}
 	stop := context.AfterFunc(ctx, abort)
 	defer stop()
+
+	for _, chunk := range opening {
+		interception.take(chunk.direction, chunk.data)
+	}
+
 	waitGroup := sync.WaitGroup{}
 
 	// client reader

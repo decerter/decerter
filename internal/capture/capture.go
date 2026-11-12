@@ -16,6 +16,7 @@ import (
 
 	"github.com/decerter/decerter/internal/bpf"
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
+	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/pcapng"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
@@ -95,7 +96,8 @@ func OpenFile(path string) (file *os.File, err error) {
 // plaintext writes synthesized packets instead: the TCP streams are put in order, the TLS sessions decrypted and the payload written in new packets with the addresses and ports of the flow, no secrets are in the file
 // the snaplen still cuts what the programs copy, a cut TCP packet is a hole in its stream; a synthesized packet is never cut
 // stream writes every block to output at once, for a live reader; a file is written in larger pieces and flushed when the ring is empty
-func Write(ctx context.Context, output io.Writer, stream bool, snaplen uint32, plaintext bool, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, logger *slog.Logger) (err error) {
+// scope decides once per flow which flows go into the file, a flow out of scope writes nothing, its earlier packets neither; a filter with a ClientHello field keeps a flow's packets until its first bytes decide it; nil writes every recorded flow
+func Write(ctx context.Context, output io.Writer, stream bool, snaplen uint32, plaintext bool, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, scope *filter.Filter, logger *slog.Logger) (err error) {
 	writerSnaplen := snaplen
 
 	if plaintext {
@@ -142,7 +144,7 @@ func Write(ctx context.Context, output io.Writer, stream bool, snaplen uint32, p
 	})
 	defer stop()
 
-	recorder := newRecorder(&writer, plaintext, bootOffset, captureBpfMaps, secretsBpfMaps, time.Now(), logger)
+	recorder := newRecorder(&writer, plaintext, bootOffset, captureBpfMaps, secretsBpfMaps, scope, time.Now(), logger)
 	var record ringbuf.Record
 	var drainDeadline time.Time
 

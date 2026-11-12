@@ -30,6 +30,7 @@ import (
 	"github.com/decerter/decerter/app"
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
 	"github.com/decerter/decerter/internal/bpf/redirect"
+	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/platform"
 )
@@ -169,14 +170,25 @@ func loadCertificate(name string) (loaded certificate, err error) {
 // start decerter in the test process in the order main.go uses, selecting only the test user's flows to 127.0.0.1
 // stop shuts it down once and is a cleanup of the test too, so a failed test leaves nothing attached
 func startDecerter(state *testing.T, mode decerterMode, capturePath string, rules []intercept.Rule) (stop func() error) {
-	filter := redirect.Filter{
+	stop = startFilteredDecerter(state, mode, capturePath, rules, testFlags(), "")
+	return
+}
+
+// the flags of every case: the test user's flows to 127.0.0.1
+func testFlags() (flags redirect.Filter) {
+	flags = redirect.Filter{
 		UIDs:             []uint32{testUser.UID},
 		Tgids:            nil,
 		DestinationCIDRs: []netip.Prefix{destinationPrefix},
 		DestinationPorts: nil,
+		Comms:            nil,
 	}
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	decerter := app.New(context.Background(), filter, proxyPort, udpIdleTimeout, false, false, false, rules, "", capturePath, mode == PlaintextDecerterMode, capturebpf.MaxSnaplen, platform.Detect("/"), logger)
+	return
+}
+
+// startDecerter with the flags given and a -filter, empty is none
+func startFilteredDecerter(state *testing.T, mode decerterMode, capturePath string, rules []intercept.Rule, flags redirect.Filter, scopeText string) (stop func() error) {
+	decerter := newDecerter(state, mode, capturePath, rules, flags, scopeText)
 	stop = sync.OnceValue(decerter.Shutdown)
 
 	state.Cleanup(func() {
@@ -191,6 +203,25 @@ func startDecerter(state *testing.T, mode decerterMode, capturePath string, rule
 		state.Fatalf("Could not start decerter in %s mode, error: %s", mode, err.Error())
 	}
 
+	return
+}
+
+// a decerter that is not started yet, the filter must parse
+func newDecerter(state *testing.T, mode decerterMode, capturePath string, rules []intercept.Rule, flags redirect.Filter, scopeText string) (decerter app.App) {
+	var scopeFilter *filter.Filter
+
+	if scopeText != "" {
+		parsed, parseErr := filter.Parse(scopeText)
+
+		if parseErr != nil {
+			state.Fatalf("Could not parse filter %q, error: %s", scopeText, parseErr.Error())
+		}
+
+		scopeFilter = &parsed
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	decerter = app.New(context.Background(), flags, scopeFilter, proxyPort, udpIdleTimeout, false, false, false, rules, "", capturePath, mode == PlaintextDecerterMode, capturebpf.MaxSnaplen, platform.Detect("/"), logger)
 	return
 }
 

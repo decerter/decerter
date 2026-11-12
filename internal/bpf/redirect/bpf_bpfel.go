@@ -13,6 +13,11 @@ import (
 	"github.com/cilium/ebpf"
 )
 
+type bpfCommKey struct {
+	_    structs.HostLayout
+	Comm [16]int8
+}
+
 type bpfEndpoint struct {
 	_          structs.HostLayout
 	Ip         [4]uint32
@@ -25,7 +30,8 @@ type bpfFilterConfig struct {
 	_          structs.HostLayout
 	CidrFilter uint8
 	PortFilter uint8
-	Padding    uint16
+	CommFilter uint8
+	Padding    uint8
 }
 
 type bpfFlow struct {
@@ -40,7 +46,7 @@ type bpfFlow struct {
 	CgroupId   uint64
 	Comm       [16]int8
 	Client     bpfEndpoint
-	Pad32End   uint32
+	Gid        uint32
 	ReleasedNs uint64
 }
 
@@ -63,6 +69,7 @@ type bpfPrefixKey struct {
 const (
 	bpfMapCidrMap               = "cidr_map"
 	bpfMapClientMap             = "client_map"
+	bpfMapCommMap               = "comm_map"
 	bpfMapFilterMap             = "filter_map"
 	bpfMapFlowMap               = "flow_map"
 	bpfMapPortMap               = "port_map"
@@ -146,6 +153,7 @@ type bpfProgramSpecs struct {
 type bpfMapSpecs struct {
 	CidrMap   *ebpf.MapSpec `ebpf:"cidr_map"`
 	ClientMap *ebpf.MapSpec `ebpf:"client_map"`
+	CommMap   *ebpf.MapSpec `ebpf:"comm_map"`
 	FilterMap *ebpf.MapSpec `ebpf:"filter_map"`
 	FlowMap   *ebpf.MapSpec `ebpf:"flow_map"`
 	PortMap   *ebpf.MapSpec `ebpf:"port_map"`
@@ -185,6 +193,7 @@ func (o *bpfObjects) Close() error {
 type bpfMaps struct {
 	CidrMap   *ebpf.Map `ebpf:"cidr_map"`
 	ClientMap *ebpf.Map `ebpf:"client_map"`
+	CommMap   *ebpf.Map `ebpf:"comm_map"`
 	FilterMap *ebpf.Map `ebpf:"filter_map"`
 	FlowMap   *ebpf.Map `ebpf:"flow_map"`
 	PortMap   *ebpf.Map `ebpf:"port_map"`
@@ -197,6 +206,7 @@ func (m *bpfMaps) Close() error {
 	return _BpfClose(
 		m.CidrMap,
 		m.ClientMap,
+		m.CommMap,
 		m.FilterMap,
 		m.FlowMap,
 		m.PortMap,

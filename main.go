@@ -19,6 +19,7 @@ import (
 	"github.com/decerter/decerter/app"
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
 	"github.com/decerter/decerter/internal/bpf/redirect"
+	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/platform"
 )
@@ -28,10 +29,12 @@ var (
 	errKeylogIntercept  = errors.New("-keylog can't be combined with -intercept")
 	errPlaintextCapture = errors.New("-plaintext needs -capture")
 	errRestoreAlone     = errors.New("-android-restore can't be combined with -capture, -keylog, -decrypt or -intercept")
+	errFilterKeylog     = errors.New("-filter can't be combined with -keylog, the key log selects processes with -uid and -pid only")
 )
 
 var (
-	filter         redirect.Filter
+	flags          redirect.Filter
+	scopeFilter    *filter.Filter
 	proxyPort      uint16        = 15001
 	udpIdleTimeout time.Duration = 30 * time.Second
 	flowTable      bool
@@ -50,6 +53,13 @@ func main() {
 	flag.Func("pid", "pid of an inspected process, repeatable or comma separated (default is none; selects the process next to -uid, its children are not followed)", parsePIDs)
 	flag.Func("dst-cidr", "only redirect flows of the selected processes to these destination prefixes, IPv4 or IPv6, a bare address is a /32 or /128, repeatable or comma separated (default is every address)", parseDestinationCIDRs)
 	flag.Func("dst-port", "only redirect flows of the selected processes to these destination ports, tcp/<port> or udp/<port>, <port> alone is both, repeatable or comma separated (default is every port; with -dst-cidr both have to match)", parseDestinationPorts)
+	flag.Func("filter", "scope filter, a subset of Wireshark's display filter language, for example 'proc.comm == \"curl\" && tls.sni contains \"example\"'; it narrows -uid, -pid, -dst-cidr and -dst-port: a flow is in scope when it passes those flags and the filter; "+
+		"it needs a process from -uid or -pid, or a proc.uid or proc.pid term (== or in) in its top-level && chain, a filter without one is refused, so it never selects every process of the machine; "+
+		"the terms of the top-level && chain the kernel can check go into its maps: proc.uid, proc.pid, proc.comm (exact, at most 15 bytes), ip.dst, ipv6.dst, tcp.dstport and udp.dstport with == or in, also several of the same field joined by ||, the flows they leave out are never redirected or recorded; "+
+		"the rest is decided once per flow in Go: run mode relays a flow out of scope unchanged, without decryption, rules or a flow line, capture mode writes nothing of it; a tls field waits for the ClientHello, which is read before any byte is changed or written; "+
+		"operators: == != === !== < <= > >= contains matches in {…} not in {…}, eq ne lt le gt ge any_eq all_ne all_eq any_ne ~, && || ! and or not ( ); matches is a Go RE2 regular expression that ignores case like Wireshark's unless it starts with (?-i); != is true when every value differs (ip.addr != a is ip.src != a && ip.dst != a); "+
+		"a comparison on a field the flow does not have is false, != and not in too; strings in double quotes with Wireshark's escapes or raw r\"…\", numbers decimal or 0x, addresses with CIDR prefixes, sets separated by commas or spaces with number ranges a..b; "+
+		"fields: "+fieldsHelp()+" (default is none, every selected flow is in scope)", parseFilter)
 	flag.Func("port", "port of the tcp proxy listener and the udp proxy socket on lo (default is 15001)", parsePort)
 	flag.Func("udp-idle-timeout", "a udp session ends after this long without a datagram in either direction (default is 30s)", parseIdleTimeout)
 	flag.BoolVar(&flowTable, "flow-table", false, "print the flow_map table every 5 seconds, for debugging")
@@ -78,7 +88,7 @@ func parseUIDs(value string) (err error) {
 			return
 		}
 
-		filter.UIDs = append(filter.UIDs, uint32(uid))
+		flags.UIDs = append(flags.UIDs, uint32(uid))
 	}
 
 	return
@@ -99,7 +109,7 @@ func parsePIDs(value string) (err error) {
 			return
 		}
 
-		filter.Tgids = append(filter.Tgids, uint32(pid))
+		flags.Tgids = append(flags.Tgids, uint32(pid))
 	}
 
 	return
@@ -124,7 +134,7 @@ func parseDestinationCIDRs(value string) (err error) {
 				return
 			}
 
-			filter.DestinationCIDRs = append(filter.DestinationCIDRs, netip.PrefixFrom(address, address.BitLen()))
+			flags.DestinationCIDRs = append(flags.DestinationCIDRs, netip.PrefixFrom(address, address.BitLen()))
 			continue
 		}
 
@@ -135,7 +145,7 @@ func parseDestinationCIDRs(value string) (err error) {
 			return
 		}
 
-		filter.DestinationCIDRs = append(filter.DestinationCIDRs, prefix.Masked())
+		flags.DestinationCIDRs = append(flags.DestinationCIDRs, prefix.Masked())
 	}
 
 	return
@@ -174,13 +184,54 @@ func parseDestinationPorts(value string) (err error) {
 		}
 
 		for _, ipProtocol := range ipProtocols {
-			filter.DestinationPorts = append(filter.DestinationPorts, redirect.DestinationPort{
+			flags.DestinationPorts = append(flags.DestinationPorts, redirect.DestinationPort{
 				Port:       uint16(port),
 				IPProtocol: ipProtocol,
 			})
 		}
 	}
 
+	return
+}
+
+// the parse error says where in the filter it is, the marker under the filter shows it like tshark
+func parseFilter(value string) (err error) {
+	parsed, parseErr := filter.Parse(value)
+
+	if err = parseErr; err != nil {
+		if positionErr, ok := errors.AsType[*filter.PositionError](err); ok {
+			fmt.Fprintln(os.Stderr, positionErr.Marker())
+		}
+
+		err = fmt.Errorf("invalid filter: %w", err)
+		return
+	}
+
+	scopeFilter = &parsed
+	return
+}
+
+// name (type, where it comes from, the kernel map it can go into)
+func fieldsHelp() (help string) {
+	descriptions := []string{}
+
+	for _, info := range filter.Fields() {
+		description := string(info.Type)
+
+		if info.IsMulti {
+			description += ", several values"
+		}
+
+		description += ", " + string(info.Source)
+
+		if info.Pushdown != "" {
+			description += ", kernel " + info.Pushdown
+		}
+
+		descriptions = append(descriptions, fmt.Sprintf("%s (%s)", info.Name, description))
+	}
+
+	help = strings.Join(descriptions, ", ")
 	return
 }
 
@@ -262,6 +313,12 @@ func run() (err error) {
 		return
 	}
 
+	if keylog && (scopeFilter != nil) {
+		err = errFilterKeylog
+		logger.Error("Could not start", "error", err)
+		return
+	}
+
 	if androidRestore && ((capturePath != "") || keylog || decrypt || interceptFlows) {
 		err = errRestoreAlone
 		logger.Error("Could not start", "error", err)
@@ -275,7 +332,7 @@ func run() (err error) {
 		rules = []intercept.Rule{intercept.IdentityRule{}}
 	}
 
-	decerter := app.New(ctx, filter, proxyPort, udpIdleTimeout, flowTable, keylog, decrypt, rules, libssl, capturePath, plaintext, snaplen, platform.Detect("/"), logger)
+	decerter := app.New(ctx, flags, scopeFilter, proxyPort, udpIdleTimeout, flowTable, keylog, decrypt, rules, libssl, capturePath, plaintext, snaplen, platform.Detect("/"), logger)
 
 	defer func() {
 		err = errors.Join(err, decerter.Shutdown())

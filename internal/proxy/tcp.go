@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"slices"
 	"strconv"
 	"sync"
 	"syscall"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/bpf/redirect"
+	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
@@ -58,7 +60,8 @@ func controlTCP(network, address string, rawConnection syscall.RawConn) (err err
 // accept until the listener is closed by the context, every connection gets its own goroutine on waitGroup
 // secretsBpfMaps are the maps of the secrets object, with them the TLS flows are decrypted next to the relay and printed, nil relays every flow without a look inside
 // pipeline intercepts every flow instead: TLS records are held, decrypted, run through its rules and sealed again, plain tcp goes through the rules too; nil only relays or observes
-func ServeTCP(ctx context.Context, listener *net.TCPListener, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, waitGroup *sync.WaitGroup, logger *slog.Logger) {
+// scope decides once per flow which flows are looked at: a flow out of scope is relayed as it is, without decryption, rules or a flow line; nil is every flow in scope
+func ServeTCP(ctx context.Context, listener *net.TCPListener, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, scope *filter.Filter, waitGroup *sync.WaitGroup, logger *slog.Logger) {
 	// listener closer
 	stop := context.AfterFunc(ctx, func() {
 		closeErr := listener.Close()
@@ -92,13 +95,13 @@ func ServeTCP(ctx context.Context, listener *net.TCPListener, bpfMaps map[bpf.Bp
 
 		// proxied tcp connection
 		waitGroup.Go(func() {
-			handleTCP(ctx, client, bpfMaps, secretsBpfMaps, pipeline, logger)
+			handleTCP(ctx, client, bpfMaps, secretsBpfMaps, pipeline, scope, logger)
 		})
 	}
 }
 
 // look up the original destination of the client, dial it and copy both directions until both are done
-func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, logger *slog.Logger) {
+func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, scope *filter.Filter, logger *slog.Logger) {
 	startTime := time.Now()
 	clientAddressPort := client.RemoteAddr().(*net.TCPAddr).AddrPort()
 	localAddressPort := client.LocalAddr().(*net.TCPAddr).AddrPort()
@@ -132,7 +135,6 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 
 	if processErr != nil {
 		logger.Debug("Could not read process info", "error", processErr, "tgid", flow.Tgid)
-		cmdline = "?"
 	}
 
 	// the own tgid is excluded in connect4/6, so this dial is not redirected again
@@ -158,8 +160,29 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 		}
 	}()
 
+	// the scope is decided before a byte goes on; a filter with a ClientHello field waits for the first client bytes, or the first server bytes of a protocol where the server speaks first
+	values := scopeValues(flow, cmdline, clientAddressPort, scope)
+	result := isInScope(scope, values)
+	var opening []TLSChunk
+
+	if result == filter.UnknownResult {
+		openingChunks, isTLS, hello := readOpening(ctx, client, upstream, logger)
+		opening = openingChunks
+		result = isInScope(scope, values.WithClientHello(isTLS, hello.Version, hello.ServerName, hello.Protocols))
+	}
+
+	if cmdline == "" {
+		cmdline = "?"
+	}
+
+	if result != filter.TrueResult {
+		logger.Debug("Tcp flow is out of scope, relaying it as it is")
+		pipeTCP(ctx, client, upstream, opening, nil, logger)
+		return
+	}
+
 	if pipeline != nil {
-		upBytes, downBytes := interceptTCP(ctx, client, upstream, intercept.FlowOf(cookie, flow, clientAddressPort), pipeline, secretsBpfMaps, logger)
+		upBytes, downBytes := interceptTCP(ctx, client, upstream, opening, intercept.FlowOf(cookie, flow, clientAddressPort), pipeline, secretsBpfMaps, logger)
 		printFlow(flow, cmdline, clientAddressPort, strconv.FormatInt(upBytes, 10)+"B", strconv.FormatInt(downBytes, 10)+"B", time.Since(startTime))
 		return
 	}
@@ -176,7 +199,7 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 		})
 	}
 
-	upBytes, downBytes := pipeTCP(ctx, client, upstream, observer, logger)
+	upBytes, downBytes := pipeTCP(ctx, client, upstream, opening, observer, logger)
 
 	// the records the observer still has are printed before the flow line
 	if observer != nil {
@@ -188,8 +211,9 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 }
 
 // a FIN from one side is forwarded as CloseWrite and the other direction keeps running, an error or shutdown aborts both
+// opening are the bytes read before the scope was decided, they go on first in the order they came
 // observer gets a copy of both directions while it is active, nil relays without one
-func pipeTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn, observer *TLSObserver, logger *slog.Logger) (upBytes int64, downBytes int64) {
+func pipeTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn, opening []TLSChunk, observer *TLSObserver, logger *slog.Logger) (upBytes int64, downBytes int64) {
 	abortOnce := sync.Once{}
 	abort := func() {
 		abortOnce.Do(func() {
@@ -203,16 +227,157 @@ func pipeTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn, ob
 	}
 	stop := context.AfterFunc(ctx, abort)
 	defer stop()
+
+	// a failed write aborts the flow, the copies below end at once then
+	for _, chunk := range opening {
+		destination := upstream
+
+		if chunk.direction == tlsrecord.ServerDirection {
+			destination = client
+		}
+
+		if observer != nil {
+			observer.Observe(chunk.direction, chunk.data, logger)
+		}
+
+		written, writeErr := destination.Write(chunk.data)
+
+		if chunk.direction == tlsrecord.ServerDirection {
+			downBytes += int64(written)
+		} else {
+			upBytes += int64(written)
+		}
+
+		if writeErr != nil {
+			logger.Debug("Could not write the opening bytes of the tcp flow", "error", writeErr)
+			abort()
+			break
+		}
+	}
+
 	waitGroup := sync.WaitGroup{}
+	var upCopied, downCopied int64
 
 	// client to upstream
 	waitGroup.Go(func() {
-		upBytes = copyHalf(upstream, client, tlsrecord.ClientDirection, observer, abort, logger.With("direction", "up"))
+		upCopied = copyHalf(upstream, client, tlsrecord.ClientDirection, observer, abort, logger.With("direction", "up"))
 	})
 
-	downBytes = copyHalf(client, upstream, tlsrecord.ServerDirection, observer, abort, logger.With("direction", "down"))
+	downCopied = copyHalf(client, upstream, tlsrecord.ServerDirection, observer, abort, logger.With("direction", "down"))
 	waitGroup.Wait()
+	upBytes += upCopied
+	downBytes += downCopied
 	return
+}
+
+// what one side sent before the scope was decided
+type openingRead struct {
+	data    []byte
+	isTLS   bool
+	hello   tlsrecord.Hello
+	isFirst bool
+}
+
+// read until a ClientHello field can be decided: the whole ClientHello the client sends first, the first client bytes that are no ClientHello, or the server speaking first
+// the side that did not decide is stopped with a read deadline, what it read until then is kept; the end of a stream or an error decides too, the relay sees it again on its next read
+// opening are the bytes read in the order the sides sent them, isTLS tells a ClientHello, which hello holds when it could be read
+func readOpening(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn, logger *slog.Logger) (opening []TLSChunk, isTLS bool, hello tlsrecord.Hello) {
+	clientChannel := make(chan openingRead, 1)
+	serverChannel := make(chan openingRead, 1)
+	waitGroup := sync.WaitGroup{}
+	cancel := func(connection *net.TCPConn) {
+		deadlineErr := connection.SetReadDeadline(time.Unix(1, 0))
+
+		if deadlineErr != nil {
+			logger.Debug("Could not stop the opening read", "error", deadlineErr)
+		}
+	}
+	stop := context.AfterFunc(ctx, func() {
+		cancel(client)
+		cancel(upstream)
+	})
+	defer stop()
+
+	// client opening reader
+	waitGroup.Go(func() {
+		clientChannel <- readClientOpening(client)
+	})
+
+	// server opening reader
+	waitGroup.Go(func() {
+		buffer := make([]byte, copyBufferLength)
+		readCount, _ := upstream.Read(buffer)
+		serverChannel <- openingRead{data: buffer[:readCount], isTLS: false, hello: tlsrecord.Hello{}, isFirst: false}
+	})
+
+	var clientRead, serverRead openingRead
+
+	select {
+	case clientRead = <-clientChannel:
+		clientRead.isFirst = true
+		cancel(upstream)
+		serverRead = <-serverChannel
+	case serverRead = <-serverChannel:
+		serverRead.isFirst = true
+		cancel(client)
+		clientRead = <-clientChannel
+	}
+
+	waitGroup.Wait()
+	deadlineErr := errors.Join(client.SetReadDeadline(time.Time{}), upstream.SetReadDeadline(time.Time{}))
+
+	if deadlineErr != nil {
+		logger.Debug("Could not clear the opening read deadline", "error", deadlineErr)
+	}
+
+	clientChunk := TLSChunk{direction: tlsrecord.ClientDirection, data: clientRead.data}
+	serverChunk := TLSChunk{direction: tlsrecord.ServerDirection, data: serverRead.data}
+
+	if serverRead.isFirst {
+		opening = []TLSChunk{serverChunk, clientChunk}
+	} else {
+		opening = []TLSChunk{clientChunk, serverChunk}
+		isTLS = clientRead.isTLS
+		hello = clientRead.hello
+	}
+
+	opening = slices.DeleteFunc(opening, func(chunk TLSChunk) bool {
+		return len(chunk.data) == 0
+	})
+	return
+}
+
+// the client's bytes until they are a whole ClientHello or are none; a ClientHello that can't be read is TLS without its fields
+func readClientOpening(client *net.TCPConn) (result openingRead) {
+	buffer := make([]byte, copyBufferLength)
+
+	for {
+		readCount, readErr := client.Read(buffer)
+		result.data = append(result.data, buffer[:readCount]...)
+		isClientHello, isDecided := tlsrecord.IsClientHello(result.data)
+
+		if isDecided && !isClientHello {
+			return
+		}
+
+		if isClientHello {
+			hello, isComplete, helloErr := tlsrecord.ReadClientHello(result.data)
+			result.isTLS = true
+
+			if isComplete {
+				result.hello = hello
+				return
+			}
+
+			if helloErr != nil {
+				return
+			}
+		}
+
+		if readErr != nil {
+			return
+		}
+	}
 }
 
 // the client already saw its connect succeed, a RST on close is the nearest thing to a failed connect

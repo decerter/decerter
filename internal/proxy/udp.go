@@ -17,6 +17,7 @@ import (
 
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/bpf/redirect"
+	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
@@ -61,7 +62,8 @@ func controlUDP(network, address string, rawConnection syscall.RawConn) (err err
 // read until the socket is closed by the context, every session relays its replies in its own goroutine on waitGroup
 // pipeline runs every datagram of both directions through its rules, nil relays them as they are
 // a session whose first datagram has a DTLS ClientHello is read by the DTLS record layer with the secrets of secretsBpfMaps: intercepted with a pipeline, observed and printed without one
-func ServeUDP(ctx context.Context, connection *net.UDPConn, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, waitGroup *sync.WaitGroup, logger *slog.Logger) {
+// scope decides each session when it starts, with the DTLS ClientHello of its first datagram: one out of scope is relayed as it is, without the record layer, rules or a flow line; nil is every session in scope
+func ServeUDP(ctx context.Context, connection *net.UDPConn, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, scope *filter.Filter, waitGroup *sync.WaitGroup, logger *slog.Logger) {
 	// socket closer
 	stop := context.AfterFunc(ctx, func() {
 		closeErr := connection.Close()
@@ -103,7 +105,7 @@ func ServeUDP(ctx context.Context, connection *net.UDPConn, idleTimeout time.Dur
 			continue
 		}
 
-		session, sessionErr := udpSessionOf(ctx, connection, client, local, buffer[:datagramSize], &sessions, idleTimeout, bpfMaps, secretsBpfMaps, pipeline, waitGroup, logger)
+		session, sessionErr := udpSessionOf(ctx, connection, client, local, buffer[:datagramSize], &sessions, idleTimeout, bpfMaps, secretsBpfMaps, pipeline, scope, waitGroup, logger)
 
 		if sessionErr != nil {
 			continue
@@ -165,7 +167,7 @@ func datagramDestination(controlMessage []byte) (local netip.Addr, err error) {
 
 // the flow is looked up for every datagram: a new socket on the same client port or a new destination of an unconnected socket gets its own session
 // the datagram that starts a session tells if it is DTLS
-func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.AddrPort, local netip.Addr, datagram []byte, sessions *UDPSessions, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, waitGroup *sync.WaitGroup, logger *slog.Logger) (session *UDPSession, err error) {
+func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.AddrPort, local netip.Addr, datagram []byte, sessions *UDPSessions, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, scope *filter.Filter, waitGroup *sync.WaitGroup, logger *slog.Logger) (session *UDPSession, err error) {
 	cookie, flow, lookupErr := redirect.FlowByClient(client, syscall.IPPROTO_UDP, bpfMaps)
 
 	if err = lookupErr; err != nil {
@@ -197,6 +199,18 @@ func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.Add
 
 	if processErr != nil {
 		logger.Debug("Could not read process info", "error", processErr, "tgid", flow.Tgid)
+	}
+
+	// the first datagram is all the session has when it is decided, a DTLS ClientHello fragmented over more datagrams counts as one without fields
+	result := isInScope(scope, scopeValues(flow, cmdline, client, scope))
+
+	if result == filter.UnknownResult {
+		// a DTLS ClientHello that can not be read is TLS without its fields
+		hello, _, _ := tlsrecord.ReadDTLSClientHello(datagram)
+		result = isInScope(scope, scopeValues(flow, cmdline, client, scope).WithClientHello(tlsrecord.IsDTLSClientHello(datagram), hello.Version, hello.ServerName, hello.Protocols))
+	}
+
+	if cmdline == "" {
 		cmdline = "?"
 	}
 
@@ -221,9 +235,18 @@ func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.Add
 		upstream:            upstream,
 		replyControlMessage: unix.PktInfo6(&unix.Inet6Pktinfo{Addr: local.As16(), Ifindex: 0}),
 		startTime:           time.Now(),
+		isInScope:           result == filter.TrueResult,
 	}
 	session.lastActive.Store(session.startTime.UnixNano())
-	startDTLS(ctx, connection, session, datagram, secretsBpfMaps, pipeline, logger)
+
+	// out of scope the datagrams go on as they are, past the rules
+	if session.isInScope {
+		startDTLS(ctx, connection, session, datagram, secretsBpfMaps, pipeline, logger)
+	} else {
+		session.isRaw = true
+		logger.Debug("Udp session is out of scope, relaying it as it is")
+	}
+
 	sessions.Add(session)
 
 	// udp reply relay
@@ -262,6 +285,11 @@ func relayUDP(ctx context.Context, connection *net.UDPConn, session *UDPSession,
 
 		up := strconv.FormatInt(session.upDatagrams.Load(), 10) + "dgram/" + strconv.FormatInt(session.upBytes.Load(), 10) + "B"
 		down := strconv.FormatInt(session.downDatagrams.Load(), 10) + "dgram/" + strconv.FormatInt(session.downBytes.Load(), 10) + "B"
+
+		if !session.isInScope {
+			return
+		}
+
 		printFlow(session.flow, session.cmdline, session.key.client, up, down, time.Since(session.startTime))
 	}()
 
