@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// the secrets object is generated for amd64 only (PT_REGS_*), other architectures get stub.go
-//go:build amd64
+// the secrets object is generated for amd64 and arm64 (PT_REGS_*), other architectures get stub.go
+//go:build amd64 || arm64
 
 package secrets
 
@@ -42,6 +42,15 @@ const (
 	handshakeLabelPrefix  string = "tls13 "
 	clientHandshakeDerive string = "c hs traffic"
 	serverHandshakeDerive string = "s hs traffic"
+)
+
+// tls_secrets.secret_mask bits of the BoringSSL ssl_log_secret labels, as in secrets.h
+const (
+	clientRandomBit    uint32 = 1
+	clientHandshakeBit uint32 = 2
+	serverHandshakeBit uint32 = 4
+	clientTrafficBit   uint32 = 8
+	serverTrafficBit   uint32 = 16
 )
 
 // TLS 1.3 cipher suites of OpenSSL: the low 16 bits of SSL_CIPHER.id are the suite on the wire, its hash gives the length of every secret
@@ -183,6 +192,23 @@ func recordSecrets(secrets bpfTlsSecrets) (sessionSecrets tlsrecord.Secrets, err
 		sessionSecrets.MasterKey = secrets.MasterKey[:]
 		return
 	case tls13Version:
+		// BoringSSL passed the secrets with their length, the handshake traffic secrets included
+		if secrets.SecretLength != 0 {
+			length := int(secrets.SecretLength)
+
+			if (length != sha256Length) && (length != sha384Length) {
+				err = fmt.Errorf("%w: %d", ErrSecretLength, length)
+				return
+			}
+
+			sessionSecrets.ClientHandshakeTrafficSecret = secrets.ClientHandshakeTrafficSecret[:length]
+			sessionSecrets.ServerHandshakeTrafficSecret = secrets.ServerHandshakeTrafficSecret[:length]
+			sessionSecrets.ClientTrafficSecret = secrets.ClientAppTrafficSecret[:length]
+			sessionSecrets.ServerTrafficSecret = secrets.ServerAppTrafficSecret[:length]
+			return
+		}
+
+		// OpenSSL: the length comes from the suite, the handshake traffic secrets are derived
 		hashLength, ok := hashLength(secrets.CipherId)
 
 		if !ok {
@@ -234,6 +260,26 @@ func keyLogLines(secrets bpfTlsSecrets) (lines []string, err error) {
 // one NSS key log line: "<label> <client_random hex> <secret hex>"
 func keyLogLine(label string, clientRandom string, secret []byte) (text string) {
 	text = label + " " + clientRandom + " " + hex.EncodeToString(secret)
+	return
+}
+
+// the NSS label of a secret_mask bit, for the layout error
+func secretLabel(bit uint32) (label string) {
+	switch bit {
+	case clientRandomBit:
+		label = clientRandomLabel
+	case clientHandshakeBit:
+		label = clientHandshakeLabel
+	case serverHandshakeBit:
+		label = serverHandshakeLabel
+	case clientTrafficBit:
+		label = clientTrafficLabel
+	case serverTrafficBit:
+		label = serverTrafficLabel
+	default:
+		label = fmt.Sprintf("label bit %d", bit)
+	}
+
 	return
 }
 

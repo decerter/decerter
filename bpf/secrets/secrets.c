@@ -50,19 +50,101 @@ int store_secrets(struct pt_regs *ctx)
 		return 0;
 	}
 
-	struct tls_secrets secrets = {};
+	uint32_t key = 0;
+	struct tls_secrets *secrets = bpf_map_lookup_elem(&secrets_scratch_map, &key);
 
-	switch (read_secrets(ssl_address, &secrets))
+	if (!secrets)
+	{
+		return 0;
+	}
+
+	__builtin_memset(secrets, 0, sizeof(*secrets));
+
+	switch (read_secrets(ssl_address, secrets))
 	{
 	case OK:
-		//every later call of the session gets here too, BPF_NOEXIST lets only the first one write, so keylog mode gets each session once
-		if (secrets_complete(&secrets) && (bpf_map_update_elem(&secrets_map, &secrets.client_random, &secrets, BPF_NOEXIST) == 0))
+		if (secrets_complete(secrets))
 		{
-			notify_secrets(&secrets);
+			store_complete_secrets(secrets);
 		}
 
 		return 0;
 	default:
+		return 0;
+	}
+}
+
+//Collect the secrets BoringSSL logs: bool bssl::ssl_log_secret(const SSL *ssl, const char *label, Span<const uint8_t> secret), the Span comes in two registers (data, size)
+//BoringSSL calls it for every secret and only then checks for a key log callback, so the entry fires without one, and at entry the secret is complete
+SEC("uprobe/ssl_log_secret")
+int log_secret(struct pt_regs *ctx)
+{
+	uint64_t pid_tgid = bpf_get_current_pid_tgid();
+	uint32_t uid = bpf_get_current_uid_gid();
+
+	//every app enters Conscrypt's libssl, read nothing for a process that is not selected
+	if (!is_selected_process(pid_tgid >> 32, uid))
+	{
+		return 0;
+	}
+
+	struct label label = {};
+
+	if (bpf_probe_read_user_str(label.value, sizeof(label.value), (void *)PT_REGS_PARM2(ctx)) < 0)
+	{
+		return 0;
+	}
+
+	uint32_t secret_bit = label_bit(&label);
+
+	//a label decerter does not keep
+	if (!secret_bit)
+	{
+		return 0;
+	}
+
+	uint32_t key = 0;
+	struct tls_secrets *secrets = bpf_map_lookup_elem(&secrets_scratch_map, &key);
+
+	if (!secrets)
+	{
+		return 0;
+	}
+
+	__builtin_memset(secrets, 0, sizeof(*secrets));
+
+	uint64_t ssl_address = PT_REGS_PARM1(ctx);
+	uint64_t secret_address = PT_REGS_PARM3(ctx);
+	uint64_t secret_length = PT_REGS_PARM4(ctx);
+
+	switch (read_boringssl_session(ssl_address, secret_bit, secret_length, secrets))
+	{
+	case OK:
+		break;
+	case LAYOUT:
+		report_layout_error(secrets->tls_version, secret_bit, secret_length);
+		return 0;
+	default:
+		return 0;
+	}
+
+	switch (secret_bit)
+	{
+	case CLIENT_RANDOM_BIT:
+		//TLS 1.2 has one secret, the master secret, logged by ssl_send_finished for full and resumed handshakes
+		if (bpf_probe_read_user(secrets->master_key, sizeof(secrets->master_key), (void *)secret_address))
+		{
+			return 0;
+		}
+
+		secrets->master_key_length = MASTER_KEY_SIZE;
+		secrets->secret_mask = CLIENT_RANDOM_BIT;
+		store_complete_secrets(secrets);
+
+		return 0;
+	default:
+		add_tls13_secret(secrets, secret_bit, secret_address, secret_length);
+
 		return 0;
 	}
 }

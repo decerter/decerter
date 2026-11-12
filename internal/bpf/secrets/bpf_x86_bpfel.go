@@ -18,30 +18,50 @@ type bpfClientRandom struct {
 	Value [32]uint8
 }
 
+type bpfLayoutError struct {
+	_            structs.HostLayout
+	Count        uint32
+	TlsVersion   uint32
+	SecretBit    uint32
+	SecretLength uint32
+}
+
 type bpfTlsSecrets struct {
-	_                      structs.HostLayout
-	TlsVersion             uint32
-	CipherId               uint32
-	MasterKeyLength        uint64
-	ClientRandom           [32]uint8
-	MasterKey              [48]uint8
-	ClientAppTrafficSecret [64]uint8
-	ServerAppTrafficSecret [64]uint8
-	HandshakeSecret        [64]uint8
-	HandshakeTrafficHash   [64]uint8
+	_                            structs.HostLayout
+	TlsVersion                   uint32
+	CipherId                     uint32
+	MasterKeyLength              uint64
+	SecretLength                 uint32
+	SecretMask                   uint32
+	ClientRandom                 [32]uint8
+	MasterKey                    [48]uint8
+	ClientAppTrafficSecret       [64]uint8
+	ServerAppTrafficSecret       [64]uint8
+	HandshakeSecret              [64]uint8
+	HandshakeTrafficHash         [64]uint8
+	ClientHandshakeTrafficSecret [64]uint8
+	ServerHandshakeTrafficSecret [64]uint8
 }
 
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
+	bpfMapLayoutErrorMap               = "layout_error_map"
+	bpfMapPartialSecretsMap            = "partial_secrets_map"
 	bpfMapSecretsEventMap              = "secrets_event_map"
 	bpfMapSecretsMap                   = "secrets_map"
+	bpfMapSecretsScratchMap            = "secrets_scratch_map"
 	bpfMapSslMap                       = "ssl_map"
 	bpfMapTgidMap                      = "tgid_map"
 	bpfMapUidMap                       = "uid_map"
+	bpfProgLogSecret                   = "log_secret"
 	bpfProgStashSsl                    = "stash_ssl"
 	bpfProgStoreSecrets                = "store_secrets"
+	bpfVarBoringsslClientRandomOffset  = "boringssl_client_random_offset"
+	bpfVarBoringsslS3Offset            = "boringssl_s3_offset"
+	bpfVarBoringsslVersionInS3         = "boringssl_version_in_s3"
+	bpfVarBoringsslVersionOffset       = "boringssl_version_offset"
 	bpfVarCipherIdOffset               = "cipher_id_offset"
 	bpfVarClientAppTrafficSecretOffset = "client_app_traffic_secret_offset"
 	bpfVarClientRandomOffset           = "client_random_offset"
@@ -100,6 +120,7 @@ type bpfSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfProgramSpecs struct {
+	LogSecret    *ebpf.ProgramSpec `ebpf:"log_secret"`
 	StashSsl     *ebpf.ProgramSpec `ebpf:"stash_ssl"`
 	StoreSecrets *ebpf.ProgramSpec `ebpf:"store_secrets"`
 }
@@ -108,17 +129,24 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	SecretsEventMap *ebpf.MapSpec `ebpf:"secrets_event_map"`
-	SecretsMap      *ebpf.MapSpec `ebpf:"secrets_map"`
-	SslMap          *ebpf.MapSpec `ebpf:"ssl_map"`
-	TgidMap         *ebpf.MapSpec `ebpf:"tgid_map"`
-	UidMap          *ebpf.MapSpec `ebpf:"uid_map"`
+	LayoutErrorMap    *ebpf.MapSpec `ebpf:"layout_error_map"`
+	PartialSecretsMap *ebpf.MapSpec `ebpf:"partial_secrets_map"`
+	SecretsEventMap   *ebpf.MapSpec `ebpf:"secrets_event_map"`
+	SecretsMap        *ebpf.MapSpec `ebpf:"secrets_map"`
+	SecretsScratchMap *ebpf.MapSpec `ebpf:"secrets_scratch_map"`
+	SslMap            *ebpf.MapSpec `ebpf:"ssl_map"`
+	TgidMap           *ebpf.MapSpec `ebpf:"tgid_map"`
+	UidMap            *ebpf.MapSpec `ebpf:"uid_map"`
 }
 
 // bpfVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfVariableSpecs struct {
+	BoringsslClientRandomOffset  *ebpf.VariableSpec `ebpf:"boringssl_client_random_offset"`
+	BoringsslS3Offset            *ebpf.VariableSpec `ebpf:"boringssl_s3_offset"`
+	BoringsslVersionInS3         *ebpf.VariableSpec `ebpf:"boringssl_version_in_s3"`
+	BoringsslVersionOffset       *ebpf.VariableSpec `ebpf:"boringssl_version_offset"`
 	CipherIdOffset               *ebpf.VariableSpec `ebpf:"cipher_id_offset"`
 	ClientAppTrafficSecretOffset *ebpf.VariableSpec `ebpf:"client_app_traffic_secret_offset"`
 	ClientRandomOffset           *ebpf.VariableSpec `ebpf:"client_random_offset"`
@@ -155,17 +183,23 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	SecretsEventMap *ebpf.Map `ebpf:"secrets_event_map"`
-	SecretsMap      *ebpf.Map `ebpf:"secrets_map"`
-	SslMap          *ebpf.Map `ebpf:"ssl_map"`
-	TgidMap         *ebpf.Map `ebpf:"tgid_map"`
-	UidMap          *ebpf.Map `ebpf:"uid_map"`
+	LayoutErrorMap    *ebpf.Map `ebpf:"layout_error_map"`
+	PartialSecretsMap *ebpf.Map `ebpf:"partial_secrets_map"`
+	SecretsEventMap   *ebpf.Map `ebpf:"secrets_event_map"`
+	SecretsMap        *ebpf.Map `ebpf:"secrets_map"`
+	SecretsScratchMap *ebpf.Map `ebpf:"secrets_scratch_map"`
+	SslMap            *ebpf.Map `ebpf:"ssl_map"`
+	TgidMap           *ebpf.Map `ebpf:"tgid_map"`
+	UidMap            *ebpf.Map `ebpf:"uid_map"`
 }
 
 func (m *bpfMaps) Close() error {
 	return _BpfClose(
+		m.LayoutErrorMap,
+		m.PartialSecretsMap,
 		m.SecretsEventMap,
 		m.SecretsMap,
+		m.SecretsScratchMap,
 		m.SslMap,
 		m.TgidMap,
 		m.UidMap,
@@ -176,6 +210,10 @@ func (m *bpfMaps) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfVariables struct {
+	BoringsslClientRandomOffset  *ebpf.Variable `ebpf:"boringssl_client_random_offset"`
+	BoringsslS3Offset            *ebpf.Variable `ebpf:"boringssl_s3_offset"`
+	BoringsslVersionInS3         *ebpf.Variable `ebpf:"boringssl_version_in_s3"`
+	BoringsslVersionOffset       *ebpf.Variable `ebpf:"boringssl_version_offset"`
 	CipherIdOffset               *ebpf.Variable `ebpf:"cipher_id_offset"`
 	ClientAppTrafficSecretOffset *ebpf.Variable `ebpf:"client_app_traffic_secret_offset"`
 	ClientRandomOffset           *ebpf.Variable `ebpf:"client_random_offset"`
@@ -196,12 +234,14 @@ type bpfVariables struct {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfPrograms struct {
+	LogSecret    *ebpf.Program `ebpf:"log_secret"`
 	StashSsl     *ebpf.Program `ebpf:"stash_ssl"`
 	StoreSecrets *ebpf.Program `ebpf:"store_secrets"`
 }
 
 func (p *bpfPrograms) Close() error {
 	return _BpfClose(
+		p.LogSecret,
 		p.StashSsl,
 		p.StoreSecrets,
 	)

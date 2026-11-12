@@ -13,6 +13,9 @@ LLVM_STRIP ?= llvm-strip-21
 LIBBPF_VERSION ?= v1.8.0
 LIBBPF_HEADERS ?= bpf_helpers.h bpf_helper_defs.h bpf_endian.h bpf_tracing.h bpf_core_read.h
 OPENSSL_VERSIONS ?= openssl-3.6.2
+BORINGSSL_RELEASES ?= 15 16 17
+# the newest NDK of the SDK, the BoringSSL probe is compiled for x86_64 and aarch64 Android with its clang
+ANDROID_NDK ?= $(lastword $(sort $(wildcard $(HOME)/Android/Sdk/ndk/*)))
 
 # bpf2go reads the compiler from the environment, the go:generate lines stay compiler independent
 export BPF2GO_CC := $(CLANG)
@@ -63,6 +66,12 @@ generate-bpf-objects: generate-bpf-redirect-objects generate-bpf-secrets-objects
 generate-openssl-offsets: ## Generate OpenSSL struct offsets for OPENSSL_VERSIONS (default is openssl-3.6.2)
 	tmp="$$(mktemp)"; \
 	./tools/offsetgen/offsetgen.sh $(OPENSSL_VERSIONS) > "$$tmp" && gofmt -w "$$tmp" && mv "$$tmp" internal/tls/openssl/offsets_gen.go || { rm -f "$$tmp"; exit 1; }
+
+# the offsets are read from the probe's assembly, nothing is run, so both architectures come from one host
+.PHONY: generate-boringssl-offsets
+generate-boringssl-offsets: ## Generate BoringSSL offsets of Conscrypt for the Android BORINGSSL_RELEASES (default is 15 16 17) with the NDK in ANDROID_NDK (default is the newest in ~/Android/Sdk/ndk)
+	tmp="$$(mktemp)"; \
+	ANDROID_NDK="$(ANDROID_NDK)" ./tools/offsetgen/boringssl.sh $(BORINGSSL_RELEASES) > "$$tmp" && gofmt -w "$$tmp" && mv "$$tmp" internal/tls/boringssl/offsets_gen.go || { rm -f "$$tmp"; exit 1; }
 
 .PHONY: generate
 generate: generate-vmlinux generate-bpf-objects ## Generate vmlinux.h and bpf object files

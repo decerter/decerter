@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// the secrets object is generated for amd64 only (PT_REGS_*), other architectures get stub.go
-//go:build amd64
+// the secrets object is generated for amd64 and arm64 (PT_REGS_*), other architectures get stub.go
+//go:build amd64 || arm64
 
 package secrets
 
@@ -9,21 +9,26 @@ import (
 	"fmt"
 
 	"github.com/decerter/decerter/internal/bpf"
+	"github.com/decerter/decerter/internal/tls/boringssl"
 	"github.com/decerter/decerter/internal/tls/openssl"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
 )
 
-//go:generate go tool bpf2go -tags linux -cflags "-O2 -g -Wall -Werror -fms-extensions -Wno-microsoft-anon-tag -mcpu=v4 $BPF_CFLAGS" -target amd64 bpf ../../../bpf/secrets/secrets.c -- -I../../../bpf -I../../../bpf/include
+//go:generate go tool bpf2go -tags linux -cflags "-O2 -g -Wall -Werror -fms-extensions -Wno-microsoft-anon-tag -mcpu=v4 $BPF_CFLAGS" -target amd64,arm64 bpf ../../../bpf/secrets/secrets.c -- -I../../../bpf -I../../../bpf/include
 
 const (
-	SecretsEventMap bpf.BpfMapName     = 0 // value: "secrets_event_map"
-	SecretsMap      bpf.BpfMapName     = 1 // value: "secrets_map"
-	SslMap          bpf.BpfMapName     = 2 // value: "ssl_map"
-	TgidMap         bpf.BpfMapName     = 3 // value: "tgid_map"
-	UidMap          bpf.BpfMapName     = 4 // value: "uid_map"
-	StashSsl        bpf.BpfProgramName = 0 // value: "stash_ssl"
-	StoreSecrets    bpf.BpfProgramName = 1 // value: "store_secrets"
+	LayoutErrorMap    bpf.BpfMapName     = 0 // value: "layout_error_map"
+	PartialSecretsMap bpf.BpfMapName     = 1 // value: "partial_secrets_map"
+	SecretsEventMap   bpf.BpfMapName     = 2 // value: "secrets_event_map"
+	SecretsMap        bpf.BpfMapName     = 3 // value: "secrets_map"
+	SecretsScratchMap bpf.BpfMapName     = 4 // value: "secrets_scratch_map"
+	SslMap            bpf.BpfMapName     = 5 // value: "ssl_map"
+	TgidMap           bpf.BpfMapName     = 6 // value: "tgid_map"
+	UidMap            bpf.BpfMapName     = 7 // value: "uid_map"
+	LogSecret         bpf.BpfProgramName = 0 // value: "log_secret"
+	StashSsl          bpf.BpfProgramName = 1 // value: "stash_ssl"
+	StoreSecrets      bpf.BpfProgramName = 2 // value: "store_secrets"
 )
 
 // the uprobe is built for this architecture, stub.go returns ErrUnsupportedArchitecture
@@ -31,9 +36,10 @@ func CheckSupported() (err error) {
 	return
 }
 
+// one object holds the OpenSSL programs (stash_ssl, store_secrets) and the BoringSSL one (log_secret), only the offsets of the library that is hooked are set, the other set stays zero and its programs are never attached
 // sharedUidMap and sharedTgidMap share the redirect object's selection maps in run mode, so run and keylog mode pick processes the same way
 // in keylog mode they are nil, the secrets object owns uid_map and tgid_map and UpdateSelection fills them; with both empty no process is read
-func LoadBpfObjects(offset openssl.Offset, ownTgid uint32, sharedUidMap *ebpf.Map, sharedTgidMap *ebpf.Map) (bpfMaps map[bpf.BpfMapName]*ebpf.Map, bpfPrograms map[bpf.BpfProgramName]*ebpf.Program, closeFunction func() error, err error) {
+func LoadBpfObjects(opensslOffset openssl.Offset, boringsslOffset boringssl.Offset, ownTgid uint32, sharedUidMap *ebpf.Map, sharedTgidMap *ebpf.Map) (bpfMaps map[bpf.BpfMapName]*ebpf.Map, bpfPrograms map[bpf.BpfProgramName]*ebpf.Program, closeFunction func() error, err error) {
 	err = rlimit.RemoveMemlock()
 
 	if err != nil {
@@ -49,21 +55,31 @@ func LoadBpfObjects(offset openssl.Offset, ownTgid uint32, sharedUidMap *ebpf.Ma
 	}
 
 	// the offsets are set before load so the verifier bakes them into the probe
+	versionInS3 := uint32(0)
+
+	if boringsslOffset.VersionInS3 {
+		versionInS3 = 1
+	}
+
 	variables := map[string]any{
 		bpfVarOwnTgid:                      ownTgid,
-		bpfVarTypeOffset:                   offset.Type,
-		bpfVarSslConnectionOffset:          offset.SSLConnection,
-		bpfVarVersionOffset:                offset.Version,
-		bpfVarClientRandomOffset:           offset.ClientRandom,
-		bpfVarSessionOffset:                offset.Session,
-		bpfVarMasterKeyOffset:              offset.MasterKey,
-		bpfVarMasterKeyLengthOffset:        offset.MasterKeyLength,
-		bpfVarSessionCipherOffset:          offset.SessionCipher,
-		bpfVarCipherIdOffset:               offset.CipherId,
-		bpfVarClientAppTrafficSecretOffset: offset.ClientAppTrafficSecret,
-		bpfVarServerAppTrafficSecretOffset: offset.ServerAppTrafficSecret,
-		bpfVarHandshakeSecretOffset:        offset.HandshakeSecret,
-		bpfVarHandshakeTrafficHashOffset:   offset.HandshakeTrafficHash,
+		bpfVarTypeOffset:                   opensslOffset.Type,
+		bpfVarSslConnectionOffset:          opensslOffset.SSLConnection,
+		bpfVarVersionOffset:                opensslOffset.Version,
+		bpfVarClientRandomOffset:           opensslOffset.ClientRandom,
+		bpfVarSessionOffset:                opensslOffset.Session,
+		bpfVarMasterKeyOffset:              opensslOffset.MasterKey,
+		bpfVarMasterKeyLengthOffset:        opensslOffset.MasterKeyLength,
+		bpfVarSessionCipherOffset:          opensslOffset.SessionCipher,
+		bpfVarCipherIdOffset:               opensslOffset.CipherId,
+		bpfVarClientAppTrafficSecretOffset: opensslOffset.ClientAppTrafficSecret,
+		bpfVarServerAppTrafficSecretOffset: opensslOffset.ServerAppTrafficSecret,
+		bpfVarHandshakeSecretOffset:        opensslOffset.HandshakeSecret,
+		bpfVarHandshakeTrafficHashOffset:   opensslOffset.HandshakeTrafficHash,
+		bpfVarBoringsslVersionOffset:       boringsslOffset.Version,
+		bpfVarBoringsslVersionInS3:         versionInS3,
+		bpfVarBoringsslS3Offset:            boringsslOffset.S3,
+		bpfVarBoringsslClientRandomOffset:  boringsslOffset.ClientRandom,
 	}
 
 	for name, value := range variables {
@@ -94,13 +110,17 @@ func LoadBpfObjects(offset openssl.Offset, ownTgid uint32, sharedUidMap *ebpf.Ma
 	}
 
 	bpfMaps = map[bpf.BpfMapName]*ebpf.Map{
-		SecretsEventMap: objs.SecretsEventMap,
-		SecretsMap:      objs.SecretsMap,
-		SslMap:          objs.SslMap,
-		TgidMap:         objs.TgidMap,
-		UidMap:          objs.UidMap,
+		LayoutErrorMap:    objs.LayoutErrorMap,
+		PartialSecretsMap: objs.PartialSecretsMap,
+		SecretsEventMap:   objs.SecretsEventMap,
+		SecretsMap:        objs.SecretsMap,
+		SecretsScratchMap: objs.SecretsScratchMap,
+		SslMap:            objs.SslMap,
+		TgidMap:           objs.TgidMap,
+		UidMap:            objs.UidMap,
 	}
 	bpfPrograms = map[bpf.BpfProgramName]*ebpf.Program{
+		LogSecret:    objs.LogSecret,
 		StashSsl:     objs.StashSsl,
 		StoreSecrets: objs.StoreSecrets,
 	}
@@ -128,6 +148,27 @@ func UpdateSelection(uids []uint32, tgids []uint32, bpfMaps map[bpf.BpfMapName]*
 		}
 	}
 
+	return
+}
+
+// the ssl_log_secret calls the uprobe rejected because the version it read does not fit the label, err wraps ErrLayoutMismatch with the last one when there were any
+// such a libssl has another BoringSSL layout than the offsets of its Android release, Conscrypt is updated through Play apart from the release
+func CheckLayout(bpfMaps map[bpf.BpfMapName]*ebpf.Map) (count uint32, err error) {
+	var layoutError bpfLayoutError
+	lookupErr := bpfMaps[LayoutErrorMap].Lookup(uint32(0), &layoutError)
+
+	if err = lookupErr; err != nil {
+		err = fmt.Errorf("lookup %s: %w", bpfMapLayoutErrorMap, err)
+		return
+	}
+
+	count = layoutError.Count
+
+	if count == 0 {
+		return
+	}
+
+	err = fmt.Errorf("%w: %d secrets rejected, the last one %s with version 0x%04x and a %d byte secret", ErrLayoutMismatch, count, secretLabel(layoutError.SecretBit), layoutError.TlsVersion, layoutError.SecretLength)
 	return
 }
 

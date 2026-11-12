@@ -62,3 +62,16 @@ func AddUprobe(executable *link.Executable, symbol string, program *ebpf.Program
 	closeFunction = uprobeLink.Close
 	return
 }
+
+// attach program to the entry of a function that has no symbol cilium/ebpf can resolve, address is the file offset of its first instruction
+func AddUprobeAddress(executable *link.Executable, address uint64, program *ebpf.Program) (closeFunction func() error, err error) {
+	uprobeLink, attachErr := executable.Uprobe("", program, &link.UprobeOptions{Address: address})
+
+	if err = attachErr; err != nil {
+		err = fmt.Errorf("%w: address 0x%x: %w", ErrAttach, address, attachErr)
+		return
+	}
+
+	closeFunction = uprobeLink.Close
+	return
+}
