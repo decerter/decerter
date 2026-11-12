@@ -51,7 +51,7 @@ type filterCall struct {
 	Expected   string
 }
 
-// one decerter run with a -filter: Filter can use the ports of the servers, Flags are the selection flags next to it
+// one decerter run with a --filter: Filter can use the ports of the servers, Flags are the selection flags next to it
 type filterCase struct {
 	Name   string
 	Flags  redirect.Filter
@@ -59,7 +59,7 @@ type filterCase struct {
 	Calls  []filterCall
 }
 
-// Test if a flow in scope of the -filter is intercepted and a flow out of scope reaches its server unchanged, for filters decided in the kernel and in Go.
+// Test if a flow in scope of the --filter is intercepted and a flow out of scope reaches its server unchanged, for filters decided in the kernel and in Go.
 func TestFilterPositive(state *testing.T) {
 	wgetPath, lookErr := exec.LookPath("wget")
 
@@ -86,7 +86,7 @@ func TestFilterPositive(state *testing.T) {
 	}
 }
 
-// Test if the -filter decides a DTLS session in Go when the session starts, with the ClientHello of its first datagram.
+// Test if the --filter decides a DTLS session in Go when the session starts, with the ClientHello of its first datagram.
 func TestFilterDTLSPositive(state *testing.T) {
 	positiveCases := []struct {
 		Filter   string
@@ -113,7 +113,7 @@ func TestFilterDTLSPositive(state *testing.T) {
 	}
 }
 
-// Test if a filter that selects no process is refused when no -uid or -pid is given.
+// Test if a filter that selects no process is refused when no --uid or --pid is given.
 func TestFilterNegative(state *testing.T) {
 	negativeCases := []string{
 		`proc.comm == "curl"`,
@@ -139,7 +139,7 @@ func TestFilterNegative(state *testing.T) {
 	}
 }
 
-// Test if a capture with a -filter has only the flows in scope: proc.comm decided in the kernel, tls.sni in Go after the ClientHello, in both capture formats.
+// Test if a capture with a --filter has only the flows in scope: proc.comm decided in the kernel, tls.sni in Go after the ClientHello, in both capture formats.
 func TestCaptureFilterPositive(state *testing.T) {
 	wgetPath, lookErr := exec.LookPath("wget")
 

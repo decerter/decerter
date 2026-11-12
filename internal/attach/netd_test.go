@@ -47,7 +47,7 @@ func testNetdStateRoundTrip(statePath string) (err error) {
 
 	// the temporary file is renamed over the state file
 	if _, tmpErr := os.Stat(statePath + ".tmp"); !errors.Is(tmpErr, fs.ErrNotExist) {
-		err = fmt.Errorf("temporary state file is still there: %v", tmpErr)
+		err = fmt.Errorf("temporary state file is still there: %w", tmpErr)
 		return
 	}
 
@@ -71,7 +71,7 @@ func testNetdStateRoundTrip(statePath string) (err error) {
 	_, err = attach.ReadNetdState(statePath)
 
 	if !errors.Is(err, fs.ErrNotExist) {
-		err = fmt.Errorf("attach.ReadNetdState after remove return value was not %v instead: %v", fs.ErrNotExist, err)
+		err = fmt.Errorf("attach.ReadNetdState after remove return value was not %s instead: %w", fs.ErrNotExist.Error(), err)
 		return
 	}
 

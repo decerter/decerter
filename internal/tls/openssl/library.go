@@ -43,7 +43,7 @@ var (
 	}
 )
 
-// override is the -libssl flag, empty means the libssl the dynamic linker would load for a process without its own search path
+// override is the --libssl flag, empty means the libssl the dynamic linker would load for a process without its own search path
 // the version string is only in libcrypto, it is taken from the directory of libssl
 func FindLibssl(override string) (libsslPath string, libcryptoPath string, err error) {
 	libsslPath = override
@@ -53,7 +53,7 @@ func FindLibssl(override string) (libsslPath string, libcryptoPath string, err e
 	}
 
 	if libsslPath == "" {
-		err = fmt.Errorf("%w: %s, give its path with -libssl", ErrLibraryNotFound, libsslName)
+		err = fmt.Errorf("%w: %s, give its path with --libssl", ErrLibraryNotFound, libsslName)
 		return
 	}
 

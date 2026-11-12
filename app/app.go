@@ -89,14 +89,14 @@ type App struct {
 	closeFunctions      [](func() error)
 }
 
-// keylog is the -keylog mode: load and attach only the secrets uprobe and print NSS key log lines, no redirect, proxy or route sync
-// decrypt is the -decrypt option of run mode: the proxy decrypts the TLS flows with the secrets of the uprobe and prints their plaintext
+// keylog is the keylog command: load and attach only the secrets uprobe and print NSS key log lines, no redirect, proxy or route sync
+// decrypt is the --decrypt option of run mode: the proxy decrypts the TLS flows with the secrets of the uprobe and prints their plaintext
 // rules make the proxy intercept every flow instead of observing it: TLS records are decrypted, run through the rules, printed and sealed again, plain tcp and udp go through them too; empty intercepts nothing
 // libssl overrides the resolved libssl path, empty means search the standard directories
-// capturePath is the -capture mode: nothing is redirected, the packets of the selected flows and the secrets of their TLS sessions are written to this pcapng file, at most snaplen bytes of a packet
-// plaintext is the -plaintext option of capture mode: the file gets synthesized packets with the decrypted payload instead of the captured packets and the secrets
+// capturePath is the capture command: nothing is redirected, the packets of the selected flows and the secrets of their TLS sessions are written to this pcapng file, at most snaplen bytes of a packet
+// plaintext is the --plaintext option of capture mode: the file gets synthesized packets with the decrypted payload instead of the captured packets and the secrets
 // currentPlatform decides where the netd hook state is kept and whether hooks held exclusively by another program may be shared, only on Android
-// flags is the kernel selection of -uid, -pid, -dst-cidr and -dst-port; scopeFilter the -filter, which narrows it: its kernel terms are added to the maps, the proxy and the capture writer decide the rest per flow; nil is no filter
+// flags is the kernel selection of --uid, --pid, --dst-cidr and --dst-port; scopeFilter the --filter, which narrows it: its kernel terms are added to the maps, the proxy and the capture writer decide the rest per flow; nil is no filter
 func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, decrypt bool, rules []intercept.Rule, libssl string, capturePath string, plaintext bool, snaplen uint32, currentPlatform platform.Platform, logger *slog.Logger) (app App) {
 	appCtx, cancel := context.WithCancel(ctx)
 	app = App{
@@ -597,7 +597,7 @@ func (app *App) StartFlowTable() {
 }
 
 // resolve libssl and pick the offsets, then load the secrets object; an unknown OpenSSL version fails here, so this runs before anything is attached
-// Linux hooks OpenSSL. Android hooks BoringSSL's ssl_log_secret in Conscrypt's libssl with the offsets of the Android release; with -libssl the library given, as BoringSSL when it has ssl_log_secret and as OpenSSL otherwise
+// Linux hooks OpenSSL. Android hooks BoringSSL's ssl_log_secret in Conscrypt's libssl with the offsets of the Android release; with --libssl the library given, as BoringSSL when it has ssl_log_secret and as OpenSSL otherwise
 // in run and capture mode the redirect object has to be loaded already, the secrets object shares its uid_map and tgid_map; in keylog mode it owns them
 // on an architecture without the secrets object, and on Android when Conscrypt can't be hooked, keylog mode fails, run and capture mode go on without TLS secrets
 func (app *App) LoadSecretsBpfObjects() (err error) {
@@ -668,7 +668,7 @@ func (app *App) LoadSecretsBpfObjects() (err error) {
 
 	var sharedUidMap, sharedTgidMap *ebpf.Map
 
-	// run and capture mode share the redirect object's selection maps so the same -uid and -pid select the flows and the secrets
+	// run and capture mode share the redirect object's selection maps so the same --uid and --pid select the flows and the secrets
 	if !app.keylog {
 		sharedUidMap = app.redirectBpfMaps[redirect.UidMap]
 		sharedTgidMap = app.redirectBpfMaps[redirect.TgidMap]
@@ -690,8 +690,8 @@ func (app *App) LoadSecretsBpfObjects() (err error) {
 	return
 }
 
-// only on Android: Conscrypt's libssl, or the -libssl given, is hooked as BoringSSL when it has ssl_log_secret
-// a -libssl without it is an OpenSSL (useBoringssl false, no error), a Conscrypt without it is an error
+// only on Android: Conscrypt's libssl, or the --libssl given, is hooked as BoringSSL when it has ssl_log_secret
+// a --libssl without it is an OpenSSL (useBoringssl false, no error), a Conscrypt without it is an error
 func (app *App) findBoringssl() (useBoringssl bool, libsslPath string, logSecretAddress uint64, err error) {
 	if app.platform.Type != platform.AndroidType {
 		return
@@ -811,6 +811,13 @@ func (app *App) AttachSecrets() (err error) {
 		{program: secrets.StoreSecrets, isReturn: true},
 	}
 
+	// closing a uprobe link waits in the kernel while it unregisters the probe, 60-180 ms each; one after the other the ten links made every shutdown take over a second, closed together they take about half as long, the kernel serialises the rest
+	uprobeCloseFunctions := [](func() error){}
+
+	defer func() {
+		app.closeFunctions = append(app.closeFunctions, closeTogether(uprobeCloseFunctions))
+	}()
+
 	for _, symbol := range secrets.SymbolHooks() {
 		for _, attachment := range attachments {
 			closeFunction, attachErr := attach.AddUprobe(executable, symbol, app.secretsBpfPrograms[attachment.program], attachment.isReturn)
@@ -820,11 +827,31 @@ func (app *App) AttachSecrets() (err error) {
 				return
 			}
 
-			app.closeFunctions = append(app.closeFunctions, closeFunction)
+			uprobeCloseFunctions = append(uprobeCloseFunctions, closeFunction)
 		}
 	}
 
 	app.logger.Info("Attached secrets uprobe", "libssl", app.libssl, "symbols", secrets.SymbolHooks(), "uids", app.secretsUIDs(), "pids", app.secretsTgids())
+	return
+}
+
+// one close function for links that don't depend on each other and whose close waits in the kernel: they are closed at the same time and the errors joined
+func closeTogether(closeFunctions [](func() error)) (closeFunction func() error) {
+	closeFunction = func() (err error) {
+		var waitGroup sync.WaitGroup
+		closeErrs := make([]error, len(closeFunctions))
+
+		// link closers
+		for index, linkClose := range closeFunctions {
+			waitGroup.Go(func() {
+				closeErrs[index] = linkClose()
+			})
+		}
+
+		waitGroup.Wait()
+		err = errors.Join(closeErrs...)
+		return
+	}
 	return
 }
 
@@ -916,7 +943,7 @@ func (app *App) lockDataDirectory() (err error) {
 	return
 }
 
-// the -android-restore entry point: put netd's hooks back from the state a killed decerter left, refused while another decerter runs
+// the decerter android restore entry point: put netd's hooks back from the state a killed decerter left, refused while another decerter runs
 func (app *App) RestoreNetdHooks() (err error) {
 	if app.platform.Type != platform.AndroidType {
 		app.logger.Info("Not on Android, nothing to restore")
@@ -960,7 +987,7 @@ func (app *App) restoreNetdState(isStale bool) (err error) {
 	app.logRestoredHooks(restored)
 
 	if err = restoreErr; err != nil {
-		app.logger.Error("Could not restore netd hooks, the state file is kept for decerter -android-restore", "error", err, "fileName", statePath)
+		app.logger.Error("Could not restore netd hooks, the state file is kept for decerter android restore", "error", err, "fileName", statePath)
 		return
 	}
 
@@ -1033,7 +1060,7 @@ func (app *App) ShareNetdHooks() (err error) {
 		app.logRestoredHooks(restored)
 
 		if closeErr = restoreErr; closeErr != nil {
-			app.logger.Error("Could not restore netd hooks, the state file is kept for decerter -android-restore", "error", closeErr, "fileName", statePath)
+			app.logger.Error("Could not restore netd hooks, the state file is kept for decerter android restore", "error", closeErr, "fileName", statePath)
 			return
 		}
 
@@ -1041,6 +1068,166 @@ func (app *App) ShareNetdHooks() (err error) {
 		return
 	})
 
+	return
+}
+
+// the one start order of every mode, used by the run, capture and keylog commands and by the e2e tests
+// the mode comes from New: keylog, a capturePath, or run mode otherwise; Shutdown undoes whatever part of it ran, also after an error
+func (app *App) Start() (err error) {
+	// on Android a decerter killed before puts netd's hooks back first
+	err = app.PreparePlatform()
+
+	if err != nil {
+		return
+	}
+
+	switch {
+	case app.keylog:
+		err = app.startKeylogMode()
+	case app.capturePath != "":
+		err = app.startCaptureMode()
+	default:
+		err = app.startRunMode()
+	}
+
+	return
+}
+
+// keylog mode loads and attaches only the libssl secrets uprobe and prints key log lines
+func (app *App) startKeylogMode() (err error) {
+	err = app.LoadSecretsBpfObjects()
+
+	if err != nil {
+		return
+	}
+
+	err = app.UpdateSecretsSelection()
+
+	if err != nil {
+		return
+	}
+
+	app.StartKeylog()
+	err = app.AttachSecrets()
+	return
+}
+
+// capture mode records the flows and copies their packets, no proxy listener and no route sync
+func (app *App) startCaptureMode() (err error) {
+	err = app.LoadBpfObjects()
+
+	if err != nil {
+		return
+	}
+
+	err = app.UpdateBpfMaps()
+
+	if err != nil {
+		return
+	}
+
+	// an unknown OpenSSL version has to fail here, before anything is attached
+	err = app.LoadSecretsBpfObjects()
+
+	if err != nil {
+		return
+	}
+
+	err = app.LoadCaptureObjects()
+
+	if err != nil {
+		return
+	}
+
+	err = app.StartCapture()
+
+	if err != nil {
+		return
+	}
+
+	// the uprobe and the packet programs are attached first, so the first recorded flow already has them
+	err = app.AttachSecrets()
+
+	if err != nil {
+		return
+	}
+
+	err = app.ShareNetdHooks()
+
+	if err != nil {
+		return
+	}
+
+	err = app.AttachCapture()
+
+	if err != nil {
+		return
+	}
+
+	app.StartReleaseSweep()
+	err = app.AttachRedirect()
+
+	if err != nil {
+		return
+	}
+
+	app.StartFlowTable()
+	return
+}
+
+func (app *App) startRunMode() (err error) {
+	err = app.LoadBpfObjects()
+
+	if err != nil {
+		return
+	}
+
+	err = app.UpdateBpfMaps()
+
+	if err != nil {
+		return
+	}
+
+	// an unknown OpenSSL version has to fail here, before the route sync, the proxy and every attach
+	err = app.LoadSecretsBpfObjects()
+
+	if err != nil {
+		return
+	}
+
+	err = app.StartRouteSync()
+
+	if err != nil {
+		return
+	}
+
+	err = app.StartProxy()
+
+	if err != nil {
+		return
+	}
+
+	// the uprobe is attached first, so the first redirected connection already leaves its secrets in secrets_map
+	err = app.AttachSecrets()
+
+	if err != nil {
+		return
+	}
+
+	err = app.ShareNetdHooks()
+
+	if err != nil {
+		return
+	}
+
+	app.StartReleaseSweep()
+	err = app.AttachRedirect()
+
+	if err != nil {
+		return
+	}
+
+	app.StartFlowTable()
 	return
 }
 

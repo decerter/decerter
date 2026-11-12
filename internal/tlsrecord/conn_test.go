@@ -216,7 +216,7 @@ func testFeedErrors(negative testCase) (err error) {
 	_, _, _, feedErr := feedSession(holdLimit, chunks, wrongSecrets, false)
 
 	if !errors.Is(feedErr, tlsrecord.ErrBadRecordMAC) {
-		err = fmt.Errorf("feed with wrong secrets return value was not %v instead: %v", tlsrecord.ErrBadRecordMAC, feedErr)
+		err = fmt.Errorf("feed with wrong secrets return value was not %s instead: %w", tlsrecord.ErrBadRecordMAC.Error(), feedErr)
 		return
 	}
 
@@ -226,7 +226,7 @@ func testFeedErrors(negative testCase) (err error) {
 	_, _, _, feedErr = feedSession(holdLimit, chunks, wrongSecrets, false)
 
 	if !errors.Is(feedErr, tlsrecord.ErrSecrets) {
-		err = fmt.Errorf("feed with secrets of the wrong version return value was not %v instead: %v", tlsrecord.ErrSecrets, feedErr)
+		err = fmt.Errorf("feed with secrets of the wrong version return value was not %s instead: %w", tlsrecord.ErrSecrets.Error(), feedErr)
 		return
 	}
 
@@ -234,7 +234,7 @@ func testFeedErrors(negative testCase) (err error) {
 	_, _, _, feedErr = feedSession(requestLength, chunks, secrets, true)
 
 	if !errors.Is(feedErr, tlsrecord.ErrHoldQueueFull) {
-		err = fmt.Errorf("feed without secrets return value was not %v instead: %v", tlsrecord.ErrHoldQueueFull, feedErr)
+		err = fmt.Errorf("feed without secrets return value was not %s instead: %w", tlsrecord.ErrHoldQueueFull.Error(), feedErr)
 		return
 	}
 
@@ -243,14 +243,14 @@ func testFeedErrors(negative testCase) (err error) {
 	_, feedErr = conn.Feed(tlsrecord.ClientDirection, []byte("GET / HTTP/1.1\r\n\r\n"))
 
 	if !errors.Is(feedErr, tlsrecord.ErrUnexpectedRecord) {
-		err = fmt.Errorf("feed of a plain stream return value was not %v instead: %v", tlsrecord.ErrUnexpectedRecord, feedErr)
+		err = fmt.Errorf("feed of a plain stream return value was not %s instead: %w", tlsrecord.ErrUnexpectedRecord.Error(), feedErr)
 		return
 	}
 
 	_, feedErr = conn.Feed(tlsrecord.ClientDirection, chunks[0].data)
 
 	if !errors.Is(feedErr, tlsrecord.ErrUnexpectedRecord) {
-		err = fmt.Errorf("feed after an error return value was not %v instead: %v", tlsrecord.ErrUnexpectedRecord, feedErr)
+		err = fmt.Errorf("feed after an error return value was not %s instead: %w", tlsrecord.ErrUnexpectedRecord.Error(), feedErr)
 		return
 	}
 

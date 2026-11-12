@@ -348,7 +348,7 @@ func forgetUDPFlow(cookie uint64, client bpfEndpoint, bpfMaps map[bpf.BpfMapName
 
 		switch {
 		case errors.Is(err, ebpf.ErrKeyNotExist):
-			err = nil
+			// nothing to take out, err is set again by the flow_map delete below
 		case err != nil:
 			err = fmt.Errorf("lookup and delete %s cookie %d: %w", bpfMapClientMap, cookie, err)
 			return

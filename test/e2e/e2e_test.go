@@ -167,7 +167,7 @@ func loadCertificate(name string) (loaded certificate, err error) {
 	return
 }
 
-// start decerter in the test process in the order main.go uses, selecting only the test user's flows to 127.0.0.1
+// start decerter in the test process in the order of the decerter commands, selecting only the test user's flows to 127.0.0.1
 // stop shuts it down once and is a cleanup of the test too, so a failed test leaves nothing attached
 func startDecerter(state *testing.T, mode decerterMode, capturePath string, rules []intercept.Rule) (stop func() error) {
 	stop = startFilteredDecerter(state, mode, capturePath, rules, testFlags(), "")
@@ -186,7 +186,7 @@ func testFlags() (flags redirect.Filter) {
 	return
 }
 
-// startDecerter with the flags given and a -filter, empty is none
+// startDecerter with the flags given and a --filter, empty is none
 func startFilteredDecerter(state *testing.T, mode decerterMode, capturePath string, rules []intercept.Rule, flags redirect.Filter, scopeText string) (stop func() error) {
 	decerter := newDecerter(state, mode, capturePath, rules, flags, scopeText)
 	stop = sync.OnceValue(decerter.Shutdown)
@@ -197,7 +197,8 @@ func startFilteredDecerter(state *testing.T, mode decerterMode, capturePath stri
 		}
 	})
 
-	err := startSequence(&decerter, mode)
+	// the same start order as the run and capture commands
+	err := decerter.Start()
 
 	if err != nil {
 		state.Fatalf("Could not start decerter in %s mode, error: %s", mode, err.Error())
@@ -222,97 +223,6 @@ func newDecerter(state *testing.T, mode decerterMode, capturePath string, rules 
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 	decerter = app.New(context.Background(), flags, scopeFilter, proxyPort, udpIdleTimeout, false, false, false, rules, "", capturePath, mode == PlaintextDecerterMode, capturebpf.MaxSnaplen, platform.Detect("/"), logger)
-	return
-}
-
-func startSequence(decerter *app.App, mode decerterMode) (err error) {
-	err = decerter.PreparePlatform()
-
-	if err != nil {
-		return
-	}
-
-	err = decerter.LoadBpfObjects()
-
-	if err != nil {
-		return
-	}
-
-	err = decerter.UpdateBpfMaps()
-
-	if err != nil {
-		return
-	}
-
-	err = decerter.LoadSecretsBpfObjects()
-
-	if err != nil {
-		return
-	}
-
-	// capture mode records the flows and copies their packets, no proxy listener and no route sync
-	if mode != InterceptDecerterMode {
-		err = decerter.LoadCaptureObjects()
-
-		if err != nil {
-			return
-		}
-
-		err = decerter.StartCapture()
-
-		if err != nil {
-			return
-		}
-
-		err = decerter.AttachSecrets()
-
-		if err != nil {
-			return
-		}
-
-		err = decerter.ShareNetdHooks()
-
-		if err != nil {
-			return
-		}
-
-		err = decerter.AttachCapture()
-
-		if err != nil {
-			return
-		}
-
-		decerter.StartReleaseSweep()
-		err = decerter.AttachRedirect()
-		return
-	}
-
-	err = decerter.StartRouteSync()
-
-	if err != nil {
-		return
-	}
-
-	err = decerter.StartProxy()
-
-	if err != nil {
-		return
-	}
-
-	err = decerter.AttachSecrets()
-
-	if err != nil {
-		return
-	}
-
-	err = decerter.ShareNetdHooks()
-
-	if err != nil {
-		return
-	}
-
-	decerter.StartReleaseSweep()
-	err = decerter.AttachRedirect()
 	return
 }
 

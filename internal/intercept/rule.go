@@ -25,7 +25,7 @@ type Rule interface {
 	Apply(ctx context.Context, message Message) (plain []byte, verdict Verdict, err error)
 }
 
-// matches every message and changes nothing, the -intercept flag runs it: every TLS record is still decrypted and sealed again
+// matches every message and changes nothing, the --intercept flag runs it: every TLS record is still decrypted and sealed again
 type IdentityRule struct{}
 
 func (identityRule IdentityRule) Match(message Message) (isMatch bool) {

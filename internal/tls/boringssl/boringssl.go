@@ -37,7 +37,7 @@ type Offset struct {
 	ClientRandom uint64
 }
 
-// override is the -libssl flag, empty means the libssl of the Conscrypt APEX
+// override is the --libssl flag, empty means the libssl of the Conscrypt APEX
 func FindLibssl(override string) (libsslPath string, err error) {
 	libsslPath = override
 

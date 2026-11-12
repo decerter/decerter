@@ -1,5 +1,6 @@
 bpf/vmlinux.h
 bpf/vmlinux-arm64.h
-decerter
-decerter-debug
-decerter-arm64
+# the binaries in the root, not cmd/decerter
+/decerter
+/decerter-debug
+/decerter-arm64

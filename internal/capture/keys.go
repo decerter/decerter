@@ -83,7 +83,7 @@ type flow struct {
 // scope decides which flows go into the file, nil writes every recorded flow; pending are the cookies of the flows it has not decided yet
 // holding are the cookies of the held flows in the order their hold started, heldBytes the packets of all of them
 // nextWake is when tick has to run again: the next lookup of a held flow, or idleWake away when nothing is held
-// plaintext is the -plaintext mode: synthesized packets with the decrypted payload are written instead of the captured ones, buffer is the packet being built and parts what a stream gave for the packet being read
+// plaintext is the --plaintext mode: synthesized packets with the decrypted payload are written instead of the captured ones, buffer is the packet being built and parts what a stream gave for the packet being read
 type recorder struct {
 	writer          *pcapng.Writer
 	plaintext       bool

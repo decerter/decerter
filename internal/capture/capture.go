@@ -24,7 +24,7 @@ import (
 )
 
 const (
-	// -capture - writes the capture as a live pcapng stream to stdout
+	// capture -w - writes the capture as a live pcapng stream to stdout
 	StreamPath string = "-"
 	// the file holds the secrets of the captured sessions
 	fileMode os.FileMode = 0o600
