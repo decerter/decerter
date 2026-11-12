@@ -17,4 +17,5 @@ var (
 	ErrSecrets                = errors.New("secrets do not fit the tls session")
 	ErrBadRecordMAC           = errors.New("could not authenticate tls record")
 	ErrHoldQueueFull          = errors.New("too many bytes wait for the tls secrets")
+	ErrSeal                   = errors.New("could not seal tls record")
 )

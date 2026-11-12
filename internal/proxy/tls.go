@@ -8,11 +8,11 @@ import (
 	"log/slog"
 	"net/netip"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/bpf/secrets"
+	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/tlsrecord"
 )
 
@@ -28,16 +28,12 @@ const (
 	// the secrets are looked up with a growing pause while records wait for them
 	holdPollStart time.Duration = time.Millisecond
 	holdPollMax   time.Duration = 100 * time.Millisecond
-	// the plaintext shown of one record, the header line has the whole length
-	maxPrintBytes int    = 2048
-	payloadIndent string = "    "
-	hexDigits     string = "0123456789abcdef"
 )
 
 // decrypt the copies of one flow until the flow ends or decryption stops, records that need the secrets wait for them in the hold queue of the conn
 // the secrets are polled from secrets_map: its ringbuf can have only one reader and a session can be in the map before its flow asks, so the map has to be read anyway
 func watchTLS(ctx context.Context, observer *TLSObserver, logger *slog.Logger) {
-	conn := tlsrecord.New(maxHoldBytes)
+	conn := tlsrecord.New(maxHoldBytes, false)
 	isDetected := false
 	isSessionPrinted := false
 	var prefix []byte
@@ -168,16 +164,6 @@ func stopOrPrint(conn *tlsrecord.Conn, observer *TLSObserver, records []tlsrecor
 	return
 }
 
-func directionName(direction tlsrecord.Direction) (name string) {
-	name = "down"
-
-	if direction == tlsrecord.ClientDirection {
-		name = "up"
-	}
-
-	return
-}
-
 // the start of every TLS line, the same fields as the flow line of printFlow
 func tlsLinePrefix(flow redirect.Flow, client netip.AddrPort, session tlsrecord.Session) (prefix string) {
 	prefix = fmt.Sprintf("tls pid=%d uid=%d comm=%s %s client=%s version=%s suite=%s", flow.Tgid, flow.UID, flow.Comm, flow.OriginalDestination, client, tlsrecord.VersionName(session.Version), tlsrecord.CipherSuiteName(session.CipherSuite))
@@ -191,47 +177,8 @@ func printSession(flow redirect.Flow, client netip.AddrPort, session tlsrecord.S
 
 // one header line per decrypted application data record and its plaintext below, in one write so the records of other flows don't get in between
 func printRecord(flow redirect.Flow, client netip.AddrPort, session tlsrecord.Session, record tlsrecord.Record) {
-	shown := min(len(record.Payload), maxPrintBytes)
-	text := fmt.Sprintf("%s direction=%s sequence=%d length=%d shown=%d\n", tlsLinePrefix(flow, client, session), directionName(record.Direction), record.Sequence, len(record.Payload), shown) + escapePayload(record.Payload[:shown])
+	shown := min(len(record.Payload), intercept.MaxPrintBytes)
+	text := fmt.Sprintf("%s direction=%s sequence=%d length=%d shown=%d\n", tlsLinePrefix(flow, client, session), intercept.DirectionName(record.Direction), record.Sequence, len(record.Payload), shown) + intercept.Escape(record.Payload[:shown])
 	// stdout is the output of the tool as in printFlow, a failed write has nowhere to go
 	_, _ = os.Stdout.WriteString(text)
-}
-
-// plaintext for a terminal: printable ASCII stays, everything else is escaped, so no control sequence of a peer gets through
-// a line feed is shown as \n and also ends the line; every line is indented, so no payload can look like a header or a flow line
-func escapePayload(payload []byte) (text string) {
-	if len(payload) == 0 {
-		return
-	}
-
-	builder := strings.Builder{}
-	builder.Grow(len(payloadIndent) + len(payload) + len(payload)/8)
-	builder.WriteString(payloadIndent)
-
-	for index, value := range payload {
-		switch {
-		case value == '\n':
-			builder.WriteString(`\n`)
-
-			if index != len(payload)-1 {
-				builder.WriteString("\n" + payloadIndent)
-			}
-		case value == '\r':
-			builder.WriteString(`\r`)
-		case value == '\t':
-			builder.WriteString(`\t`)
-		case value == '\\':
-			builder.WriteString(`\\`)
-		case (value >= ' ') && (value <= '~'):
-			builder.WriteByte(value)
-		default:
-			builder.WriteString(`\x`)
-			builder.WriteByte(hexDigits[value>>4])
-			builder.WriteByte(hexDigits[value&0x0f])
-		}
-	}
-
-	builder.WriteByte('\n')
-	text = builder.String()
-	return
 }

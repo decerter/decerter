@@ -239,7 +239,7 @@ func testFeedErrors(negative testCase) (err error) {
 	}
 
 	// not a TLS stream, and the error stays
-	conn := tlsrecord.New(holdLimit)
+	conn := tlsrecord.New(holdLimit, false)
 	_, feedErr = conn.Feed(tlsrecord.ClientDirection, []byte("GET / HTTP/1.1\r\n\r\n"))
 
 	if !errors.Is(feedErr, tlsrecord.ErrUnexpectedRecord) {
@@ -296,7 +296,7 @@ func checkSession(positive testCase, chunks []chunk, secrets tlsrecord.Secrets, 
 
 // feed a recorded session, held false sets the secrets when the first record waits for them, held true after the last byte
 func feedSession(limit int, chunks []chunk, secrets tlsrecord.Secrets, held bool) (plain [2][]byte, order []tlsrecord.Direction, session tlsrecord.Session, err error) {
-	conn := tlsrecord.New(limit)
+	conn := tlsrecord.New(limit, false)
 	isSet := false
 	collect := func(records []tlsrecord.Record) {
 		for _, record := range records {

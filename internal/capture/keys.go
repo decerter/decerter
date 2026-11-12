@@ -220,7 +220,7 @@ func (recorder *recorder) handle(packet capturebpf.Packet, now time.Time) (err e
 
 // start to keep the packets of the flow, its first lookup is due at once
 func (recorder *recorder) hold(cookie uint64, heldFlow *flow, now time.Time) {
-	conn := tlsrecord.New(maxHoldBytes)
+	conn := tlsrecord.New(maxHoldBytes, false)
 	heldFlow.state = heldFlowState
 	heldFlow.conn = &conn
 	heldFlow.holdStart = now

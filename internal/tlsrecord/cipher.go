@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only AND BSD-3-Clause
 
-// The cipher suite tables, the AEAD nonce rules, the TLS 1.2 MAC, the padding check and the record decryption
+// The cipher suite tables, the AEAD nonce rules, the TLS 1.2 MAC, the padding check, the record decryption and the record encryption
 // are derived from crypto/tls of the Go standard library (cipher_suites.go and conn.go), which carry this notice:
 //
 // Copyright 2010 The Go Authors. All rights reserved.
@@ -16,6 +16,7 @@ import (
 	"crypto/cipher"
 	"crypto/des"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha256"
 	"crypto/sha512"
@@ -274,7 +275,8 @@ func additionalData(sequence uint64, header []byte, length int) (data []byte) {
 }
 
 // decrypt a TLS 1.3 record in place: the record header is the additional data, the content type is the last byte of the plaintext that is not padding (RFC 8446 section 5.2)
-func openTLS13(recordProtection *protection, sequence uint64, header []byte, payload []byte) (plaintext []byte, contentType ContentType, err error) {
+// padding is the number of zero bytes behind the content type
+func openTLS13(recordProtection *protection, sequence uint64, header []byte, payload []byte) (plaintext []byte, contentType ContentType, padding int, err error) {
 	if len(payload) > maxCiphertextTLS13 {
 		err = fmt.Errorf("%w: %d bytes", ErrRecordOverflow, len(payload))
 		return
@@ -297,6 +299,7 @@ func openTLS13(recordProtection *protection, sequence uint64, header []byte, pay
 	for index := len(plaintext) - 1; index >= 0; index-- {
 		if plaintext[index] != 0 {
 			contentType = ContentType(plaintext[index])
+			padding = len(plaintext) - 1 - index
 			plaintext = plaintext[:index]
 			return
 		}
@@ -435,5 +438,91 @@ func extractPadding(payload []byte) (toRemove int, good byte) {
 	// a bad padding removes only its length byte
 	paddingLength &= good
 	toRemove = int(paddingLength) + 1
+	return
+}
+
+// a record header in front of the payload that is about to be appended, the length is set once the payload is complete
+func newRecord(contentType ContentType, version [2]byte, capacity int) (record []byte) {
+	record = make([]byte, recordHeaderLength, recordHeaderLength+capacity)
+	record[0] = byte(contentType)
+	record[1] = version[0]
+	record[2] = version[1]
+	return
+}
+
+func setRecordLength(record []byte, length int) {
+	binary.BigEndian.PutUint16(record[recordHeaderLength-2:], uint16(length))
+}
+
+// encrypt a TLS 1.3 record: the content type and padding zeros go behind the plaintext, the outer type is application data and the header is the additional data (RFC 8446 section 5.2)
+func sealTLS13(recordProtection *protection, sequence uint64, version [2]byte, contentType ContentType, plaintext []byte, padding int) (record []byte) {
+	length := len(plaintext) + 1 + padding + recordProtection.aead.Overhead()
+	record = newRecord(ApplicationDataContentType, version, length)
+	record = append(record, plaintext...)
+	record = append(record, byte(contentType))
+	record = append(record, make([]byte, padding)...)
+	setRecordLength(record, length)
+	nonce := sequenceNonce(recordProtection, sequence)
+	record = recordProtection.aead.Seal(record[:recordHeaderLength], nonce[:], record[recordHeaderLength:], record[:recordHeaderLength])
+	return
+}
+
+// encrypt a TLS 1.2 AEAD record, AES-GCM carries the sequence number as the explicit part of its nonce in front of the ciphertext as Go and OpenSSL do (RFC 5288 section 3)
+func sealAEAD(recordProtection *protection, sequence uint64, contentType ContentType, version [2]byte, plaintext []byte) (record []byte) {
+	nonce := sequenceNonce(recordProtection, sequence)
+	explicitLength := 0
+
+	if recordProtection.explicitNonce {
+		explicitLength = explicitNonceLength
+		nonce = recordProtection.nonce
+		binary.BigEndian.PutUint64(nonce[noncePrefixLength:], sequence)
+	}
+
+	length := explicitLength + len(plaintext) + recordProtection.aead.Overhead()
+	record = newRecord(contentType, version, length)
+	record = append(record, nonce[noncePrefixLength:noncePrefixLength+explicitLength]...)
+	record = append(record, plaintext...)
+	setRecordLength(record, length)
+	headerLength := recordHeaderLength + explicitLength
+	record = recordProtection.aead.Seal(record[:headerLength], nonce[:], record[headerLength:], additionalData(sequence, record, len(plaintext)))
+	return
+}
+
+// encrypt a TLS 1.2 CBC record with a fresh iv: MAC-then-encrypt (RFC 5246 section 6.2.3.2) or encrypt-then-MAC when negotiated (RFC 7366)
+// the padding is the shortest one, every padding byte and the length byte hold the padding length
+func sealCBC(recordProtection *protection, sequence uint64, contentType ContentType, version [2]byte, plaintext []byte) (record []byte, err error) {
+	blockSize := recordProtection.block.BlockSize()
+	macSize := recordProtection.mac.Size()
+	record = newRecord(contentType, version, blockSize+len(plaintext)+macSize+blockSize+macSize)
+	record = append(record, make([]byte, blockSize)...)
+	_, err = rand.Read(record[recordHeaderLength:])
+
+	if err != nil {
+		return
+	}
+
+	record = append(record, plaintext...)
+
+	// MAC-then-encrypt: the MAC covers the plaintext and is encrypted with it
+	if !recordProtection.encryptThenMAC {
+		record = append(record, recordMAC(recordProtection.mac, sequence, record, plaintext)...)
+	}
+
+	// the padding and its length byte make the encrypted part a whole number of blocks
+	encryptedStart := recordHeaderLength + blockSize
+	paddingLength := blockSize - (len(record)-encryptedStart)%blockSize
+
+	for range paddingLength {
+		record = append(record, byte(paddingLength-1))
+	}
+
+	cipher.NewCBCEncrypter(recordProtection.block, record[recordHeaderLength:encryptedStart]).CryptBlocks(record[encryptedStart:], record[encryptedStart:])
+
+	// encrypt-then-MAC: the MAC covers the iv and the ciphertext and follows them
+	if recordProtection.encryptThenMAC {
+		record = append(record, recordMAC(recordProtection.mac, sequence, record, record[recordHeaderLength:])...)
+	}
+
+	setRecordLength(record, len(record)-recordHeaderLength)
 	return
 }

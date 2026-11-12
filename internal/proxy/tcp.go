@@ -16,6 +16,7 @@ import (
 
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/bpf/redirect"
+	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
@@ -56,7 +57,8 @@ func controlTCP(network, address string, rawConnection syscall.RawConn) (err err
 
 // accept until the listener is closed by the context, every connection gets its own goroutine on waitGroup
 // secretsBpfMaps are the maps of the secrets object, with them the TLS flows are decrypted next to the relay and printed, nil relays every flow without a look inside
-func ServeTCP(ctx context.Context, listener *net.TCPListener, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, waitGroup *sync.WaitGroup, logger *slog.Logger) {
+// pipeline intercepts every flow instead: TLS records are held, decrypted, run through its rules and sealed again, plain tcp goes through the rules too; nil only relays or observes
+func ServeTCP(ctx context.Context, listener *net.TCPListener, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, waitGroup *sync.WaitGroup, logger *slog.Logger) {
 	// listener closer
 	stop := context.AfterFunc(ctx, func() {
 		closeErr := listener.Close()
@@ -90,13 +92,13 @@ func ServeTCP(ctx context.Context, listener *net.TCPListener, bpfMaps map[bpf.Bp
 
 		// proxied tcp connection
 		waitGroup.Go(func() {
-			handleTCP(ctx, client, bpfMaps, secretsBpfMaps, logger)
+			handleTCP(ctx, client, bpfMaps, secretsBpfMaps, pipeline, logger)
 		})
 	}
 }
 
 // look up the original destination of the client, dial it and copy both directions until both are done
-func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, logger *slog.Logger) {
+func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, logger *slog.Logger) {
 	startTime := time.Now()
 	clientAddressPort := client.RemoteAddr().(*net.TCPAddr).AddrPort()
 	localAddressPort := client.LocalAddr().(*net.TCPAddr).AddrPort()
@@ -155,6 +157,12 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 			logger.Error("Could not close upstream connection", "error", closeErr)
 		}
 	}()
+
+	if pipeline != nil {
+		upBytes, downBytes := interceptTCP(ctx, client, upstream, intercept.FlowOf(cookie, flow, clientAddressPort), pipeline, secretsBpfMaps, logger)
+		printFlow(flow, cmdline, clientAddressPort, strconv.FormatInt(upBytes, 10)+"B", strconv.FormatInt(downBytes, 10)+"B", time.Since(startTime))
+		return
+	}
 
 	var observer *TLSObserver
 	observerGroup := sync.WaitGroup{}

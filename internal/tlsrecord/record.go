@@ -40,9 +40,23 @@ const (
 	clientHelloPrefixLength int = recordHeaderLength + 1
 )
 
+// what a relay in the middle does with a record of an intercepting conn, a conn that only reads gives every record with ShowAction
+type Action uint8
+
+const (
+	// the bytes of the record went on already or are not the caller's to write: nothing to send, the record is only shown
+	ShowAction Action = 0
+	// send Raw as it came, the record is not decrypted (yet)
+	ForwardAction Action = 1
+	// the record was held until it was decrypted: send Payload, or what the rules made of it, sealed again with an Encrypter
+	SealAction Action = 2
+)
+
 // one record in the order its direction sent it, Payload is the plaintext when Decrypted and the bytes on the wire otherwise
 // Sequence is the record sequence number under the keys that decrypted it
 // Length is the bytes the record took in the stream of its direction, its header included, so a reader knows how far the stream is read
+// Action and Raw are only set by an intercepting conn: Raw is the record as it came, header included, for ForwardAction and SealAction
+// a held record also carries what Encrypter needs: the write protection of its keys, the record header and the TLS 1.3 padding
 type Record struct {
 	Direction   Direction
 	ContentType ContentType
@@ -50,6 +64,12 @@ type Record struct {
 	Sequence    uint64
 	Length      int
 	Payload     []byte
+	Action      Action
+	Raw         []byte
+	sealer      *protection
+	version     uint16
+	header      [recordHeaderLength]byte
+	padding     int
 }
 
 // tell from the first bytes a client sent if they start a TLS session: a handshake record with a ClientHello

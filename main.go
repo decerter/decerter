@@ -19,13 +19,15 @@ import (
 	"github.com/decerter/decerter/app"
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
 	"github.com/decerter/decerter/internal/bpf/redirect"
+	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/platform"
 )
 
 var (
-	errModeConflict     = errors.New("-capture can't be combined with -keylog or -decrypt")
+	errModeConflict     = errors.New("-capture can't be combined with -keylog, -decrypt or -intercept")
+	errKeylogIntercept  = errors.New("-keylog can't be combined with -intercept")
 	errPlaintextCapture = errors.New("-plaintext needs -capture")
-	errRestoreAlone     = errors.New("-android-restore can't be combined with -capture, -keylog or -decrypt")
+	errRestoreAlone     = errors.New("-android-restore can't be combined with -capture, -keylog, -decrypt or -intercept")
 )
 
 var (
@@ -35,6 +37,7 @@ var (
 	flowTable      bool
 	keylog         bool
 	decrypt        bool
+	interceptFlows bool
 	libssl         string
 	capturePath    string
 	plaintext      bool
@@ -52,6 +55,7 @@ func main() {
 	flag.BoolVar(&flowTable, "flow-table", false, "print the flow_map table every 5 seconds, for debugging")
 	flag.BoolVar(&keylog, "keylog", false, "print the TLS secrets of the selected processes on stdout in NSS key log format until stopped, logs go to stderr; only the libssl secrets uprobe is attached, nothing is redirected (default is false)")
 	flag.BoolVar(&decrypt, "decrypt", false, "decrypt the TLS records of the redirected tcp flows with the secrets of the libssl uprobe and print the plaintext of the application data on stdout, escaped and at most 2048 bytes per record; the flows are relayed unchanged (default is false)")
+	flag.BoolVar(&interceptFlows, "intercept", false, "intercept every redirected flow instead of relaying it: TLS records are held, decrypted with the secrets of the libssl uprobe, run through the intercept rules and encrypted again with the same session keys, plain tcp chunks and udp datagrams run through the rules too; the only rule on the command line is the identity rule, which changes nothing, and every message is printed on stdout with a header line, its escaped text and a hex dump, at most 2048 bytes; a TLS flow ends with one line counting what happened to its records; replaces -decrypt (default is false)")
 	flag.StringVar(&libssl, "libssl", "", "path of the libssl.so the secrets uprobe is attached to; OpenSSL: libcrypto.so.3 is read from the same directory; on Android a libssl with BoringSSL's ssl_log_secret is hooked as BoringSSL with the offsets of the Android release, any other as OpenSSL (default is the libssl.so.3 of the dynamic linker cache on Linux and Conscrypt's /apex/com.android.conscrypt/lib64/libssl.so on Android; a process that bundles or statically links its own libssl, like Chrome, Cronet or Flutter apps, is not covered; when Conscrypt can't be hooked run and capture mode go on without TLS secrets)")
 	flag.StringVar(&capturePath, "capture", "", "write the packets of the selected flows and the TLS secrets of their sessions to this pcapng file until stopped, Wireshark and tshark decrypt it without a key log; nothing is redirected, the flows reach their servers directly; the file holds secrets and is created with mode 0600; - writes a live pcapng stream to stdout for tshark -i - or wireshark -k -i -, each block when it is written, stdout must not be an interactive terminal (the raw pty of adb exec-out is fine) and decerter stops when the reader goes away (default is off)")
 	flag.BoolVar(&plaintext, "plaintext", false, "with -capture: write synthesized packets with the decrypted payload instead of the captured packets, so tcpdump and every other tool reads the plaintext; the tcp streams are put back in order and the TLS sessions decrypted, a flow keeps its addresses and ports and gets new sequence numbers, a flow that is not TLS keeps its payload; the file holds no secrets but the plaintext (default is false)")
@@ -240,7 +244,7 @@ func run() (err error) {
 	logger := slog.Default()
 
 	// capture mode redirects nothing, so there is no proxy that could decrypt, and keylog mode attaches only the uprobe
-	if (capturePath != "") && (keylog || decrypt) {
+	if (capturePath != "") && (keylog || decrypt || interceptFlows) {
 		err = errModeConflict
 		logger.Error("Could not start", "error", err)
 		return
@@ -252,13 +256,26 @@ func run() (err error) {
 		return
 	}
 
-	if androidRestore && ((capturePath != "") || keylog || decrypt) {
+	if keylog && interceptFlows {
+		err = errKeylogIntercept
+		logger.Error("Could not start", "error", err)
+		return
+	}
+
+	if androidRestore && ((capturePath != "") || keylog || decrypt || interceptFlows) {
 		err = errRestoreAlone
 		logger.Error("Could not start", "error", err)
 		return
 	}
 
-	decerter := app.New(ctx, filter, proxyPort, udpIdleTimeout, flowTable, keylog, decrypt, libssl, capturePath, plaintext, snaplen, platform.Detect("/"), logger)
+	// rules only come from code for now, the command line has the identity rule
+	var rules []intercept.Rule
+
+	if interceptFlows {
+		rules = []intercept.Rule{intercept.IdentityRule{}}
+	}
+
+	decerter := app.New(ctx, filter, proxyPort, udpIdleTimeout, flowTable, keylog, decrypt, rules, libssl, capturePath, plaintext, snaplen, platform.Detect("/"), logger)
 
 	defer func() {
 		err = errors.Join(err, decerter.Shutdown())

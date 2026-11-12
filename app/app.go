@@ -25,6 +25,7 @@ import (
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/bpf/secrets"
 	"github.com/decerter/decerter/internal/capture"
+	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/platform"
 	"github.com/decerter/decerter/internal/proxy"
 	"github.com/decerter/decerter/internal/route"
@@ -63,6 +64,7 @@ type App struct {
 	flowTable           bool
 	keylog              bool
 	decrypt             bool
+	rules               []intercept.Rule
 	libssl              string
 	logSecretAddress    uint64
 	capturePath         string
@@ -85,11 +87,12 @@ type App struct {
 
 // keylog is the -keylog mode: load and attach only the secrets uprobe and print NSS key log lines, no redirect, proxy or route sync
 // decrypt is the -decrypt option of run mode: the proxy decrypts the TLS flows with the secrets of the uprobe and prints their plaintext
+// rules make the proxy intercept every flow instead of observing it: TLS records are decrypted, run through the rules, printed and sealed again, plain tcp and udp go through them too; empty intercepts nothing
 // libssl overrides the resolved libssl path, empty means search the standard directories
 // capturePath is the -capture mode: nothing is redirected, the packets of the selected flows and the secrets of their TLS sessions are written to this pcapng file, at most snaplen bytes of a packet
 // plaintext is the -plaintext option of capture mode: the file gets synthesized packets with the decrypted payload instead of the captured packets and the secrets
 // currentPlatform decides where the netd hook state is kept and whether hooks held exclusively by another program may be shared, only on Android
-func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, decrypt bool, libssl string, capturePath string, plaintext bool, snaplen uint32, currentPlatform platform.Platform, logger *slog.Logger) (app App) {
+func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, decrypt bool, rules []intercept.Rule, libssl string, capturePath string, plaintext bool, snaplen uint32, currentPlatform platform.Platform, logger *slog.Logger) (app App) {
 	appCtx, cancel := context.WithCancel(ctx)
 	app = App{
 		ctx:                 appCtx,
@@ -101,6 +104,7 @@ func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleT
 		flowTable:           flowTable,
 		keylog:              keylog,
 		decrypt:             decrypt,
+		rules:               rules,
 		libssl:              libssl,
 		logSecretAddress:    0,
 		capturePath:         capturePath,
@@ -254,15 +258,25 @@ func (app *App) StartProxy() (err error) {
 
 	// the proxy only looks into TLS flows when asked to, and it can't without the secrets object
 	var secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map
+	var pipeline *intercept.Pipeline
+	isIntercepting := len(app.rules) > 0
 
-	if app.decrypt && (app.secretsBpfMaps != nil) {
+	if (app.decrypt || isIntercepting) && (app.secretsBpfMaps != nil) {
 		secretsBpfMaps = app.secretsBpfMaps
+	}
+
+	switch {
+	case isIntercepting:
+		pipeline = intercept.New(app.rules, os.Stdout)
+		app.logger.Info("Intercepting the flows of the proxy", "rules", len(app.rules), "tls", secretsBpfMaps != nil)
+	case secretsBpfMaps != nil:
 		app.logger.Info("Decrypting tls flows of the tcp proxy")
+	default:
 	}
 
 	// tcp proxy, closes the listener when the context is cancelled
 	app.waitGroup.Go(func() {
-		proxy.ServeTCP(app.ctx, app.tcpListener, app.redirectBpfMaps, secretsBpfMaps, app.waitGroup, app.logger)
+		proxy.ServeTCP(app.ctx, app.tcpListener, app.redirectBpfMaps, secretsBpfMaps, pipeline, app.waitGroup, app.logger)
 	})
 
 	connection, udpListenErr := proxy.ListenUDP(app.ctx, app.proxyPort)
@@ -277,7 +291,7 @@ func (app *App) StartProxy() (err error) {
 
 	// udp proxy, closes the socket when the context is cancelled
 	app.waitGroup.Go(func() {
-		proxy.ServeUDP(app.ctx, app.udpConnection, app.udpIdleTimeout, app.redirectBpfMaps, app.waitGroup, app.logger)
+		proxy.ServeUDP(app.ctx, app.udpConnection, app.udpIdleTimeout, app.redirectBpfMaps, pipeline, app.waitGroup, app.logger)
 	})
 
 	return

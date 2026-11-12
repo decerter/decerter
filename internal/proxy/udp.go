@@ -17,6 +17,8 @@ import (
 
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/bpf/redirect"
+	"github.com/decerter/decerter/internal/intercept"
+	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
 )
@@ -57,7 +59,8 @@ func controlUDP(network, address string, rawConnection syscall.RawConn) (err err
 }
 
 // read until the socket is closed by the context, every session relays its replies in its own goroutine on waitGroup
-func ServeUDP(ctx context.Context, connection *net.UDPConn, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, waitGroup *sync.WaitGroup, logger *slog.Logger) {
+// pipeline runs every datagram of both directions through its rules, nil relays them as they are
+func ServeUDP(ctx context.Context, connection *net.UDPConn, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, waitGroup *sync.WaitGroup, logger *slog.Logger) {
 	// socket closer
 	stop := context.AfterFunc(ctx, func() {
 		closeErr := connection.Close()
@@ -99,13 +102,19 @@ func ServeUDP(ctx context.Context, connection *net.UDPConn, idleTimeout time.Dur
 			continue
 		}
 
-		session, sessionErr := udpSessionOf(ctx, connection, client, local, &sessions, idleTimeout, bpfMaps, waitGroup, logger)
+		session, sessionErr := udpSessionOf(ctx, connection, client, local, &sessions, idleTimeout, bpfMaps, pipeline, waitGroup, logger)
 
 		if sessionErr != nil {
 			continue
 		}
 
-		_, writeErr := session.upstream.Write(buffer[:datagramSize])
+		datagram, isSent := interceptDatagram(ctx, pipeline, session, tlsrecord.ClientDirection, buffer[:datagramSize], logger)
+
+		if !isSent {
+			continue
+		}
+
+		_, writeErr := session.upstream.Write(datagram)
 
 		if writeErr != nil {
 			// an ICMP error of an earlier datagram shows up here as ECONNREFUSED, the datagram is lost like without the proxy
@@ -114,7 +123,7 @@ func ServeUDP(ctx context.Context, connection *net.UDPConn, idleTimeout time.Dur
 		}
 
 		session.upDatagrams.Add(1)
-		session.upBytes.Add(int64(datagramSize))
+		session.upBytes.Add(int64(len(datagram)))
 	}
 }
 
@@ -141,7 +150,7 @@ func datagramDestination(controlMessage []byte) (local netip.Addr, err error) {
 }
 
 // the flow is looked up for every datagram: a new socket on the same client port or a new destination of an unconnected socket gets its own session
-func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.AddrPort, local netip.Addr, sessions *UDPSessions, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, waitGroup *sync.WaitGroup, logger *slog.Logger) (session *UDPSession, err error) {
+func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.AddrPort, local netip.Addr, sessions *UDPSessions, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, waitGroup *sync.WaitGroup, logger *slog.Logger) (session *UDPSession, err error) {
 	cookie, flow, lookupErr := redirect.FlowByClient(client, syscall.IPPROTO_UDP, bpfMaps)
 
 	if err = lookupErr; err != nil {
@@ -203,14 +212,14 @@ func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.Add
 
 	// udp reply relay
 	waitGroup.Go(func() {
-		relayUDP(ctx, connection, session, sessions, idleTimeout, logger)
+		relayUDP(ctx, connection, session, sessions, idleTimeout, pipeline, logger)
 	})
 
 	return
 }
 
 // copy replies from upstream to the client until the session is idle for idleTimeout or the context is cancelled
-func relayUDP(ctx context.Context, connection *net.UDPConn, session *UDPSession, sessions *UDPSessions, idleTimeout time.Duration, logger *slog.Logger) {
+func relayUDP(ctx context.Context, connection *net.UDPConn, session *UDPSession, sessions *UDPSessions, idleTimeout time.Duration, pipeline *intercept.Pipeline, logger *slog.Logger) {
 	// a deadline in the past unblocks the upstream read
 	stop := context.AfterFunc(ctx, func() {
 		deadlineErr := session.upstream.SetReadDeadline(time.Unix(1, 0))
@@ -271,7 +280,13 @@ func relayUDP(ctx context.Context, connection *net.UDPConn, session *UDPSession,
 		}
 
 		session.lastActive.Store(time.Now().UnixNano())
-		_, _, writeErr := connection.WriteMsgUDPAddrPort(buffer[:datagramSize], session.replyControlMessage, session.key.client)
+		datagram, isSent := interceptDatagram(ctx, pipeline, session, tlsrecord.ServerDirection, buffer[:datagramSize], logger)
+
+		if !isSent {
+			continue
+		}
+
+		_, _, writeErr := connection.WriteMsgUDPAddrPort(datagram, session.replyControlMessage, session.key.client)
 
 		if writeErr != nil {
 			if errors.Is(writeErr, net.ErrClosed) {
@@ -283,6 +298,22 @@ func relayUDP(ctx context.Context, connection *net.UDPConn, session *UDPSession,
 		}
 
 		session.downDatagrams.Add(1)
-		session.downBytes.Add(int64(datagramSize))
+		session.downBytes.Add(int64(len(datagram)))
 	}
+}
+
+// a datagram after the rules of the pipeline, isSent is false when a rule dropped it; without a pipeline it goes on as it is
+func interceptDatagram(ctx context.Context, pipeline *intercept.Pipeline, session *UDPSession, direction tlsrecord.Direction, datagram []byte, logger *slog.Logger) (result []byte, isSent bool) {
+	result = datagram
+	isSent = true
+
+	if pipeline == nil {
+		return
+	}
+
+	flow := intercept.FlowOf(session.key.cookie, session.flow, session.key.client)
+	processed := pipeline.Process(ctx, pipeline.Message(flow, direction, intercept.UDPLayer, datagram), logger)
+	result = processed.Plain
+	isSent = processed.Verdict == intercept.ForwardVerdict
+	return
 }

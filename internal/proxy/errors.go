@@ -15,4 +15,6 @@ var (
 	// the uprobe saw no secrets of the session: the process has its own TLS library, or the handshake did not end in time
 	ErrNoSecrets      = errors.New("no secrets for the tls session")
 	ErrObserverBehind = errors.New("decryption is too far behind the relay")
+	// a raw record after a split or dropped record would reach the peer with a sequence number it does not expect
+	ErrChangedStream = errors.New("can't relay raw bytes after the tls records of the direction were changed")
 )
