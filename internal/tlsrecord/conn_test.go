@@ -77,8 +77,8 @@ func (tap tap) Write(buffer []byte) (count int, err error) {
 
 // Test if tlsrecord.Feed returns with the expected output.
 func TestFeedPositive(state *testing.T) {
-	// crypto/tls only offers 3DES when asked to
-	state.Setenv("GODEBUG", "tls3des=1")
+	// crypto/tls only offers 3DES and RSA key exchange when asked to
+	state.Setenv("GODEBUG", "tls3des=1,tlsrsakex=1")
 	ecdsaCertificate, rsaCertificate, err := newCertificates()
 
 	if err != nil {
@@ -95,6 +95,18 @@ func TestFeedPositive(state *testing.T) {
 		{Version: tls.VersionTLS12, CipherSuite: tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA256, Certificate: ecdsaCertificate},
 		{Version: tls.VersionTLS12, CipherSuite: tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256, Certificate: rsaCertificate},
 		{Version: tls.VersionTLS12, CipherSuite: tls.TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA, Certificate: rsaCertificate},
+		// the rest of the TLS 1.2 rows of eproxy's cipher suite table that crypto/tls has
+		{Version: tls.VersionTLS12, CipherSuite: tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256, Certificate: rsaCertificate},
+		{Version: tls.VersionTLS12, CipherSuite: tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384, Certificate: rsaCertificate},
+		{Version: tls.VersionTLS12, CipherSuite: tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256, Certificate: rsaCertificate},
+		{Version: tls.VersionTLS12, CipherSuite: tls.TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA, Certificate: rsaCertificate},
+		{Version: tls.VersionTLS12, CipherSuite: tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA, Certificate: rsaCertificate},
+		{Version: tls.VersionTLS12, CipherSuite: tls.TLS_RSA_WITH_AES_128_GCM_SHA256, Certificate: rsaCertificate},
+		{Version: tls.VersionTLS12, CipherSuite: tls.TLS_RSA_WITH_AES_256_GCM_SHA384, Certificate: rsaCertificate},
+		{Version: tls.VersionTLS12, CipherSuite: tls.TLS_RSA_WITH_AES_128_CBC_SHA256, Certificate: rsaCertificate},
+		{Version: tls.VersionTLS12, CipherSuite: tls.TLS_RSA_WITH_AES_128_CBC_SHA, Certificate: rsaCertificate},
+		{Version: tls.VersionTLS12, CipherSuite: tls.TLS_RSA_WITH_AES_256_CBC_SHA, Certificate: rsaCertificate},
+		{Version: tls.VersionTLS12, CipherSuite: tls.TLS_RSA_WITH_3DES_EDE_CBC_SHA, Certificate: rsaCertificate},
 	}
 
 	for _, positive := range positiveCases {
@@ -127,6 +139,33 @@ func TestFeedNegative(state *testing.T) {
 	if err != nil {
 		state.Errorf("Test of tlsrecord.Feed failed, error: %s", err.Error())
 		return
+	}
+
+	// the TLS 1.0, 1.1 and RC4 rows of eproxy's cipher suite table, which the record layer refuses at the ServerHello
+	unsupportedCases := []struct {
+		Case testCase
+		Err  error
+	}{
+		{Case: testCase{Version: tls.VersionTLS10, CipherSuite: tls.TLS_ECDHE_ECDSA_WITH_AES_128_CBC_SHA, Certificate: ecdsaCertificate}, Err: tlsrecord.ErrUnsupportedVersion},
+		{Case: testCase{Version: tls.VersionTLS11, CipherSuite: tls.TLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA, Certificate: ecdsaCertificate}, Err: tlsrecord.ErrUnsupportedVersion},
+		{Case: testCase{Version: tls.VersionTLS12, CipherSuite: tls.TLS_ECDHE_ECDSA_WITH_RC4_128_SHA, Certificate: ecdsaCertificate}, Err: tlsrecord.ErrUnsupportedCipherSuite},
+	}
+
+	for _, unsupported := range unsupportedCases {
+		serverConfig, clientConfig, keyLog := newConfigs(unsupported.Case)
+		chunks, secrets, runErr := runSession(unsupported.Case, serverConfig, clientConfig, keyLog, false)
+
+		if runErr != nil {
+			state.Errorf("Test of tlsrecord.Feed failed, version: 0x%04x, cannot run session, error: %s", unsupported.Case.Version, runErr.Error())
+			return
+		}
+
+		_, _, _, err = feedSession(holdLimit, chunks, secrets, false)
+
+		if !errors.Is(err, unsupported.Err) {
+			state.Errorf("Test of tlsrecord.Feed function failed, version: 0x%04x, error should be %v, error: %v", unsupported.Case.Version, unsupported.Err, err)
+			return
+		}
 	}
 }
 
