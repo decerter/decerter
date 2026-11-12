@@ -30,6 +30,12 @@ func List() (routes map[netip.Prefix]bool, err error) {
 		return
 	}
 
+	routes, err = parseRoutes(ribBytes)
+	return
+}
+
+// the messages of a route dump, as the kernel answers RTM_GETROUTE
+func parseRoutes(ribBytes []byte) (routes map[netip.Prefix]bool, err error) {
 	messages, parseErr := syscall.ParseNetlinkMessage(ribBytes)
 
 	if err = parseErr; err != nil {
