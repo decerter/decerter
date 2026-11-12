@@ -82,6 +82,7 @@ const (
 	bpfProgRestoreRecvmsg6      = "restore_recvmsg6"
 	bpfVarProxyPort             = "proxy_port"
 	bpfVarProxyTgid             = "proxy_tgid"
+	bpfVarRecordOnly            = "record_only"
 )
 
 // loadBpf returns the embedded CollectionSpec for bpf.
@@ -157,8 +158,9 @@ type bpfMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfVariableSpecs struct {
-	ProxyPort *ebpf.VariableSpec `ebpf:"proxy_port"`
-	ProxyTgid *ebpf.VariableSpec `ebpf:"proxy_tgid"`
+	ProxyPort  *ebpf.VariableSpec `ebpf:"proxy_port"`
+	ProxyTgid  *ebpf.VariableSpec `ebpf:"proxy_tgid"`
+	RecordOnly *ebpf.VariableSpec `ebpf:"record_only"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -208,8 +210,9 @@ func (m *bpfMaps) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfVariables struct {
-	ProxyPort *ebpf.Variable `ebpf:"proxy_port"`
-	ProxyTgid *ebpf.Variable `ebpf:"proxy_tgid"`
+	ProxyPort  *ebpf.Variable `ebpf:"proxy_port"`
+	ProxyTgid  *ebpf.Variable `ebpf:"proxy_tgid"`
+	RecordOnly *ebpf.Variable `ebpf:"record_only"`
 }
 
 // bpfPrograms contains all programs after they have been loaded into the kernel.

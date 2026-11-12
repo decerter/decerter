@@ -17,7 +17,12 @@ import (
 	"time"
 
 	"github.com/decerter/decerter/app"
+	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
 	"github.com/decerter/decerter/internal/bpf/redirect"
+)
+
+var (
+	errModeConflict = errors.New("-capture can't be combined with -keylog or -decrypt")
 )
 
 var (
@@ -28,6 +33,8 @@ var (
 	keylog         bool
 	decrypt        bool
 	libssl         string
+	capturePath    string
+	snaplen        uint32 = capturebpf.MaxSnaplen
 )
 
 func main() {
@@ -41,6 +48,8 @@ func main() {
 	flag.BoolVar(&keylog, "keylog", false, "print the TLS secrets of the selected processes on stdout in NSS key log format until stopped, logs go to stderr; only the libssl secrets uprobe is attached, nothing is redirected (default is false)")
 	flag.BoolVar(&decrypt, "decrypt", false, "decrypt the TLS records of the redirected tcp flows with the secrets of the libssl uprobe and print the plaintext of the application data on stdout, escaped and at most 2048 bytes per record; the flows are relayed unchanged (default is false)")
 	flag.StringVar(&libssl, "libssl", "", "path of the libssl.so the secrets uprobe is attached to, libcrypto.so.3 is read from the same directory (default is the libssl.so.3 of the dynamic linker cache; a process that bundles or statically links its own libssl is not covered)")
+	flag.StringVar(&capturePath, "capture", "", "write the packets of the selected flows and the TLS secrets of their sessions to this pcapng file until stopped, Wireshark and tshark decrypt it without a key log; nothing is redirected, the flows reach their servers directly; the file holds secrets and is created with mode 0600 (default is off)")
+	flag.Func("snaplen", "most bytes written of a captured packet, counted from the IP header, a packet cut short can't be decrypted (default is 262144, the largest value)", parseSnaplen)
 	flag.Parse()
 	err := run()
 
@@ -199,11 +208,37 @@ func parseIdleTimeout(value string) (err error) {
 	return
 }
 
+func parseSnaplen(value string) (err error) {
+	length, parseErr := strconv.ParseUint(value, 10, 32)
+
+	if err = parseErr; err != nil {
+		err = fmt.Errorf("invalid snaplen %q: %w", value, err)
+		return
+	}
+
+	// the capture programs copy at most this much of a packet
+	if (length == 0) || (length > uint64(capturebpf.MaxSnaplen)) {
+		err = fmt.Errorf("invalid snaplen %q: must be between 1 and %d", value, capturebpf.MaxSnaplen)
+		return
+	}
+
+	snaplen = uint32(length)
+	return
+}
+
 func run() (err error) {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	logger := slog.Default()
-	decerter := app.New(ctx, filter, proxyPort, udpIdleTimeout, flowTable, keylog, decrypt, libssl, logger)
+
+	// capture mode redirects nothing, so there is no proxy that could decrypt, and keylog mode attaches only the uprobe
+	if (capturePath != "") && (keylog || decrypt) {
+		err = errModeConflict
+		logger.Error("Could not start", "error", err)
+		return
+	}
+
+	decerter := app.New(ctx, filter, proxyPort, udpIdleTimeout, flowTable, keylog, decrypt, libssl, capturePath, snaplen, logger)
 
 	defer func() {
 		err = errors.Join(err, decerter.Shutdown())
@@ -251,6 +286,48 @@ func run() (err error) {
 	err = decerter.LoadSecretsBpfObjects()
 
 	if err != nil {
+		return
+	}
+
+	// capture mode records the flows and copies their packets, no proxy listener and no route sync
+	if capturePath != "" {
+		err = decerter.LoadCaptureObjects()
+
+		if err != nil {
+			return
+		}
+
+		err = decerter.StartCapture()
+
+		if err != nil {
+			return
+		}
+
+		// the uprobe and the packet programs are attached first, so the first recorded flow already has them
+		err = decerter.AttachSecrets()
+
+		if err != nil {
+			return
+		}
+
+		err = decerter.AttachCapture()
+
+		if err != nil {
+			return
+		}
+
+		decerter.StartReleaseSweep()
+		err = decerter.AttachRedirect()
+
+		if err != nil {
+			return
+		}
+
+		decerter.StartFlowTable()
+
+		// the capture writer stops decerter when it can't write the file any more
+		<-decerter.Done()
+		logger.Info("Got shutdown signal", "cause", context.Cause(ctx))
 		return
 	}
 

@@ -45,7 +45,8 @@ const (
 	RestoreRecvmsg6      bpf.BpfProgramName = 10 // value: "restore_recvmsg6"
 )
 
-func LoadBpfObjects(proxyPort uint16, proxyTgid uint32) (bpfMaps map[bpf.BpfMapName]*ebpf.Map, bpfPrograms map[bpf.BpfProgramName]*ebpf.Program, closeFunction func() error, err error) {
+// recordOnly is capture mode: connect and sendmsg only record the flows, nothing is redirected to the proxy
+func LoadBpfObjects(proxyPort uint16, proxyTgid uint32, recordOnly bool) (bpfMaps map[bpf.BpfMapName]*ebpf.Map, bpfPrograms map[bpf.BpfProgramName]*ebpf.Program, closeFunction func() error, err error) {
 	err = rlimit.RemoveMemlock()
 
 	if err != nil {
@@ -60,10 +61,17 @@ func LoadBpfObjects(proxyPort uint16, proxyTgid uint32) (bpfMaps map[bpf.BpfMapN
 		return
 	}
 
+	recordOnlyValue := uint8(0)
+
+	if recordOnly {
+		recordOnlyValue = 1
+	}
+
 	// load-time constants have to be set before the programs are loaded
 	variables := map[string]any{
-		bpfVarProxyTgid: proxyTgid,
-		bpfVarProxyPort: proxyPort,
+		bpfVarProxyTgid:  proxyTgid,
+		bpfVarProxyPort:  proxyPort,
+		bpfVarRecordOnly: recordOnlyValue,
 	}
 
 	for name, value := range variables {
@@ -253,6 +261,7 @@ func FlowByClient(clientAddressPort netip.AddrPort, ipProtocol uint8, bpfMaps ma
 
 // sock_release only marks a redirected UDP flow released, a bpf_timer callback panics kernels with kCFI (Android 15)
 // the flow is kept releaseDelay after the close, because datagrams the socket sent before can still wait in the proxy socket and need it
+// in capture mode every recorded flow is marked, by sock_release or by sockops at TCP_CLOSE, so the packets of the close are still captured; such a flow has no client endpoint
 func ForgetReleasedFlows(releaseDelay time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (err error) {
 	var (
 		cookie  uint64

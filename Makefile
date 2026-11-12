@@ -38,8 +38,12 @@ generate-bpf-redirect-objects: ## Generate bpf redirect object files
 generate-bpf-secrets-objects: ## Generate bpf secrets object files
 	BPF_CFLAGS="$(BPF_CFLAGS)" go generate ./internal/bpf/secrets
 
+.PHONY: generate-bpf-capture-objects
+generate-bpf-capture-objects: ## Generate bpf capture object files
+	BPF_CFLAGS="$(BPF_CFLAGS)" go generate ./internal/bpf/capture
+
 .PHONY: generate-bpf-objects
-generate-bpf-objects: generate-bpf-redirect-objects generate-bpf-secrets-objects ## Generate all bpf object files
+generate-bpf-objects: generate-bpf-redirect-objects generate-bpf-secrets-objects generate-bpf-capture-objects ## Generate all bpf object files
 
 .PHONY: generate-openssl-offsets
 generate-openssl-offsets: ## Generate OpenSSL struct offsets for OPENSSL_VERSIONS (default is openssl-3.6.2)

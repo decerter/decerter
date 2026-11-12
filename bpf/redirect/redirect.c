@@ -72,7 +72,7 @@ int redirect_sendmsg6(struct bpf_sock_addr *ctx)
 	}
 }
 
-//Map the client endpoint of redirected TCP sockets to their cookie and remove both entries when the socket closes
+//Map the client endpoint of redirected TCP sockets to their cookie and remove both entries when the socket closes, in capture mode mark the flow of a recorded socket released when it closes
 SEC("sockops")
 int client_sockops(struct bpf_sock_ops *skops)
 {
@@ -161,6 +161,7 @@ int learn_udp_client(struct __sk_buff *skb)
 }
 
 //Remove the flow of a closed recorded only socket at once and mark a redirected UDP flow released for Go to remove later, redirected TCP is left to sockops at TCP_CLOSE
+//In capture mode mark every flow released but the one of an open TCP connection, which is left to sockops at TCP_CLOSE
 SEC("cgroup/sock_release")
 int forget_released_socket(struct bpf_sock *sk)
 {

@@ -37,7 +37,7 @@ struct prefix_key {
 //redirected: 1 if the destination was rewritten to the proxy, 0 if the flow is only recorded
 //comm: name of the process (thread group leader) at connect/sendmsg time, NUL terminated
 //client: source endpoint of a redirected UDP socket as the proxy sees it, learned from its first datagram to the proxy, zero for TCP (sockops keeps it in client_map only)
-//released_ns: bpf_ktime_get_ns() (CLOCK_MONOTONIC) when a redirected UDP socket was released, 0 while it is open, Go removes the flow a grace time later
+//released_ns: bpf_ktime_get_ns() (CLOCK_MONOTONIC) when a redirected UDP socket was released, in capture mode when any recorded socket was released or reached TCP_CLOSE, 0 while it is open, Go removes the flow a grace time later
 struct flow {
 	uint32_t ip[4];
 	uint16_t port;
@@ -52,3 +52,14 @@ struct flow {
 	uint32_t pad32_end;
 	uint64_t released_ns;
 };
+
+//Key: socket cookie, Value: original destination + process of the socket, only flows that passed the process and destination filters are here
+//only an object that defines SHARED_FLOW_MAP before the include gets the map: the redirect object owns it and the capture object shares it through MapReplacements, the secrets object reads no flow
+#ifdef SHARED_FLOW_MAP
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 65535);
+	__type(key, uint64_t);
+	__type(value, struct flow);
+} flow_map SEC(".maps");
+#endif

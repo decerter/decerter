@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 
+//the redirect object owns flow_map
+#define SHARED_FLOW_MAP
+
 #include "shared.h"
 #include "vmlinux.h"
 #include <bpf/bpf_core_read.h>
@@ -52,6 +55,9 @@ volatile const uint32_t proxy_tgid = 0;
 //Value: port of the TCP listener and the UDP socket of the proxy on lo in host byte order, set from Go before load
 volatile const uint16_t proxy_port = 0;
 
+//Value: 1 in capture mode: flows are only recorded and nothing is redirected to the proxy, 0 in run mode, set from Go before load
+volatile const uint8_t record_only = 0;
+
 //source and destination of a UDP packet, IPv4 stored IPv4-mapped like in struct endpoint
 struct packet_info {
 	struct endpoint source;
@@ -72,14 +78,6 @@ struct port_key {
 	uint8_t ip_protocol;
 	uint8_t padding;
 };
-
-//Key: socket cookie, Value: original destination + process of the socket, only flows that passed the process and destination filters are here
-struct {
-	__uint(type, BPF_MAP_TYPE_LRU_HASH);
-	__uint(max_entries, 65535);
-	__type(key, uint64_t);
-	__type(value, struct flow);
-} flow_map SEC(".maps");
 
 //Key: destination prefix of a route, Value: 1 for routes the kernel can send on, 0 for blackhole, unreachable and prohibit routes, mirrored from the routing tables by Go
 struct {
@@ -213,8 +211,16 @@ uint16_t check_flow(struct bpf_sock_addr *ctx, struct flow *flow)
 	flow->port = bpf_ntohs(ctx->user_port);
 
 	//a socket with a flow of an earlier destination keeps it, restore_destination4/6 only touch the proxy address
+	//in capture mode that flow would get the packets to the new destination captured, so it is removed
 	if (!is_selected_destination(flow))
 	{
+		if (record_only)
+		{
+			uint64_t cookie = bpf_get_socket_cookie(ctx);
+
+			bpf_map_delete_elem(&flow_map, &cookie);
+		}
+
 		return OK;
 	}
 
@@ -278,7 +284,8 @@ uint16_t save_flow(struct bpf_sock_addr *ctx, struct flow *flow)
 	}
 
 	//without a route the connect or send has to fail with ENETUNREACH like without decerter, so happy eyeballs falls back to the other family
-	flow->redirected = ((flow->ip_protocol == IPPROTO_TCP) || (flow->ip_protocol == IPPROTO_UDP)) && has_route(flow) && is_unicast(flow);
+	//capture mode redirects nothing, the flow is only recorded for the capture programs
+	flow->redirected = (!record_only) && ((flow->ip_protocol == IPPROTO_TCP) || (flow->ip_protocol == IPPROTO_UDP)) && has_route(flow) && is_unicast(flow);
 	uint64_t cookie = bpf_get_socket_cookie(ctx);
 	struct flow *saved_flow = bpf_map_lookup_elem(&flow_map, &cookie);
 
@@ -451,7 +458,7 @@ uint16_t client_endpoint(struct bpf_sock_ops *skops, struct endpoint *endpoint)
 	}
 }
 
-//Get state callbacks for a redirected socket, so its map entries can be removed when it closes
+//Get state callbacks for a redirected socket, in capture mode for every recorded socket, so its map entries can be removed when it closes
 uint16_t watch_flow(struct bpf_sock_ops *skops)
 {
 	if (!skops)
@@ -462,7 +469,7 @@ uint16_t watch_flow(struct bpf_sock_ops *skops)
 	uint64_t cookie = bpf_get_socket_cookie(skops);
 	struct flow *flow = bpf_map_lookup_elem(&flow_map, &cookie);
 
-	if ((!flow) || (!flow->redirected))
+	if ((!flow) || ((!flow->redirected) && (!record_only)))
 	{
 		return OK;
 	}
@@ -514,7 +521,7 @@ uint16_t save_client(struct bpf_sock_ops *skops)
 	return OK;
 }
 
-//Remove the flow_map and client_map entries of a redirected socket that reached TCP_CLOSE
+//Remove the flow_map and client_map entries of a redirected socket that reached TCP_CLOSE, in capture mode the flow is only marked released and Go removes it later
 uint16_t forget_flow(struct bpf_sock_ops *skops)
 {
 	if (!skops)
@@ -529,6 +536,21 @@ uint16_t forget_flow(struct bpf_sock_ops *skops)
 	}
 
 	uint64_t cookie = bpf_get_socket_cookie(skops);
+
+	//an aborted connection sends its RST after the state change, with the flow removed here that packet would not be captured
+	//a socket that is connected again after this gets a fresh flow in save_flow, which clears the mark
+	if (record_only)
+	{
+		struct flow *flow = bpf_map_lookup_elem(&flow_map, &cookie);
+
+		if (flow)
+		{
+			flow->released_ns = bpf_ktime_get_ns();
+		}
+
+		return OK;
+	}
+
 	struct endpoint endpoint = {};
 
 	//a connection refused in SYN_SENT has no client_map entry, so a failed delete is fine
@@ -734,6 +756,7 @@ uint16_t save_udp_client(struct __sk_buff *skb)
 }
 
 //Remove the flow of a released socket: recorded only at once, redirected UDP is only marked released because datagrams it sent can still wait in the proxy socket, Go removes it later
+//In capture mode no flow is removed here: it is marked released, so the last packets of the socket are still captured and Go can still read the flow of a packet it gets late
 uint16_t release_flow(struct bpf_sock *sk)
 {
 	if (!sk)
@@ -747,6 +770,20 @@ uint16_t release_flow(struct bpf_sock *sk)
 	//every socket of the system gets here, only the recorded ones go further
 	if (!flow)
 	{
+		return OK;
+	}
+
+	//capture mode: this hook runs before the socket is closed, so the FIN or RST of a TCP connection and the packets that answer it are still to come
+	//an open connection got its state callback in watch_flow and is left to sockops at TCP_CLOSE, every other flow is marked released here
+	if (record_only)
+	{
+		if ((sk->protocol == IPPROTO_TCP) && (sk->state != BPF_TCP_CLOSE) && (sk->state != BPF_TCP_LISTEN))
+		{
+			return OK;
+		}
+
+		flow->released_ns = bpf_ktime_get_ns();
+
 		return OK;
 	}
 

@@ -125,10 +125,40 @@ func ReadKeyLog(ctx context.Context, eventMap *ebpf.Map, writer io.Writer, logge
 // the secrets of a session by its client_random for the record layer, found is false until the uprobe has seen the complete secrets
 // run mode has no reader on the secrets ringbuf, the proxy asks here when a record needs its keys
 func Lookup(clientRandom [32]byte, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (sessionSecrets tlsrecord.Secrets, found bool, err error) {
+	secrets, found, lookupErr := lookup(clientRandom, bpfMaps)
+
+	if err = lookupErr; (err != nil) || !found {
+		return
+	}
+
+	sessionSecrets, err = recordSecrets(secrets)
+	found = err == nil
+	return
+}
+
+// the NSS key log lines of a session by its client_random for the capture writer, each line ends with a newline, found is false until the uprobe has seen the complete secrets
+func LookupKeyLog(clientRandom [32]byte, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (keyLog string, found bool, err error) {
+	secrets, found, lookupErr := lookup(clientRandom, bpfMaps)
+
+	if err = lookupErr; (err != nil) || !found {
+		return
+	}
+
+	lines, linesErr := keyLogLines(secrets)
+
+	if err = linesErr; err != nil {
+		found = false
+		return
+	}
+
+	keyLog = strings.Join(lines, "\n") + "\n"
+	return
+}
+
+func lookup(clientRandom [32]byte, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (secrets bpfTlsSecrets, found bool, err error) {
 	key := bpfClientRandom{
 		Value: clientRandom,
 	}
-	var secrets bpfTlsSecrets
 	lookupErr := bpfMaps[SecretsMap].Lookup(&key, &secrets)
 
 	if errors.Is(lookupErr, ebpf.ErrKeyNotExist) {
@@ -140,8 +170,7 @@ func Lookup(clientRandom [32]byte, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (sessio
 		return
 	}
 
-	sessionSecrets, err = recordSecrets(secrets)
-	found = err == nil
+	found = true
 	return
 }
 

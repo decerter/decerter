@@ -14,8 +14,10 @@ import (
 
 	"github.com/decerter/decerter/internal/attach"
 	"github.com/decerter/decerter/internal/bpf"
+	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/bpf/secrets"
+	"github.com/decerter/decerter/internal/capture"
 	"github.com/decerter/decerter/internal/proxy"
 	"github.com/decerter/decerter/internal/route"
 	"github.com/decerter/decerter/internal/tls/openssl"
@@ -26,9 +28,10 @@ const (
 	routeSyncDebounce time.Duration = 100 * time.Millisecond
 	routeSyncRetry    time.Duration = time.Second
 	// datagrams of a closed UDP socket can still wait in the proxy socket, its flow is removed this long after the close
-	udpReleaseDelay time.Duration = 2 * time.Second
-	// how often released UDP flows are looked for, a flow lives at most udpReleaseDelay + udpReleaseSweep after the close
-	udpReleaseSweep time.Duration = time.Second
+	// in capture mode every flow is removed this long after its socket closed: the RST of an aborted connection leaves after the close, and the capture writer can still read the flow of a packet it gets late
+	releaseDelay time.Duration = 2 * time.Second
+	// how often released flows are looked for, a flow lives at most releaseDelay + releaseSweep after the close
+	releaseSweep time.Duration = time.Second
 )
 
 type App struct {
@@ -42,20 +45,26 @@ type App struct {
 	keylog              bool
 	decrypt             bool
 	libssl              string
+	capturePath         string
+	snaplen             uint32
 	logger              *slog.Logger
 	redirectBpfMaps     map[bpf.BpfMapName]*ebpf.Map
 	redirectBpfPrograms map[bpf.BpfProgramName]*ebpf.Program
 	secretsBpfMaps      map[bpf.BpfMapName]*ebpf.Map
 	secretsBpfPrograms  map[bpf.BpfProgramName]*ebpf.Program
+	captureBpfMaps      map[bpf.BpfMapName]*ebpf.Map
+	captureBpfPrograms  map[bpf.BpfProgramName]*ebpf.Program
 	tcpListener         *net.TCPListener
 	udpConnection       *net.UDPConn
+	captureErr          error
 	closeFunctions      [](func() error)
 }
 
 // keylog is the -keylog mode: load and attach only the secrets uprobe and print NSS key log lines, no redirect, proxy or route sync
 // decrypt is the -decrypt option of run mode: the proxy decrypts the TLS flows with the secrets of the uprobe and prints their plaintext
 // libssl overrides the resolved libssl path, empty means search the standard directories
-func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, decrypt bool, libssl string, logger *slog.Logger) (app App) {
+// capturePath is the -capture mode: nothing is redirected, the packets of the selected flows and the secrets of their TLS sessions are written to this pcapng file, at most snaplen bytes of a packet
+func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, decrypt bool, libssl string, capturePath string, snaplen uint32, logger *slog.Logger) (app App) {
 	appCtx, cancel := context.WithCancel(ctx)
 	app = App{
 		ctx:                 appCtx,
@@ -68,20 +77,26 @@ func New(ctx context.Context, filter redirect.Filter, proxyPort uint16, udpIdleT
 		keylog:              keylog,
 		decrypt:             decrypt,
 		libssl:              libssl,
+		capturePath:         capturePath,
+		snaplen:             snaplen,
 		logger:              logger,
 		redirectBpfMaps:     nil,
 		redirectBpfPrograms: nil,
 		secretsBpfMaps:      nil,
 		secretsBpfPrograms:  nil,
+		captureBpfMaps:      nil,
+		captureBpfPrograms:  nil,
 		tcpListener:         nil,
 		udpConnection:       nil,
+		captureErr:          nil,
 		closeFunctions:      [](func() error){},
 	}
 	return
 }
 
+// in capture mode the redirect object only records the flows
 func (app *App) LoadBpfObjects() (err error) {
-	bpfMaps, bpfPrograms, closeFunction, loadErr := redirect.LoadBpfObjects(app.proxyPort, uint32(os.Getpid()))
+	bpfMaps, bpfPrograms, closeFunction, loadErr := redirect.LoadBpfObjects(app.proxyPort, uint32(os.Getpid()), app.capturePath != "")
 
 	if err = loadErr; err != nil {
 		app.logger.Error("Could not load redirect bpf objects", "error", err)
@@ -104,7 +119,7 @@ func (app *App) UpdateBpfMaps() (err error) {
 
 	// the destination filters only narrow the flows of the selected processes
 	if (len(app.filter.UIDs) == 0) && (len(app.filter.Tgids) == 0) {
-		app.logger.Warn("No uid or pid given, no flow will be redirected")
+		app.logger.Warn("No uid or pid given, no flow will be redirected or captured")
 	}
 
 	return
@@ -239,12 +254,15 @@ func (app *App) StartProxy() (err error) {
 	return
 }
 
+// in capture mode nothing is redirected, so the programs that learn the udp client and restore the original address have nothing to do and stay detached
 func (app *App) AttachRedirect() (err error) {
-	attachments := []struct {
+	type attachment struct {
 		program    bpf.BpfProgramName
 		attachType ebpf.AttachType
-	}{
-		// the programs that learn clients, restore addresses and clean up come first, so the first redirected socket already has them
+	}
+
+	// the programs that learn clients, restore addresses and clean up come first, so the first redirected socket already has them
+	attachments := []attachment{
 		{program: redirect.ClientSockops, attachType: ebpf.AttachCGroupSockOps},
 		{program: redirect.LearnUdpClient, attachType: ebpf.AttachCGroupInetEgress},
 		{program: redirect.ForgetReleasedSocket, attachType: ebpf.AttachCgroupInetSockRelease},
@@ -258,6 +276,17 @@ func (app *App) AttachRedirect() (err error) {
 		{program: redirect.RedirectSendmsg6, attachType: ebpf.AttachCGroupUDP6Sendmsg},
 	}
 
+	if app.capturePath != "" {
+		attachments = []attachment{
+			{program: redirect.ClientSockops, attachType: ebpf.AttachCGroupSockOps},
+			{program: redirect.ForgetReleasedSocket, attachType: ebpf.AttachCgroupInetSockRelease},
+			{program: redirect.RedirectConnect4, attachType: ebpf.AttachCGroupInet4Connect},
+			{program: redirect.RedirectConnect6, attachType: ebpf.AttachCGroupInet6Connect},
+			{program: redirect.RedirectSendmsg4, attachType: ebpf.AttachCGroupUDP4Sendmsg},
+			{program: redirect.RedirectSendmsg6, attachType: ebpf.AttachCGroupUDP6Sendmsg},
+		}
+	}
+
 	for _, attachment := range attachments {
 		closeFunction, attachErr := attach.AddCgroup(attach.CgroupRoot, app.redirectBpfPrograms[attachment.program], attachment.attachType)
 
@@ -269,14 +298,94 @@ func (app *App) AttachRedirect() (err error) {
 		app.closeFunctions = append(app.closeFunctions, closeFunction)
 	}
 
+	if app.capturePath != "" {
+		app.logger.Info("Recording flows", "cgroup", attach.CgroupRoot, "uids", app.filter.UIDs, "pids", app.filter.Tgids, "destinationCidrs", app.filter.DestinationCIDRs, "destinationPorts", app.filter.DestinationPorts)
+		return
+	}
+
 	app.logger.Info("Redirecting flows", "cgroup", attach.CgroupRoot, "uids", app.filter.UIDs, "pids", app.filter.Tgids, "destinationCidrs", app.filter.DestinationCIDRs, "destinationPorts", app.filter.DestinationPorts, "proxyPort", app.proxyPort)
 	return
 }
 
-// sock_release only marks a released redirected UDP flow, this removes it and its client_map entry udpReleaseDelay later
+// the redirect object has to be loaded already, the capture object shares its flow_map
+func (app *App) LoadCaptureObjects() (err error) {
+	bpfMaps, bpfPrograms, closeFunction, loadErr := capturebpf.LoadBpfObjects(app.snaplen, app.redirectBpfMaps[redirect.FlowMap], app.redirectBpfMaps[redirect.UidMap], app.redirectBpfMaps[redirect.TgidMap])
+
+	if err = loadErr; err != nil {
+		app.logger.Error("Could not load capture bpf objects", "error", err)
+		return
+	}
+
+	app.captureBpfMaps = bpfMaps
+	app.captureBpfPrograms = bpfPrograms
+	app.closeFunctions = append(app.closeFunctions, closeFunction)
+	return
+}
+
+// the capture file is created and the writer started before AttachCapture, so a path that can't be written fails before anything is attached and no packet waits in packet_map for a reader
+func (app *App) StartCapture() (err error) {
+	file, openErr := capture.OpenFile(app.capturePath)
+
+	if err = openErr; err != nil {
+		app.logger.Error("Could not open capture file", "error", err, "fileName", app.capturePath)
+		return
+	}
+
+	if app.secretsBpfMaps == nil {
+		app.logger.Warn("Capturing without TLS secrets, the file will have no keys")
+	}
+
+	// capture writer, writes the packets that wait and flushes the file when the context is cancelled
+	app.waitGroup.Go(func() {
+		writeErr := errors.Join(capture.Write(app.ctx, file, app.snaplen, app.captureBpfMaps, app.secretsBpfMaps, app.logger), file.Close())
+
+		if writeErr != nil {
+			app.logger.Error("Could not write capture file", "error", writeErr, "fileName", app.capturePath)
+			// read by Shutdown after the wait group, nothing is captured without the writer so decerter stops
+			app.captureErr = writeErr
+			app.cancel()
+		}
+	})
+
+	return
+}
+
+// both programs see every packet of every socket and copy the ones of recorded sockets, they are attached before AttachRedirect records the first flow
+func (app *App) AttachCapture() (err error) {
+	attachments := []struct {
+		program    bpf.BpfProgramName
+		attachType ebpf.AttachType
+	}{
+		{program: capturebpf.CaptureIngress, attachType: ebpf.AttachCGroupInetIngress},
+		{program: capturebpf.CaptureEgress, attachType: ebpf.AttachCGroupInetEgress},
+	}
+
+	for _, attachment := range attachments {
+		closeFunction, attachErr := attach.AddCgroup(attach.CgroupRoot, app.captureBpfPrograms[attachment.program], attachment.attachType)
+
+		if err = attachErr; err != nil {
+			app.logger.Error("Could not attach capture program", "error", err, "attachType", attachment.attachType)
+			return
+		}
+
+		app.closeFunctions = append(app.closeFunctions, closeFunction)
+	}
+
+	app.logger.Info("Capturing packets", "cgroup", attach.CgroupRoot, "fileName", app.capturePath, "snaplen", app.snaplen)
+	return
+}
+
+// closed when decerter has to stop: the context of the caller was cancelled or the capture writer failed
+func (app *App) Done() (done <-chan struct{}) {
+	done = app.ctx.Done()
+	return
+}
+
+// sock_release only marks a released redirected UDP flow, this removes it and its client_map entry releaseDelay later
+// in capture mode sock_release and sockops mark every recorded flow, nothing is removed in the kernel
 // started before AttachRedirect, so no released flow is missed
 func (app *App) StartReleaseSweep() {
-	// released udp flow remover
+	// released flow remover
 	app.waitGroup.Go(func() {
 		app.watchReleasedFlows()
 	})
@@ -284,7 +393,7 @@ func (app *App) StartReleaseSweep() {
 
 // a failed sweep is retried with the next tick, the flows stay marked
 func (app *App) watchReleasedFlows() {
-	ticker := time.NewTicker(udpReleaseSweep)
+	ticker := time.NewTicker(releaseSweep)
 	defer ticker.Stop()
 
 	for {
@@ -293,10 +402,10 @@ func (app *App) watchReleasedFlows() {
 			app.logger.Debug("Context cancelled")
 			return
 		case <-ticker.C:
-			forgetErr := redirect.ForgetReleasedFlows(udpReleaseDelay, app.redirectBpfMaps)
+			forgetErr := redirect.ForgetReleasedFlows(releaseDelay, app.redirectBpfMaps)
 
 			if forgetErr != nil {
-				app.logger.Warn("Could not remove released udp flows", "error", forgetErr)
+				app.logger.Warn("Could not remove released flows", "error", forgetErr)
 			}
 		}
 	}
@@ -315,8 +424,8 @@ func (app *App) StartFlowTable() {
 }
 
 // resolve libssl, detect the OpenSSL version and pick the offsets, then load the secrets object; an unknown version fails here, so this runs before anything is attached
-// in run mode the redirect object has to be loaded already, the secrets object shares its uid_map and tgid_map; in keylog mode it owns them
-// on an architecture without the secrets object keylog mode fails, run mode goes on without TLS secrets
+// in run and capture mode the redirect object has to be loaded already, the secrets object shares its uid_map and tgid_map; in keylog mode it owns them
+// on an architecture without the secrets object keylog mode fails, run and capture mode go on without TLS secrets
 func (app *App) LoadSecretsBpfObjects() (err error) {
 	err = secrets.CheckSupported()
 
@@ -356,7 +465,7 @@ func (app *App) LoadSecretsBpfObjects() (err error) {
 
 	var sharedUidMap, sharedTgidMap *ebpf.Map
 
-	// run mode shares the redirect object's selection maps so the same -uid and -pid select the flows and the secrets
+	// run and capture mode share the redirect object's selection maps so the same -uid and -pid select the flows and the secrets
 	if !app.keylog {
 		sharedUidMap = app.redirectBpfMaps[redirect.UidMap]
 		sharedTgidMap = app.redirectBpfMaps[redirect.TgidMap]
@@ -452,6 +561,7 @@ func (app *App) AttachSecrets() (err error) {
 func (app *App) Shutdown() (err error) {
 	app.cancel()
 	app.waitGroup.Wait()
+	err = app.captureErr
 
 	for _, closeFunction := range slices.Backward(app.closeFunctions) {
 		closeErr := closeFunction()

@@ -54,6 +54,12 @@ func Lookup(clientRandom [32]byte, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (sessio
 	return
 }
 
+// no key log without the uprobe
+func LookupKeyLog(clientRandom [32]byte, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (keyLog string, found bool, err error) {
+	err = CheckSupported()
+	return
+}
+
 func SymbolHooks() (symbols []string) {
 	symbols = []string{}
 	return
