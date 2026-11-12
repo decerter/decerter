@@ -6,10 +6,12 @@ package e2e_test
 
 import (
 	"context"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -221,6 +223,81 @@ func testTcpdump(ctx context.Context, tcpdumpPath string, capturePath string, ca
 			err = fmt.Errorf("tcpdump -A found no %q of %s to port %s, output:\n%s", expected, call.Name, call.Port, output)
 			return
 		}
+	}
+
+	return
+}
+
+// Test if the DTLS session of the rewrite case is in a capture with the line the client sent: as text in a synthesized udp datagram of a plaintext capture, and decrypted by tshark from the DSB of a capture with secrets.
+func TestCaptureDTLSPositive(state *testing.T) {
+	tcpdumpPath, lookErr := exec.LookPath("tcpdump")
+
+	if lookErr != nil {
+		state.Skipf("tcpdump is not installed, error: %s", lookErr.Error())
+	}
+
+	for _, mode := range []decerterMode{PlaintextDecerterMode, CaptureDecerterMode} {
+		state.Run(string(mode), func(state *testing.T) {
+			capturePath := filepath.Join(state.TempDir(), "dtls.pcapng")
+			stop := startDecerter(state, mode, capturePath, nil)
+			server := startDTLSServer(state)
+			_, err := runDTLSClient(state.Context(), testUser, server, "", dtlsLine, dtlsLine)
+
+			if err != nil {
+				state.Fatalf("Could not run the dtls session during the capture, error: %s", err.Error())
+			}
+
+			stopErr := stop()
+
+			if stopErr != nil {
+				state.Fatalf("Could not stop decerter, error: %s", stopErr.Error())
+			}
+
+			output, runErr := runCommand(state.Context(), tcpdumpPath, "-n", "-A", "-r", capturePath, "udp dst port "+server.Port)
+
+			if runErr != nil {
+				state.Fatalf("Could not read the capture, error: %s", runErr.Error())
+			}
+
+			// only the plaintext capture has the line as text
+			if strings.Contains(output, dtlsLine) != (mode == PlaintextDecerterMode) {
+				state.Errorf("Test of the DTLS capture failed, tcpdump -A should find %q: %v, output:\n%s", dtlsLine, mode == PlaintextDecerterMode, output)
+				return
+			}
+
+			if mode == PlaintextDecerterMode {
+				return
+			}
+
+			err = testTsharkDTLS(state, capturePath, server.Port)
+
+			if err != nil {
+				state.Errorf("Test of the DTLS capture failed, error: %s", err.Error())
+				return
+			}
+		})
+	}
+}
+
+// tshark decrypts the application data of the DTLS session to port with the secrets of the file's DSB, the client's line must be among it
+func testTsharkDTLS(state *testing.T, capturePath string, port string) (err error) {
+	tsharkPath, lookErr := exec.LookPath("tshark")
+
+	if lookErr != nil {
+		state.Logf("tshark is not installed, the DSB of the DTLS session is not checked, error: %s", lookErr.Error())
+		return
+	}
+
+	output, runErr := runCommand(state.Context(), tsharkPath, "-n", "-r", capturePath, "-d", "udp.port=="+port+",dtls", "-Y", "data", "-T", "fields", "-E", "separator=/t", "-e", "udp.dstport", "-e", "data.data")
+
+	if err = runErr; err != nil {
+		return
+	}
+
+	expected := port + "\t" + hex.EncodeToString([]byte(dtlsLine+"\n"))
+
+	if !slices.Contains(strings.Split(strings.TrimSpace(output), "\n"), expected) {
+		err = fmt.Errorf("tshark decrypted no %q to port %s, output:\n%s", dtlsLine, port, output)
 	}
 
 	return

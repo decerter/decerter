@@ -39,6 +39,7 @@ const (
 const (
 	tls12Version          uint32 = 0x0303
 	tls13Version          uint32 = 0x0304
+	dtls12Version         uint32 = 0xfefd
 	handshakeLabelPrefix  string = "tls13 "
 	clientHandshakeDerive string = "c hs traffic"
 	serverHandshakeDerive string = "s hs traffic"
@@ -188,7 +189,9 @@ func recordSecrets(secrets bpfTlsSecrets) (sessionSecrets tlsrecord.Secrets, err
 	sessionSecrets.Version = uint16(secrets.TlsVersion)
 
 	switch secrets.TlsVersion {
-	case tls12Version:
+	case
+		tls12Version,
+		dtls12Version:
 		sessionSecrets.MasterKey = secrets.MasterKey[:]
 		return
 	case tls13Version:
@@ -233,7 +236,7 @@ func recordSecrets(secrets bpfTlsSecrets) (sessionSecrets tlsrecord.Secrets, err
 	}
 }
 
-// build the NSS key log lines of a session: CLIENT_RANDOM for TLS 1.2, the handshake and application traffic secrets for TLS 1.3
+// build the NSS key log lines of a session: CLIENT_RANDOM for TLS 1.2 and DTLS 1.2, the handshake and application traffic secrets for TLS 1.3
 func keyLogLines(secrets bpfTlsSecrets) (lines []string, err error) {
 	sessionSecrets, secretsErr := recordSecrets(secrets)
 
@@ -243,7 +246,7 @@ func keyLogLines(secrets bpfTlsSecrets) (lines []string, err error) {
 
 	clientRandom := hex.EncodeToString(secrets.ClientRandom[:])
 
-	if sessionSecrets.Version == tlsrecord.VersionTLS12 {
+	if sessionSecrets.Version != tlsrecord.VersionTLS13 {
 		lines = []string{keyLogLine(clientRandomLabel, clientRandom, sessionSecrets.MasterKey)}
 		return
 	}

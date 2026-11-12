@@ -256,7 +256,7 @@ func (app *App) StartProxy() (err error) {
 	app.tcpListener = listener
 	app.logger.Info("Tcp proxy listening", "address", listener.Addr().String(), "device", "lo")
 
-	// the proxy only looks into TLS flows when asked to, and it can't without the secrets object
+	// the proxy only looks into TLS flows and DTLS sessions when asked to, and it can't without the secrets object
 	var secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map
 	var pipeline *intercept.Pipeline
 	isIntercepting := len(app.rules) > 0
@@ -270,7 +270,7 @@ func (app *App) StartProxy() (err error) {
 		pipeline = intercept.New(app.rules, os.Stdout)
 		app.logger.Info("Intercepting the flows of the proxy", "rules", len(app.rules), "tls", secretsBpfMaps != nil)
 	case secretsBpfMaps != nil:
-		app.logger.Info("Decrypting tls flows of the tcp proxy")
+		app.logger.Info("Decrypting tls flows of the tcp proxy and dtls sessions of the udp proxy")
 	default:
 	}
 
@@ -291,7 +291,7 @@ func (app *App) StartProxy() (err error) {
 
 	// udp proxy, closes the socket when the context is cancelled
 	app.waitGroup.Go(func() {
-		proxy.ServeUDP(app.ctx, app.udpConnection, app.udpIdleTimeout, app.redirectBpfMaps, pipeline, app.waitGroup, app.logger)
+		proxy.ServeUDP(app.ctx, app.udpConnection, app.udpIdleTimeout, app.redirectBpfMaps, secretsBpfMaps, pipeline, app.waitGroup, app.logger)
 	})
 
 	return

@@ -588,7 +588,7 @@ func (conn *Conn) handleClientHello(body []byte) (err error) {
 		return
 	}
 
-	hello, parseErr := parseClientHello(body)
+	hello, parseErr := parseClientHello(body, false)
 
 	if err = parseErr; err != nil {
 		return

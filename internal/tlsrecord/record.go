@@ -25,8 +25,9 @@ const (
 )
 
 const (
-	VersionTLS12 uint16 = 0x0303
-	VersionTLS13 uint16 = 0x0304
+	VersionTLS12  uint16 = 0x0303
+	VersionTLS13  uint16 = 0x0304
+	VersionDTLS12 uint16 = 0xfefd
 )
 
 // record sizes (RFC 5246 section 6.2, RFC 8446 section 5)
@@ -57,11 +58,14 @@ const (
 // Length is the bytes the record took in the stream of its direction, its header included, so a reader knows how far the stream is read
 // Action and Raw are only set by an intercepting conn: Raw is the record as it came, header included, for ForwardAction and SealAction
 // a held record also carries what Encrypter needs: the write protection of its keys, the record header and the TLS 1.3 padding
+// a DTLS record has its Epoch and Sequence from its header, Datagram counts the datagrams of its direction and tells which records came in one; header holds its type and version
 type Record struct {
 	Direction   Direction
 	ContentType ContentType
 	Decrypted   bool
+	Epoch       uint16
 	Sequence    uint64
+	Datagram    uint64
 	Length      int
 	Payload     []byte
 	Action      Action
@@ -135,6 +139,8 @@ func VersionName(version uint16) (name string) {
 		name = "TLS1.2"
 	case VersionTLS13:
 		name = "TLS1.3"
+	case VersionDTLS12:
+		name = "DTLS1.2"
 	default:
 		name = fmt.Sprintf("0x%04x", version)
 	}

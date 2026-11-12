@@ -52,13 +52,17 @@ const (
 )
 
 // what the writer keeps of one recorded socket
-// conn reads the ClientHello and is nil once the client_random is known
+// conn reads the ClientHello and is nil once the client_random is known, isDTLS tells a DTLS session over UDP from a TLS session over TCP
 // held are the packets that wait from the ClientHello on, heldBytes their length
 // pollPause and nextPoll spread the lookups of the secrets, holdStart is when the ClientHello came
 // connection is the TCP connection of the flow in plaintext mode, nil until its first TCP packet; conn stays with the flow there and decrypts its session, held is not used and heldBytes is what connection keeps
+// a DTLS session in plaintext mode keeps its held packets until the secrets are there and is decrypted datagram by datagram after that, note is the comment of its next packet
 type flow struct {
 	state           flowState
-	conn            *tlsrecord.Conn
+	conn            recordLayer
+	isDTLS          bool
+	isDescribed     bool
+	note            string
 	hasClientRandom bool
 	clientRandom    [32]byte
 	serverName      string
@@ -131,6 +135,9 @@ func (recorder *recorder) handle(packet capturebpf.Packet, now time.Time) (err e
 		currentFlow = &flow{
 			state:           watchedFlowState,
 			conn:            nil,
+			isDTLS:          false,
+			isDescribed:     false,
+			note:            "",
 			hasClientRandom: false,
 			clientRandom:    [32]byte{},
 			serverName:      "",
@@ -172,19 +179,25 @@ func (recorder *recorder) handle(packet capturebpf.Packet, now time.Time) (err e
 	}
 
 	var payload []byte
+	isDatagram := false
 
 	// only client flows are recorded, so what the socket sends is the client side of the session
 	if !packet.IsIngress && ((currentFlow.state == watchedFlowState) || ((currentFlow.state == heldFlowState) && !currentFlow.hasClientRandom)) {
-		payload = tcpPayload(packet.Data)
+		payload, isDatagram = transportPayload(packet.Data)
 	}
 
 	// a ClientHello at the start of any segment the client sends: a session can start in the middle of a flow, behind STARTTLS or a CONNECT to a proxy
+	// a DTLS ClientHello starts any datagram the client sends
 	// one that the snaplen cut is not waited for, nothing can decrypt a session with a part of its handshake missing
 	if (currentFlow.state == watchedFlowState) && (len(payload) > 0) && (uint32(len(packet.Data)) == packet.Length) {
-		isClientHello, _ := tlsrecord.IsClientHello(payload)
+		isClientHello := tlsrecord.IsDTLSClientHello(payload)
+
+		if !isDatagram {
+			isClientHello, _ = tlsrecord.IsClientHello(payload)
+		}
 
 		if isClientHello {
-			recorder.hold(packet.Cookie, currentFlow, now)
+			recorder.hold(packet.Cookie, currentFlow, isDatagram, now)
 		}
 	}
 
@@ -218,11 +231,18 @@ func (recorder *recorder) handle(packet capturebpf.Packet, now time.Time) (err e
 	return
 }
 
-// start to keep the packets of the flow, its first lookup is due at once
-func (recorder *recorder) hold(cookie uint64, heldFlow *flow, now time.Time) {
-	conn := tlsrecord.New(maxHoldBytes, false)
+// start to keep the packets of the flow, its first lookup is due at once; isDTLS reads the session from datagrams
+func (recorder *recorder) hold(cookie uint64, heldFlow *flow, isDTLS bool, now time.Time) {
+	if isDTLS {
+		conn := tlsrecord.NewDTLS(maxHoldBytes, false)
+		heldFlow.conn = &conn
+	} else {
+		conn := tlsrecord.New(maxHoldBytes, false)
+		heldFlow.conn = &conn
+	}
+
+	heldFlow.isDTLS = isDTLS
 	heldFlow.state = heldFlowState
-	heldFlow.conn = &conn
 	heldFlow.holdStart = now
 	heldFlow.pollPause = holdPollStart
 	heldFlow.nextPoll = now
@@ -233,8 +253,8 @@ func (recorder *recorder) hold(cookie uint64, heldFlow *flow, now time.Time) {
 	}
 }
 
-// feed the client bytes to the record layer until the ClientHello is whole, it can be longer than one segment
-// the segments are taken in the order they were sent, a ClientHello that had to be sent again is not read and its flow is written without keys
+// feed the client bytes to the record layer until the ClientHello is whole, it can be longer than one segment or one datagram
+// the segments are taken in the order they were sent, a ClientHello that had to be sent again is not read and its flow is written without keys; a DTLS ClientHello sent again is read as another datagram
 func (recorder *recorder) readClientHello(cookie uint64, heldFlow *flow, payload []byte) (err error) {
 	_, feedErr := heldFlow.conn.Feed(tlsrecord.ClientDirection, payload)
 
@@ -414,13 +434,17 @@ func (recorder *recorder) write(packet pcapng.Packet) (err error) {
 // a held flow is never idle here, its hold ends after holdTimeout
 // a flow that sends again later starts as a new one, which only matters for a ClientHello and that is looked for in every flow
 // in plaintext mode a TCP connection can't start again, its streams and its session would be lost: it is kept while its socket is in flow_map, which holds at most 65535 sockets, and what it still keeps is written before it is forgotten
+// a decrypted DTLS session is kept while its socket is there for the same reason, it keeps nothing to write
 func (recorder *recorder) forgetIdleFlows(now time.Time) (err error) {
 	for cookie, idleFlow := range recorder.flows {
 		if (idleFlow.state == heldFlowState) || (now.Sub(idleFlow.lastPacket) < flowIdleTimeout) {
 			continue
 		}
 
-		if (idleFlow.connection != nil) && !idleFlow.connection.isClosed {
+		isOpenConnection := (idleFlow.connection != nil) && !idleFlow.connection.isClosed
+		isDecryptedSession := idleFlow.isDTLS && (idleFlow.state == decryptedFlowState)
+
+		if isOpenConnection || isDecryptedSession {
 			isOpen, lookupErr := capturebpf.HasFlow(cookie, recorder.captureBpfMaps)
 
 			if lookupErr != nil {
@@ -430,7 +454,9 @@ func (recorder *recorder) forgetIdleFlows(now time.Time) (err error) {
 			if isOpen {
 				continue
 			}
+		}
 
+		if isOpenConnection {
 			err = recorder.leave(cookie, idleFlow, closedReason, now)
 
 			if err != nil {

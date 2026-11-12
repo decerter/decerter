@@ -24,10 +24,12 @@ const (
 	TCPLayer Layer = "tcp"
 	// one udp datagram
 	UDPLayer Layer = "udp"
+	// the application data of one decrypted DTLS record, a datagram can carry several
+	DTLSLayer Layer = "dtls"
 )
 
 // the intercepted connection a message belongs to: the redirected socket of the app and the original destination
-// Session is the TLS session of a TLSLayer flow, Version and CipherSuite are zero for any other
+// Session is the TLS session of a TLSLayer or DTLSLayer flow, Version and CipherSuite are zero for any other
 type Flow struct {
 	Cookie      uint64
 	IPProtocol  uint8

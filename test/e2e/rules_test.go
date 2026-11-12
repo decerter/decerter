@@ -52,12 +52,33 @@ var (
 type getRule struct{}
 
 func (rule getRule) Match(message intercept.Message) (isMatch bool) {
-	isMatch = (message.Direction == tlsrecord.ClientDirection) && (message.Layer != intercept.UDPLayer)
+	isMatch = (message.Direction == tlsrecord.ClientDirection) && ((message.Layer == intercept.TLSLayer) || (message.Layer == intercept.TCPLayer))
 	return
 }
 
 func (rule getRule) Apply(ctx context.Context, message intercept.Message) (plain []byte, verdict intercept.Verdict, err error) {
 	plain = bytes.ReplaceAll(message.Plain, http1OldGet, http1NewGet)
+	verdict = intercept.ForwardVerdict
+	return
+}
+
+// changes the lines openssl s_client sends over DTLS: each key of replacements becomes its value
+type dtlsRule struct {
+	replacements map[string]string
+}
+
+func (rule dtlsRule) Match(message intercept.Message) (isMatch bool) {
+	isMatch = (message.Direction == tlsrecord.ClientDirection) && (message.Layer == intercept.DTLSLayer)
+	return
+}
+
+func (rule dtlsRule) Apply(ctx context.Context, message intercept.Message) (plain []byte, verdict intercept.Verdict, err error) {
+	plain = message.Plain
+
+	for original, edited := range rule.replacements {
+		plain = bytes.ReplaceAll(plain, []byte(original), []byte(edited))
+	}
+
 	verdict = intercept.ForwardVerdict
 	return
 }
@@ -101,7 +122,7 @@ func newHeadersRule() (rule *headersRule) {
 }
 
 func (rule *headersRule) Match(message intercept.Message) (isMatch bool) {
-	isMatch = (message.Direction == tlsrecord.ClientDirection) && (message.Layer != intercept.UDPLayer)
+	isMatch = (message.Direction == tlsrecord.ClientDirection) && ((message.Layer == intercept.TLSLayer) || (message.Layer == intercept.TCPLayer))
 	return
 }
 

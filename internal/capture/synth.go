@@ -162,15 +162,23 @@ func parsePacket(data []byte) (header packetHeader, ok bool) {
 	return
 }
 
-// the TCP payload of a packet that starts at its IP header, nil for everything else: not TCP, a later fragment, cut off by the snaplen
-func tcpPayload(data []byte) (payload []byte) {
+// the TCP or UDP payload of a packet that starts at its IP header, isDatagram for UDP, nil for everything else
+func transportPayload(data []byte) (payload []byte, isDatagram bool) {
 	header, ok := parsePacket(data)
 
-	if !ok || (header.protocol != syscall.IPPROTO_TCP) || (len(data) <= header.payloadOffset) {
+	if !ok || (len(data) <= header.payloadOffset) {
 		return
 	}
 
-	payload = data[header.payloadOffset:]
+	switch header.protocol {
+	case syscall.IPPROTO_TCP:
+		payload = data[header.payloadOffset:]
+	case syscall.IPPROTO_UDP:
+		payload = data[header.payloadOffset:]
+		isDatagram = true
+	default:
+	}
+
 	return
 }
 

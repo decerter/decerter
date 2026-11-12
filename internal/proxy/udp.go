@@ -60,7 +60,8 @@ func controlUDP(network, address string, rawConnection syscall.RawConn) (err err
 
 // read until the socket is closed by the context, every session relays its replies in its own goroutine on waitGroup
 // pipeline runs every datagram of both directions through its rules, nil relays them as they are
-func ServeUDP(ctx context.Context, connection *net.UDPConn, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, waitGroup *sync.WaitGroup, logger *slog.Logger) {
+// a session whose first datagram has a DTLS ClientHello is read by the DTLS record layer with the secrets of secretsBpfMaps: intercepted with a pipeline, observed and printed without one
+func ServeUDP(ctx context.Context, connection *net.UDPConn, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, waitGroup *sync.WaitGroup, logger *slog.Logger) {
 	// socket closer
 	stop := context.AfterFunc(ctx, func() {
 		closeErr := connection.Close()
@@ -102,10 +103,23 @@ func ServeUDP(ctx context.Context, connection *net.UDPConn, idleTimeout time.Dur
 			continue
 		}
 
-		session, sessionErr := udpSessionOf(ctx, connection, client, local, &sessions, idleTimeout, bpfMaps, pipeline, waitGroup, logger)
+		session, sessionErr := udpSessionOf(ctx, connection, client, local, buffer[:datagramSize], &sessions, idleTimeout, bpfMaps, secretsBpfMaps, pipeline, waitGroup, logger)
 
 		if sessionErr != nil {
 			continue
+		}
+
+		// the sender of the DTLS session writes what the record layer makes of the datagram
+		if isDTLSIntercepted(session) {
+			if !session.dtls.take(tlsrecord.ClientDirection, buffer[:datagramSize]) {
+				logger.Debug("Could not queue dtls datagram, it is lost", "client", client, "destination", session.key.destination)
+			}
+
+			continue
+		}
+
+		if session.dtls != nil {
+			session.dtls.observe(tlsrecord.ClientDirection, buffer[:datagramSize])
 		}
 
 		datagram, isSent := interceptDatagram(ctx, pipeline, session, tlsrecord.ClientDirection, buffer[:datagramSize], logger)
@@ -150,7 +164,8 @@ func datagramDestination(controlMessage []byte) (local netip.Addr, err error) {
 }
 
 // the flow is looked up for every datagram: a new socket on the same client port or a new destination of an unconnected socket gets its own session
-func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.AddrPort, local netip.Addr, sessions *UDPSessions, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, waitGroup *sync.WaitGroup, logger *slog.Logger) (session *UDPSession, err error) {
+// the datagram that starts a session tells if it is DTLS
+func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.AddrPort, local netip.Addr, datagram []byte, sessions *UDPSessions, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, waitGroup *sync.WaitGroup, logger *slog.Logger) (session *UDPSession, err error) {
 	cookie, flow, lookupErr := redirect.FlowByClient(client, syscall.IPPROTO_UDP, bpfMaps)
 
 	if err = lookupErr; err != nil {
@@ -208,6 +223,7 @@ func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.Add
 		startTime:           time.Now(),
 	}
 	session.lastActive.Store(session.startTime.UnixNano())
+	startDTLS(ctx, connection, session, datagram, secretsBpfMaps, pipeline, logger)
 	sessions.Add(session)
 
 	// udp reply relay
@@ -232,6 +248,12 @@ func relayUDP(ctx context.Context, connection *net.UDPConn, session *UDPSession,
 
 	defer func() {
 		sessions.Remove(session)
+
+		// the senders of a DTLS session write to the upstream socket until they are done
+		if session.dtls != nil {
+			session.dtls.close()
+		}
+
 		closeErr := session.upstream.Close()
 
 		if closeErr != nil {
@@ -280,6 +302,19 @@ func relayUDP(ctx context.Context, connection *net.UDPConn, session *UDPSession,
 		}
 
 		session.lastActive.Store(time.Now().UnixNano())
+
+		if isDTLSIntercepted(session) {
+			if !session.dtls.take(tlsrecord.ServerDirection, buffer[:datagramSize]) {
+				logger.Debug("Could not queue dtls datagram, it is lost")
+			}
+
+			continue
+		}
+
+		if session.dtls != nil {
+			session.dtls.observe(tlsrecord.ServerDirection, buffer[:datagramSize])
+		}
+
 		datagram, isSent := interceptDatagram(ctx, pipeline, session, tlsrecord.ServerDirection, buffer[:datagramSize], logger)
 
 		if !isSent {
@@ -307,7 +342,7 @@ func interceptDatagram(ctx context.Context, pipeline *intercept.Pipeline, sessio
 	result = datagram
 	isSent = true
 
-	if pipeline == nil {
+	if (pipeline == nil) || session.isRaw {
 		return
 	}
 
@@ -315,5 +350,57 @@ func interceptDatagram(ctx context.Context, pipeline *intercept.Pipeline, sessio
 	processed := pipeline.Process(ctx, pipeline.Message(flow, direction, intercept.UDPLayer, datagram), logger)
 	result = processed.Plain
 	isSent = processed.Verdict == intercept.ForwardVerdict
+	return
+}
+
+// a session whose first datagram has a DTLS ClientHello gets the DTLS record layer when there are secrets, and is relayed past the rules without them
+// intercepting, a sender per direction writes the datagrams: to the server over the upstream socket, to the client from the proxy address it sent to
+func startDTLS(ctx context.Context, connection *net.UDPConn, session *UDPSession, datagram []byte, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, logger *slog.Logger) {
+	if !tlsrecord.IsDTLSClientHello(datagram) {
+		return
+	}
+
+	if secretsBpfMaps == nil {
+		session.isRaw = true
+		logger.Debug("Udp session is dtls but there are no secrets, relaying raw")
+		return
+	}
+
+	session.dtls = newDTLSInterception(session.key.cookie, session.flow, session.key.client, pipeline, secretsBpfMaps, logger)
+
+	if pipeline == nil {
+		return
+	}
+
+	writers := [2]func(datagram []byte) error{
+		func(datagram []byte) (err error) {
+			_, err = session.upstream.Write(datagram)
+
+			if err != nil {
+				return
+			}
+
+			session.upDatagrams.Add(1)
+			session.upBytes.Add(int64(len(datagram)))
+			return
+		},
+		func(datagram []byte) (err error) {
+			_, _, err = connection.WriteMsgUDPAddrPort(datagram, session.replyControlMessage, session.key.client)
+
+			if err != nil {
+				return
+			}
+
+			session.downDatagrams.Add(1)
+			session.downBytes.Add(int64(len(datagram)))
+			return
+		},
+	}
+	session.dtls.start(ctx, writers)
+}
+
+// the datagrams of the session go through the senders of its DTLS session
+func isDTLSIntercepted(session *UDPSession) (isIntercepted bool) {
+	isIntercepted = (session.dtls != nil) && (session.dtls.pipeline != nil)
 	return
 }

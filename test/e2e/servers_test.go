@@ -5,12 +5,26 @@
 package e2e_test
 
 import (
+	"bytes"
 	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
+)
+
+const (
+	// s_server prints this once it listens
+	dtlsServerReady string = "ACCEPT"
+	// how often the output of the dtls server is looked at
+	dtlsPollInterval time.Duration = 20 * time.Millisecond
 )
 
 // what a test server serves: plain HTTP when Certificate is nil, TLS pinned to Version and CipherSuite when they are set
@@ -142,5 +156,121 @@ func (server testServer) received() (request receivedRequest, err error) {
 		err = fmt.Errorf("server %s received no request", server.URL)
 	}
 
+	return
+}
+
+// openssl s_server -dtls1_2 on a free loopback port, run as root so its socket is never redirected; output is what it printed, the lines a client sent among them
+type dtlsServer struct {
+	Port   string
+	output *lockedBuffer
+}
+
+// a buffer two goroutines use: the command writes into it, the test reads it
+type lockedBuffer struct {
+	mutex  *sync.Mutex
+	buffer *bytes.Buffer
+}
+
+func (locked lockedBuffer) Write(data []byte) (count int, err error) {
+	locked.mutex.Lock()
+	defer locked.mutex.Unlock()
+	count, err = locked.buffer.Write(data)
+	return
+}
+
+func (locked lockedBuffer) String() (text string) {
+	locked.mutex.Lock()
+	defer locked.mutex.Unlock()
+	text = locked.buffer.String()
+	return
+}
+
+// start the server for one session with eproxy's RSA certificate and wait until it listens, it is killed when the test ends
+// its stdin stays open, s_server leaves at the end of its input otherwise
+func startDTLSServer(state *testing.T) (server dtlsServer) {
+	port, portErr := freeUDPPort()
+
+	if portErr != nil {
+		state.Fatalf("Could not find a free udp port for the dtls server, error: %s", portErr.Error())
+	}
+
+	server = dtlsServer{
+		Port:   port,
+		output: &lockedBuffer{mutex: &sync.Mutex{}, buffer: &bytes.Buffer{}},
+	}
+	certificatePath, certificateErr := filepath.Abs(filepath.Join("assets", "server_rsa.crt"))
+	keyPath, keyErr := filepath.Abs(filepath.Join("assets", "server_rsa.key"))
+
+	if err := errors.Join(certificateErr, keyErr); err != nil {
+		state.Fatalf("Could not find the server certificate, error: %s", err.Error())
+	}
+
+	command := exec.CommandContext(state.Context(), "openssl", "s_server", "-dtls1_2", "-accept", net.JoinHostPort(destinationPrefix.Addr().String(), port), "-cert", certificatePath, "-key", keyPath, "-naccept", "1")
+	command.WaitDelay = time.Second
+	command.Stdout = server.output
+	command.Stderr = server.output
+	stdin, stdinErr := command.StdinPipe()
+
+	if stdinErr != nil {
+		state.Fatalf("Could not open the stdin of the dtls server, error: %s", stdinErr.Error())
+	}
+
+	startErr := command.Start()
+
+	if startErr != nil {
+		state.Fatalf("Could not start the dtls server, error: %s", startErr.Error())
+	}
+
+	state.Cleanup(func() {
+		// the server is done or not needed any more, the context of the test is cancelled after the cleanups
+		killErr := command.Process.Kill()
+
+		if (killErr != nil) && !errors.Is(killErr, os.ErrProcessDone) {
+			state.Errorf("Could not stop the dtls server, error: %s", killErr.Error())
+		}
+
+		// the exit status of a killed server says nothing
+		_ = command.Wait()
+
+		if closeErr := stdin.Close(); (closeErr != nil) && !errors.Is(closeErr, os.ErrClosed) {
+			state.Errorf("Could not close the stdin of the dtls server, error: %s", closeErr.Error())
+		}
+	})
+
+	_, isListening := server.waitFor(dtlsServerReady, commandTimeout)
+
+	if !isListening {
+		state.Fatalf("Could not start the dtls server, output: %s", server.output.String())
+	}
+
+	return
+}
+
+// wait until the server printed text, output is everything it printed so far
+func (server dtlsServer) waitFor(text string, timeout time.Duration) (output string, found bool) {
+	deadline := time.Now().Add(timeout)
+
+	for {
+		output = server.output.String()
+		found = strings.Contains(output, text)
+
+		if found || time.Now().After(deadline) {
+			return
+		}
+
+		time.Sleep(dtlsPollInterval)
+	}
+}
+
+// a port of loopback no udp socket has now, the server binds it right after
+func freeUDPPort() (port string, err error) {
+	connection, listenErr := net.ListenPacket("udp", net.JoinHostPort(destinationPrefix.Addr().String(), "0"))
+
+	if err = listenErr; err != nil {
+		return
+	}
+
+	_, port, err = net.SplitHostPort(connection.LocalAddr().String())
+	err = errors.Join(err, connection.Close())
 	return
 }

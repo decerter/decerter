@@ -25,11 +25,14 @@ type UDPSessionKey struct {
 }
 
 // one client socket to one original destination over one upstream socket
+// dtls reads a DTLS session, it is nil for any other datagrams; isRaw relays a DTLS session that can't be decrypted past the rules, they would only see ciphertext
 type UDPSession struct {
 	key                 UDPSessionKey
 	flow                redirect.Flow
 	cmdline             string
 	upstream            *net.UDPConn
+	dtls                *dtlsInterception
+	isRaw               bool
 	replyControlMessage []byte
 	startTime           time.Time
 	lastActive          atomic.Int64

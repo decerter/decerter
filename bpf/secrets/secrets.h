@@ -15,9 +15,10 @@
 #define MASTER_KEY_SIZE		48
 #define SECRET_SIZE			64
 
-//SSL_CONNECTION.version values
+//SSL_CONNECTION.version values, DTLS 1.2 keeps its secrets like TLS 1.2: the master key in the session
 #define TLS1_2_VERSION		0x0303
 #define TLS1_3_VERSION		0x0304
+#define DTLS1_2_VERSION		0xFEFD
 
 //SSL object type, only a TLS connection has this layout, QUIC objects reach the same functions with another one
 #define SSL_TYPE_SSL_CONNECTION	0
@@ -112,7 +113,7 @@ struct client_random {
 //Secrets of one TLS session, Go trims the TLS 1.3 secrets to the hash length
 //OpenSSL: the raw fields read from the SSL_CONNECTION, Go takes the hash length from cipher_id and derives the handshake traffic secrets from handshake_secret and handshake_traffic_hash
 //BoringSSL: the secrets ssl_log_secret was called with, secret_length is the TLS 1.3 hash length it passed and the handshake traffic secrets come as they are, cipher_id, handshake_secret and handshake_traffic_hash stay zero
-//tls_version: 0x0303 (TLS 1.2) or 0x0304 (TLS 1.3), cipher_id: SSL_CIPHER.id, master_key_length: used only to gate TLS 1.2
+//tls_version: 0x0303 (TLS 1.2), 0x0304 (TLS 1.3) or 0xFEFD (DTLS 1.2), cipher_id: SSL_CIPHER.id, master_key_length: used only to gate TLS 1.2 and DTLS 1.2
 //secret_length: 0 for OpenSSL, secret_mask: the ssl_log_secret labels seen so far, *_BIT
 struct tls_secrets {
 	uint32_t tls_version;
@@ -219,7 +220,7 @@ static __always_inline bool buffer_nonzero(const uint8_t *buffer, uint32_t lengt
 	return result != 0;
 }
 
-//Check if the version appropriate secret is present: TLS 1.3 needs both application traffic secrets, TLS 1.2 a 48 byte master key, this filters the not yet complete handshakes
+//Check if the version appropriate secret is present: TLS 1.3 needs both application traffic secrets, TLS 1.2 and DTLS 1.2 a 48 byte master key, this filters the not yet complete handshakes
 bool secrets_complete(struct tls_secrets *secrets)
 {
 	if (!secrets)
@@ -232,6 +233,7 @@ bool secrets_complete(struct tls_secrets *secrets)
 	case TLS1_3_VERSION:
 		return buffer_nonzero(secrets->client_app_traffic_secret, SECRET_SIZE) && buffer_nonzero(secrets->server_app_traffic_secret, SECRET_SIZE);
 	case TLS1_2_VERSION:
+	case DTLS1_2_VERSION:
 		return (secrets->master_key_length == MASTER_KEY_SIZE) && buffer_nonzero(secrets->master_key, MASTER_KEY_SIZE);
 	default:
 		return false;
@@ -380,7 +382,7 @@ uint32_t label_bit(struct label *label)
 }
 
 //Read the version and the client_random of a BoringSSL ssl_st and check them against the label, a mismatch means the offsets don't fit this libssl
-//TLS 1.3 labels need version 0x0304 and a 32 or 48 byte secret, CLIENT_RANDOM 0x0301 to 0x0303 and a 48 byte master secret
+//TLS 1.3 labels need version 0x0304 and a 32 or 48 byte secret, CLIENT_RANDOM 0x0301 to 0x0303 or DTLS 1.2 and a 48 byte master secret
 uint16_t read_boringssl_session(uint64_t ssl_address, uint32_t secret_bit, uint64_t secret_length, struct tls_secrets *secrets)
 {
 	if ((!ssl_address) || (!secrets))
@@ -414,7 +416,12 @@ uint16_t read_boringssl_session(uint64_t ssl_address, uint32_t secret_bit, uint6
 	switch (secret_bit)
 	{
 	case CLIENT_RANDOM_BIT:
-		if ((version < TLS1_VERSION) || (version > TLS1_2_VERSION) || (secret_length != MASTER_KEY_SIZE))
+		if (((version < TLS1_VERSION) || (version > TLS1_2_VERSION)) && (version != DTLS1_2_VERSION))
+		{
+			return LAYOUT;
+		}
+
+		if (secret_length != MASTER_KEY_SIZE)
 		{
 			return LAYOUT;
 		}

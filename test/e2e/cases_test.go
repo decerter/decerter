@@ -33,6 +33,14 @@ type suiteRow struct {
 }
 
 var (
+	// the lines of the DTLS cases, none is part of another
+	dtlsLine       = "dtls line from the client"
+	dtlsEditedLine = "DTLS LINE EDITED BY DECERTER"
+	dtlsGrowLine   = "dtls line that grows"
+	dtlsGrownLine  = "DTLS LINE GROWN BY DECERTER:" + strings.Repeat(" grown", 400) + " END"
+)
+
+var (
 	suiteRows = []suiteRow{
 		{IANA: "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305", OpenSSL: "ECDHE-RSA-CHACHA20-POLY1305", ID: tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305},
 		{IANA: "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305", OpenSSL: "ECDHE-ECDSA-CHACHA20-POLY1305", ID: tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305},
@@ -162,6 +170,70 @@ func TestCipherSuitesPositive(state *testing.T) {
 			}
 		})
 	}
+}
+
+// one DTLS 1.2 session: openssl s_client sends Line with Suite (empty is OpenSSL's default), the server has to print Expected
+type dtlsCase struct {
+	Name     string
+	Suite    string
+	Line     string
+	Expected string
+}
+
+// Test if the DTLS rule changes the line openssl s_client sends to openssl s_server over DTLS 1.2 with AES-GCM, ChaCha20-Poly1305 and AES-CBC, and an edit that no longer fits one datagram.
+func TestDTLSPositive(state *testing.T) {
+	startDecerter(state, InterceptDecerterMode, "", []intercept.Rule{newDTLSRule()})
+
+	for _, positive := range dtlsCases(true) {
+		server := startDTLSServer(state)
+		output, err := runDTLSClient(state.Context(), testUser, server, positive.Suite, positive.Line, positive.Expected)
+
+		if err == nil && strings.Contains(output, positive.Line) {
+			err = fmt.Errorf("dtls server printed the original line %q, output:\n%s", positive.Line, output)
+		}
+
+		if err != nil {
+			state.Errorf("Test of the DTLS rewrite failed, case: %s, error: %s", positive.Name, err.Error())
+		}
+	}
+}
+
+// Test if the DTLS rule leaves the session of an unselected user alone.
+func TestDTLSNegative(state *testing.T) {
+	startDecerter(state, InterceptDecerterMode, "", []intercept.Rule{newDTLSRule()})
+
+	for _, negative := range dtlsCases(false) {
+		server := startDTLSServer(state)
+		_, err := runDTLSClient(state.Context(), otherUser, server, negative.Suite, negative.Line, negative.Expected)
+
+		if err != nil {
+			state.Errorf("Test of the DTLS rewrite failed, case: %s, error: %s", negative.Name, err.Error())
+		}
+	}
+}
+
+// the rule of the DTLS cases: the short line becomes another one, the long one grows past what a datagram of MinDatagramLength holds, so it goes on as several records
+func newDTLSRule() (rule dtlsRule) {
+	rule = dtlsRule{replacements: map[string]string{dtlsLine: dtlsEditedLine, dtlsGrowLine: dtlsGrownLine}}
+	return
+}
+
+// the DTLS sessions of the tests, isEdited expects what the rule makes of the lines
+func dtlsCases(isEdited bool) (cases []dtlsCase) {
+	cases = []dtlsCase{
+		{Name: "default suite", Suite: "", Line: dtlsLine, Expected: dtlsEditedLine},
+		{Name: "chacha20-poly1305", Suite: "ECDHE-RSA-CHACHA20-POLY1305", Line: dtlsLine, Expected: dtlsEditedLine},
+		{Name: "aes-cbc", Suite: "ECDHE-RSA-AES128-SHA", Line: dtlsLine, Expected: dtlsEditedLine},
+		{Name: "grown past one datagram", Suite: "", Line: dtlsGrowLine, Expected: dtlsGrownLine},
+	}
+
+	if !isEdited {
+		for index := range cases {
+			cases[index].Expected = cases[index].Line
+		}
+	}
+
+	return
 }
 
 // the legacy calls of eproxy's tests: plain HTTP, TLS 1.2 with each certificate and TLS 1.3, all asking for /

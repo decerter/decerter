@@ -50,11 +50,11 @@ func Print(output io.Writer, message Message, result Result, isPassed bool) {
 	_, _ = io.WriteString(output, builder.String())
 }
 
-// the start of every line of a flow: process, destination, client and for TLS the session
+// the start of every line of a flow: process, destination, client and for TLS and DTLS the session
 func LinePrefix(flow Flow, layer Layer) (prefix string) {
 	prefix = fmt.Sprintf("%s pid=%d uid=%d comm=%s %s client=%s", layer, flow.Tgid, flow.UID, flow.Comm, flow.Destination, flow.Client)
 
-	if layer == TLSLayer {
+	if (layer == TLSLayer) || (layer == DTLSLayer) {
 		prefix += fmt.Sprintf(" version=%s suite=%s", tlsrecord.VersionName(flow.Session.Version), tlsrecord.CipherSuiteName(flow.Session.CipherSuite))
 	}
 

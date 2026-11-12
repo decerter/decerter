@@ -3,6 +3,7 @@
 package capture
 
 import (
+	"bytes"
 	"fmt"
 	"slices"
 	"syscall"
@@ -191,7 +192,13 @@ func isTLS(currentFlow *flow) (isTLS bool) {
 
 // the comment of the first decrypted packet of a session
 func describe(session tlsrecord.Session) (text string) {
-	text = "decrypted tls session: " + tlsrecord.VersionName(session.Version) + ", " + tlsrecord.CipherSuiteName(session.CipherSuite)
+	layer := "tls"
+
+	if session.Version == tlsrecord.VersionDTLS12 {
+		layer = "dtls"
+	}
+
+	text = "decrypted " + layer + " session: " + tlsrecord.VersionName(session.Version) + ", " + tlsrecord.CipherSuiteName(session.CipherSuite)
 
 	if session.ServerName != "" {
 		text += ", server name " + session.ServerName
@@ -205,7 +212,7 @@ func describe(session tlsrecord.Session) (text string) {
 }
 
 // plaintext mode: write a synthesized packet for what the captured packet brings instead of the packet
-// a UDP datagram is built again with its payload as it is, a TCP segment goes through the stream of its direction, everything else is written as it was captured
+// a UDP datagram is built again with its payload as it is or with the records of its DTLS session, a TCP segment goes through the stream of its direction, everything else is written as it was captured
 func (recorder *recorder) synthesize(cookie uint64, currentFlow *flow, packet capturebpf.Packet, pcapPacket pcapng.Packet, now time.Time) (err error) {
 	header, ok := parsePacket(packet.Data)
 
@@ -213,11 +220,7 @@ func (recorder *recorder) synthesize(cookie uint64, currentFlow *flow, packet ca
 	case ok && (header.protocol == syscall.IPPROTO_TCP):
 		err = recorder.synthesizeTCP(cookie, currentFlow, packet, header, pcapPacket.Timestamp, now)
 	case ok && (header.protocol == syscall.IPPROTO_UDP) && (uint32(len(packet.Data)) == packet.Length) && (packet.Length <= maxDatagramLength):
-		// an egress datagram has no checksum yet, the new one has
-		recorder.buffer = UDPPacket(recorder.buffer[:0], header.source, header.destination, packet.Data[header.payloadOffset:])
-		pcapPacket.OriginalLength = uint32(len(recorder.buffer))
-		pcapPacket.Data = recorder.buffer
-		err = recorder.write(pcapPacket)
+		err = recorder.synthesizeUDP(cookie, currentFlow, packet, pcapPacket, now)
 	default:
 		// nothing a packet can be built from: another protocol, a fragment, a packet the snaplen cut inside its headers or a cut datagram
 		err = recorder.write(pcapPacket)
@@ -365,7 +368,7 @@ func (recorder *recorder) payload(cookie uint64, currentFlow *flow, direction tl
 		isClientHello, _ := tlsrecord.IsClientHello(data)
 
 		if isClientHello {
-			recorder.hold(cookie, currentFlow, now)
+			recorder.hold(cookie, currentFlow, false, now)
 		}
 	}
 
@@ -453,6 +456,11 @@ func (recorder *recorder) unlock(cookie uint64, heldFlow *flow) (err error) {
 		return
 	}
 
+	if heldFlow.isDTLS {
+		err = recorder.unlockDatagrams(cookie, heldFlow)
+		return
+	}
+
 	sessionSecrets, found, lookupErr := secrets.Lookup(heldFlow.clientRandom, recorder.secretsBpfMaps)
 
 	if lookupErr != nil {
@@ -489,6 +497,11 @@ func (recorder *recorder) unlock(cookie uint64, heldFlow *flow) (err error) {
 // the session is not decrypted, or not any further: what the record layer did not give back is written as it was captured, in the order of its packets, and so is the rest of the connection
 // a session that never had its secrets is written whole from its ClientHello on
 func (recorder *recorder) abandon(cookie uint64, currentFlow *flow, reason string) (err error) {
+	if currentFlow.isDTLS {
+		err = recorder.abandonDatagrams(cookie, currentFlow, reason)
+		return
+	}
+
 	connection := currentFlow.connection
 
 	if currentFlow.state == heldFlowState {
@@ -673,7 +686,16 @@ func (recorder *recorder) end(cookie uint64, currentFlow *flow, timestamp uint64
 }
 
 // the connection is over without a packet that says so, the capture stopped or its socket is gone: no closing packet is made up, a comment that still waits gets an ACK of its own
+// a DTLS session that still waits for its secrets gets a last lookup and is written
 func (recorder *recorder) leave(cookie uint64, currentFlow *flow, reason string, now time.Time) (err error) {
+	if currentFlow.isDTLS {
+		if currentFlow.state == heldFlowState {
+			err = recorder.giveUp(cookie, currentFlow, reason)
+		}
+
+		return
+	}
+
 	connection := currentFlow.connection
 
 	if (connection == nil) || connection.isClosed {
@@ -817,5 +839,234 @@ func (recorder *recorder) writeSegment(connection *connection, direction tlsreco
 	}
 
 	err = recorder.write(packet)
+	return
+}
+
+// one captured UDP datagram in plaintext mode: a DTLS ClientHello from the client starts to hold the session until its secrets are there, a decrypted session gives one datagram per application data record
+// every other datagram is built again with its payload as it is, an egress datagram has no checksum yet and the new one has
+func (recorder *recorder) synthesizeUDP(cookie uint64, currentFlow *flow, packet capturebpf.Packet, pcapPacket pcapng.Packet, now time.Time) (err error) {
+	payload, _ := transportPayload(packet.Data)
+
+	if (currentFlow.state == watchedFlowState) && !packet.IsIngress && tlsrecord.IsDTLSClientHello(payload) {
+		recorder.hold(cookie, currentFlow, true, now)
+	}
+
+	if !currentFlow.isDTLS {
+		err = recorder.writeDatagram(pcapPacket, packet.Data, "")
+		return
+	}
+
+	switch currentFlow.state {
+	case heldFlowState:
+		err = recorder.holdDatagram(cookie, currentFlow, packet, pcapPacket)
+	case decryptedFlowState:
+		err = recorder.decryptDatagram(cookie, currentFlow, pcapPacket)
+	default:
+		err = recorder.writeDatagram(pcapPacket, packet.Data, takeFlowNote(currentFlow))
+	}
+
+	return
+}
+
+// keep a datagram of a DTLS session until its secrets are there, the client's datagrams are read until the ClientHello is whole
+func (recorder *recorder) holdDatagram(cookie uint64, heldFlow *flow, packet capturebpf.Packet, pcapPacket pcapng.Packet) (err error) {
+	// the record of the reader is used again for the next packet
+	pcapPacket.Data = bytes.Clone(packet.Data)
+	heldFlow.held = append(heldFlow.held, pcapPacket)
+	heldFlow.heldBytes += len(pcapPacket.Data)
+	recorder.heldBytes += len(pcapPacket.Data)
+
+	if !heldFlow.hasClientRandom && !packet.IsIngress {
+		payload, _ := transportPayload(packet.Data)
+		_, feedErr := heldFlow.conn.Feed(tlsrecord.ClientDirection, payload)
+
+		if feedErr != nil {
+			err = recorder.abandonDatagrams(cookie, heldFlow, clientHelloReason+": "+feedErr.Error())
+			return
+		}
+
+		session := heldFlow.conn.Session()
+
+		// the random of a ClientHello that was read is never all zero
+		if session.ClientRandom != [32]byte{} {
+			heldFlow.hasClientRandom = true
+			heldFlow.clientRandom = session.ClientRandom
+			heldFlow.serverName = session.ServerName
+		}
+	}
+
+	switch {
+	case heldFlow.heldBytes > maxHoldBytes:
+		err = recorder.giveUp(cookie, heldFlow, holdLimitReason)
+	case recorder.heldBytes > maxTotalHoldBytes:
+		err = recorder.giveUp(cookie, heldFlow, totalLimitReason)
+	default:
+	}
+
+	return
+}
+
+// the secrets of a held DTLS session are there: a new record layer gets them first and then the held datagrams, so every record is written with the timestamp of its own datagram
+func (recorder *recorder) unlockDatagrams(cookie uint64, heldFlow *flow) (err error) {
+	sessionSecrets, found, lookupErr := secrets.Lookup(heldFlow.clientRandom, recorder.secretsBpfMaps)
+
+	if lookupErr != nil {
+		recorder.logger.Debug("Could not look up tls secrets", "error", lookupErr, "cookie", cookie)
+	}
+
+	if !found {
+		return
+	}
+
+	conn := tlsrecord.NewDTLS(maxHoldBytes, false)
+	_, err = conn.SetSecrets(sessionSecrets)
+
+	if err != nil {
+		return
+	}
+
+	held := heldFlow.held
+	recorder.dropHeld(cookie, heldFlow)
+	heldFlow.conn = &conn
+	heldFlow.state = decryptedFlowState
+	recorder.keyedSessions++
+	recorder.logger.Info("Decrypting dtls session", "cookie", cookie, "waited", time.Since(heldFlow.holdStart).Round(time.Millisecond))
+
+	for _, heldPacket := range held {
+		err = recorder.decryptDatagram(cookie, heldFlow, heldPacket)
+
+		if err != nil {
+			return
+		}
+	}
+
+	return
+}
+
+// the held datagrams of a DTLS session without its secrets are written as they came, so is every later datagram of the flow
+func (recorder *recorder) abandonDatagrams(cookie uint64, currentFlow *flow, reason string) (err error) {
+	held := currentFlow.held
+
+	if currentFlow.state == heldFlowState {
+		recorder.keylessSessions++
+		addFlowNote(currentFlow, "dtls session not decrypted: "+reason)
+		recorder.logger.Warn("Could not decrypt dtls session, the flow is written encrypted", "reason", reason, "cookie", cookie)
+	} else {
+		addFlowNote(currentFlow, "dtls decryption stopped, the rest of the flow is written encrypted: "+reason)
+		recorder.logger.Warn("Could not decrypt dtls session further, the rest of the flow is written encrypted", "reason", reason, "cookie", cookie)
+	}
+
+	recorder.dropHeld(cookie, currentFlow)
+	currentFlow.state = passedFlowState
+	currentFlow.conn = nil
+
+	for _, heldPacket := range held {
+		err = recorder.writeDatagram(heldPacket, heldPacket.Data, takeFlowNote(currentFlow))
+
+		if err != nil {
+			return
+		}
+	}
+
+	return
+}
+
+// the flow keeps no packets and is not held any more
+func (recorder *recorder) dropHeld(cookie uint64, heldFlow *flow) {
+	recorder.heldBytes -= heldFlow.heldBytes
+	recorder.holding = slices.DeleteFunc(recorder.holding, func(heldCookie uint64) bool {
+		return heldCookie == cookie
+	})
+	heldFlow.held = nil
+	heldFlow.heldBytes = 0
+}
+
+// one datagram of a decrypted DTLS session: a synthesized datagram with the same addresses and timestamp for each application data record, nothing for the handshake and the alerts
+// a datagram that can't be read ends the decryption, it and the rest of the flow are written as they came
+func (recorder *recorder) decryptDatagram(cookie uint64, currentFlow *flow, pcapPacket pcapng.Packet) (err error) {
+	header, ok := parsePacket(pcapPacket.Data)
+
+	if !ok {
+		err = recorder.write(pcapPacket)
+		return
+	}
+
+	direction := tlsrecord.ClientDirection
+
+	if pcapPacket.Direction == pcapng.InboundDirection {
+		direction = tlsrecord.ServerDirection
+	}
+
+	records, feedErr := currentFlow.conn.Feed(direction, pcapPacket.Data[header.payloadOffset:])
+
+	for _, record := range records {
+		if !record.Decrypted || (record.ContentType != tlsrecord.ApplicationDataContentType) {
+			continue
+		}
+
+		if !currentFlow.isDescribed {
+			currentFlow.isDescribed = true
+			addFlowNote(currentFlow, describe(currentFlow.conn.Session()))
+		}
+
+		recorder.buffer = UDPPacket(recorder.buffer[:0], header.source, header.destination, record.Payload)
+		packet := pcapPacket
+		packet.OriginalLength = uint32(len(recorder.buffer))
+		packet.Data = recorder.buffer
+		packet.Comment = takeFlowNote(currentFlow)
+		err = recorder.write(packet)
+
+		if err != nil {
+			return
+		}
+	}
+
+	if feedErr != nil {
+		err = recorder.abandonDatagrams(cookie, currentFlow, feedErr.Error())
+
+		if err != nil {
+			return
+		}
+
+		err = recorder.writeDatagram(pcapPacket, pcapPacket.Data, takeFlowNote(currentFlow))
+	}
+
+	return
+}
+
+// a captured UDP datagram built again with its payload as it is, comment is the one of the packet
+func (recorder *recorder) writeDatagram(pcapPacket pcapng.Packet, data []byte, comment string) (err error) {
+	header, ok := parsePacket(data)
+
+	if !ok || (header.protocol != syscall.IPPROTO_UDP) {
+		pcapPacket.Comment = comment
+		err = recorder.write(pcapPacket)
+		return
+	}
+
+	recorder.buffer = UDPPacket(recorder.buffer[:0], header.source, header.destination, data[header.payloadOffset:])
+	pcapPacket.OriginalLength = uint32(len(recorder.buffer))
+	pcapPacket.Data = recorder.buffer
+	pcapPacket.Comment = comment
+	err = recorder.write(pcapPacket)
+	return
+}
+
+func addFlowNote(currentFlow *flow, text string) {
+	if currentFlow.note != "" {
+		currentFlow.note += "; "
+	}
+
+	currentFlow.note += text
+}
+
+// the comment of the next packet of a DTLS flow, empty when there is none
+func takeFlowNote(currentFlow *flow) (comment string) {
+	if currentFlow.note == "" {
+		return
+	}
+
+	comment = notePrefix + currentFlow.note
+	currentFlow.note = ""
 	return
 }

@@ -164,9 +164,15 @@ func stopOrPrint(conn *tlsrecord.Conn, observer *TLSObserver, records []tlsrecor
 	return
 }
 
-// the start of every TLS line, the same fields as the flow line of printFlow
+// the start of every TLS or DTLS line, the same fields as the flow line of printFlow
 func tlsLinePrefix(flow redirect.Flow, client netip.AddrPort, session tlsrecord.Session) (prefix string) {
-	prefix = fmt.Sprintf("tls pid=%d uid=%d comm=%s %s client=%s version=%s suite=%s", flow.Tgid, flow.UID, flow.Comm, flow.OriginalDestination, client, tlsrecord.VersionName(session.Version), tlsrecord.CipherSuiteName(session.CipherSuite))
+	layer := intercept.TLSLayer
+
+	if session.Version == tlsrecord.VersionDTLS12 {
+		layer = intercept.DTLSLayer
+	}
+
+	prefix = fmt.Sprintf("%s pid=%d uid=%d comm=%s %s client=%s version=%s suite=%s", layer, flow.Tgid, flow.UID, flow.Comm, flow.OriginalDestination, client, tlsrecord.VersionName(session.Version), tlsrecord.CipherSuiteName(session.CipherSuite))
 	return
 }
 

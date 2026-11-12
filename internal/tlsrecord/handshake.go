@@ -67,13 +67,13 @@ func isReadHandshake(messageType uint8) (isRead bool) {
 	return
 }
 
-// ClientHello (RFC 8446 section 4.1.2), the layout up to the extensions is the same in TLS 1.2
-func parseClientHello(body []byte) (hello clientHello, err error) {
+// ClientHello (RFC 8446 section 4.1.2), the layout up to the extensions is the same in TLS 1.2; DTLS has a cookie behind the session id (RFC 6347 section 4.2.1)
+func parseClientHello(body []byte, hasCookie bool) (hello clientHello, err error) {
 	input := cryptobyte.String(body)
 	var legacyVersion uint16
-	var sessionID, cipherSuites, compressionMethods cryptobyte.String
+	var sessionID, cookie, cipherSuites, compressionMethods cryptobyte.String
 
-	if !input.ReadUint16(&legacyVersion) || !input.CopyBytes(hello.random[:]) || !input.ReadUint8LengthPrefixed(&sessionID) || !input.ReadUint16LengthPrefixed(&cipherSuites) || !input.ReadUint8LengthPrefixed(&compressionMethods) {
+	if !input.ReadUint16(&legacyVersion) || !input.CopyBytes(hello.random[:]) || !input.ReadUint8LengthPrefixed(&sessionID) || (hasCookie && !input.ReadUint8LengthPrefixed(&cookie)) || !input.ReadUint16LengthPrefixed(&cipherSuites) || !input.ReadUint8LengthPrefixed(&compressionMethods) {
 		err = fmt.Errorf("%w: client hello", ErrMalformedHandshake)
 		return
 	}
