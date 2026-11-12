@@ -24,6 +24,10 @@ const (
 	buildProp string = "# begin build properties\nro.build.version.sdk=35\nro.build.version.release=15\nro.product.cpu.abi=x86_64\n\nnot a property\n"
 	// a build.prop without the version, as a root-only file looks to a reader without root
 	emptyBuildProp string = "# begin build properties\n"
+	// Android 16: spaces around keys and values are trimmed, a later line wins, a value may hold another =
+	android16BuildProp string = "ro.build.version.sdk = 35\n  ro.build.version.sdk=36  \nro.build.version.release = 16\nro.build.description=sdk_gphone64_x86_64-user 16 BP22.250325.006 13344233 release-keys,a=b\n"
+	// a developer preview names its SDK, the release is a code name
+	previewBuildProp string = "ro.build.version.sdk=Baklava\nro.build.version.release=Baklava\n# ro.build.version.release=15\n"
 )
 
 // write build.prop under a new root, nil writes nothing as on Linux
@@ -76,6 +80,14 @@ func TestDetectPositive(state *testing.T) {
 			BuildProp: new(emptyBuildProp),
 			Expected:  platform.Platform{Type: platform.AndroidType, SDK: 0, Release: "", DataDirectory: "/data/local/tmp/decerter.d", APISocket: "@decerter-api"},
 		},
+		{
+			BuildProp: new(android16BuildProp),
+			Expected:  platform.Platform{Type: platform.AndroidType, SDK: 36, Release: "16", DataDirectory: "/data/local/tmp/decerter.d", APISocket: "@decerter-api"},
+		},
+		{
+			BuildProp: new(previewBuildProp),
+			Expected:  platform.Platform{Type: platform.AndroidType, SDK: 0, Release: "Baklava", DataDirectory: "/data/local/tmp/decerter.d", APISocket: "@decerter-api"},
+		},
 	}
 
 	for _, positive := range positiveCases {
@@ -85,6 +97,25 @@ func TestDetectPositive(state *testing.T) {
 			state.Errorf("Test of platform.Detect failed, error: %s", err.Error())
 			return
 		}
+	}
+}
+
+// Test if platform.Detect returns with the expected output for a build.prop that exists but can't be read.
+func TestDetectUnreadablePositive(state *testing.T) {
+	// a directory in place of the file: it is there, so it is Android, but reading it fails even for root
+	root := state.TempDir()
+	err := os.MkdirAll(filepath.Join(root, "system", "build.prop"), 0o755)
+
+	if err != nil {
+		state.Fatalf("Test of platform.Detect failed, cannot create directory, error: %s", err.Error())
+	}
+
+	expected := platform.Platform{Type: platform.AndroidType, SDK: 0, Release: "", DataDirectory: "/data/local/tmp/decerter.d", APISocket: "@decerter-api"}
+	detected := platform.Detect(root)
+
+	if !reflect.DeepEqual(detected, expected) {
+		state.Errorf("Test of platform.Detect function failed, platform should be %+v, platform: %+v", expected, detected)
+		return
 	}
 }
 
