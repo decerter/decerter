@@ -207,3 +207,23 @@ func TestUDPPacketPositive(state *testing.T) {
 		return
 	}
 }
+
+// Test if capture.UDPPacket returns with the expected output for a datagram whose checksum adds up to zero: it is sent as all ones (RFC 768).
+func TestUDPPacketZeroChecksumPositive(state *testing.T) {
+	source := capture.Endpoint{Address: netip.MustParseAddr("192.0.2.10"), Port: 5353}
+	destination := capture.Endpoint{Address: netip.MustParseAddr("198.51.100.20"), Port: 53}
+	// the checksum of two zero bytes, as payload in their place it makes the sum all ones and the checksum zero
+	probe := capture.UDPPacket(nil, source, destination, []byte{0, 0})
+	payload := bytes.Clone(probe[26:28])
+	datagram, err := checkPacket(capture.UDPPacket(nil, source, destination, payload), packetCase{Source: source, Destination: destination, Flags: 0, Payload: payload}, protocolUDP)
+
+	if err != nil {
+		state.Errorf("Test of capture.UDPPacket failed, error: %s", err.Error())
+		return
+	}
+
+	if checksum := binary.BigEndian.Uint16(datagram[6:]); checksum != 0xFFFF {
+		state.Errorf("Test of capture.UDPPacket function failed, checksum should be 0xffff, checksum: 0x%04x", checksum)
+		return
+	}
+}

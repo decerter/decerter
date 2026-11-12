@@ -89,6 +89,13 @@ func testAddOrder() (err error) {
 		{Name: "fin before its data", Segments: []segmentCase{{0, 10, -1, false}, {26, 0, -1, true}, {20, 6, -1, false}, {10, 10, -1, false}, {26, 0, -1, true}, {20, 6, -1, false}}, Expected: "abcdefghijklmnopqrstuvwxyz."},
 		{Name: "cut by the snaplen", Segments: []segmentCase{{0, 10, -1, false}, {10, 10, 4, false}, {20, 6, -1, false}}, Expected: "abcdefghijklmn[6]uvwxyz"},
 		{Name: "cut behind a hole", Segments: []segmentCase{{10, 10, 4, false}, {20, 6, 0, false}, {0, 10, -1, false}, {10, 16, -1, false}}, Expected: "abcdefghijklmn[12]"},
+		{Name: "reordered and duplicated", Segments: []segmentCase{{20, 6, -1, false}, {10, 10, -1, false}, {20, 6, -1, false}, {10, 10, -1, false}, {0, 10, -1, false}, {0, 26, -1, false}}, Expected: "abcdefghijklmnopqrstuvwxyz"},
+		{Name: "one segment over several that wait", Segments: []segmentCase{{10, 2, -1, false}, {14, 2, -1, false}, {18, 2, -1, false}, {8, 14, -1, false}, {0, 8, -1, false}}, Expected: "abcdefghijklmnopqrstuv"},
+		{Name: "overlapping both ends of a waiting segment", Segments: []segmentCase{{10, 4, -1, false}, {6, 12, -1, false}, {0, 6, -1, false}, {12, 14, -1, false}}, Expected: "abcdefghijklmnopqrstuvwxyz"},
+		{Name: "segments without payload", Segments: []segmentCase{{0, 0, -1, false}, {0, 10, -1, false}, {10, 0, -1, false}, {30, 0, -1, false}, {10, 16, -1, false}}, Expected: "abcdefghijklmnopqrstuvwxyz"},
+		{Name: "duplicated fin", Segments: []segmentCase{{0, 26, -1, true}, {0, 26, -1, true}, {26, 0, -1, true}}, Expected: "abcdefghijklmnopqrstuvwxyz."},
+		{Name: "data behind the fin", Segments: []segmentCase{{0, 10, -1, true}, {10, 16, -1, false}, {0, 26, -1, false}}, Expected: "abcdefghij."},
+		{Name: "missing and cut", Segments: []segmentCase{{0, 4, -1, false}, {12, 8, 2, false}, {8, 4, -1, false}, {4, 4, -1, false}, {20, 6, -1, true}}, Expected: "abcdefghijklmn[6]uvwxyz."},
 	}
 
 	for _, positive := range positiveCases {
@@ -274,6 +281,80 @@ func TestFlushPositive(state *testing.T) {
 
 	if err != nil {
 		state.Errorf("Test of capture.Stream.Flush failed, error: %s", err.Error())
+		return
+	}
+}
+
+// Test if capture.Stream.Add returns with the expected output when copies of the same bytes differ: the copy that came first stays.
+func TestAddOverlapPositive(state *testing.T) {
+	data := streamBytes()
+	// one of the two copies is in upper case, so the output shows which one stayed
+	positiveCases := []struct {
+		Name       string
+		First      [2]int
+		Second     [2]int
+		UpperFirst bool
+		Expected   string
+	}{
+		// a waiting segment that a longer retransmit covers, and a retransmit of bytes that were passed on already
+		{Name: "waiting first", First: [2]int{5, 10}, Second: [2]int{0, 15}, UpperFirst: true, Expected: "abcdeFGHIJklmno"},
+		{Name: "passed on first", First: [2]int{0, 10}, Second: [2]int{5, 15}, UpperFirst: false, Expected: "abcdefghijKLMNO"},
+	}
+
+	for _, positive := range positiveCases {
+		stream := capture.NewStream(streamLimit)
+		stream.Start(firstSequence)
+		first := bytes.Clone(data[positive.First[0]:positive.First[1]])
+		second := bytes.Clone(data[positive.Second[0]:positive.Second[1]])
+
+		if positive.UpperFirst {
+			first = bytes.ToUpper(first)
+		} else {
+			second = bytes.ToUpper(second)
+		}
+
+		text := render(stream.Add(firstSequence+uint32(positive.First[0]), first, uint32(len(first)), false, nil))
+		text += render(stream.Add(firstSequence+uint32(positive.Second[0]), second, uint32(len(second)), false, nil))
+
+		if text != positive.Expected {
+			state.Errorf("Test of capture.Stream.Add function failed, case %q, output should be %q, output: %q", positive.Name, positive.Expected, text)
+			return
+		}
+	}
+}
+
+// Test if capture.Stream.Add and capture.Stream.Acknowledge return with the expected errors: segments and acknowledgments that are not part of the stream change nothing.
+func TestAddNegative(state *testing.T) {
+	data := streamBytes()
+	stream := capture.NewStream(streamLimit)
+	stream.Start(firstSequence)
+	text := render(stream.Add(firstSequence, data[:10], 10, false, nil))
+	// further away than any receive window, and before the start of the stream
+	text += render(stream.Add(firstSequence+10+(1<<30)+1, data[10:20], 10, false, nil))
+	text += render(stream.Add(firstSequence-100, data[:10], 10, false, nil))
+	text += render(stream.Acknowledge(firstSequence+10+(1<<30)+1, nil))
+	text += render(stream.Acknowledge(firstSequence+5, nil))
+
+	if (text != "abcdefghij") || (stream.Held() != 0) {
+		state.Errorf("Test of capture.Stream.Add function failed, output should be %q with nothing held, output: %q, held: %d", "abcdefghij", text, stream.Held())
+		return
+	}
+
+	// the stream goes on where it was
+	text = render(stream.Add(firstSequence+10, data[10:26], 16, true, nil))
+
+	if text != "klmnopqrstuvwxyz." {
+		state.Errorf("Test of capture.Stream.Add function failed, output should be %q, output: %q", "klmnopqrstuvwxyz.", text)
+		return
+	}
+
+	// a finished stream takes nothing more
+	text = render(stream.Add(firstSequence+27, data[:4], 4, false, nil))
+	text += render(stream.Acknowledge(firstSequence+40, nil))
+	text += render(stream.Flush(nil))
+
+	if text != "" {
+		state.Errorf("Test of capture.Stream.Add function failed, a finished stream should give nothing, output: %q", text)
 		return
 	}
 }
