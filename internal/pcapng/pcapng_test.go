@@ -6,12 +6,25 @@ package pcapng_test
 
 import (
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
+	"math/big"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/decerter/decerter/internal/pcapng"
 )
@@ -412,4 +425,261 @@ func TestFlushNegative(state *testing.T) {
 		state.Errorf("Test of pcapng.Writer.Flush function failed, error should be %v, error: %v", pcapng.ErrWrite, err)
 		return
 	}
+}
+
+// Test if pcapng.Writer in stream mode returns with the expected errors, and a block longer than the buffer reaches the output in one write.
+func TestStreamNegative(state *testing.T) {
+	_, err := pcapng.New(fullWriter{}, snaplen, true)
+
+	if !errors.Is(err, pcapng.ErrWrite) {
+		state.Errorf("Test of pcapng.New function failed, a stream should write the section header at once, error should be %v, error: %v", pcapng.ErrWrite, err)
+		return
+	}
+
+	// a file is buffered, a block longer than the buffer goes to the output when it is written
+	writer, err := pcapng.New(fullWriter{}, snaplen, false)
+
+	if err != nil {
+		state.Fatalf("Test of pcapng.Writer.WriteSecrets failed, cannot create writer, error: %s", err.Error())
+	}
+
+	err = writer.WriteSecrets(bytes.Repeat([]byte("CLIENT_RANDOM 00 11\n"), 4000))
+
+	if !errors.Is(err, pcapng.ErrWrite) {
+		state.Errorf("Test of pcapng.Writer.WriteSecrets function failed, error should be %v, error: %v", pcapng.ErrWrite, err)
+		return
+	}
+
+	output := writeRecorder{writes: nil}
+	writer, err = pcapng.New(&output, snaplen, true)
+
+	if err != nil {
+		state.Fatalf("Test of pcapng.Writer.WriteSecrets failed, cannot create writer, error: %s", err.Error())
+	}
+
+	err = writer.WriteSecrets(bytes.Repeat([]byte("CLIENT_RANDOM 00 11\n"), 4000))
+
+	if (err != nil) || (len(output.writes) != 3) || (len(output.writes[2]) != 12+8+80000) {
+		state.Errorf("Test of pcapng.Writer.WriteSecrets function failed, the long block should be the third write, writes: %d, error: %v", len(output.writes), err)
+		return
+	}
+}
+
+// Test if tshark decrypts a TLS 1.3 session with the keys of the Decryption Secrets Block of a file the writer made, skipped without tshark.
+func TestTsharkPositive(state *testing.T) {
+	tshark, err := exec.LookPath("tshark")
+
+	if err != nil {
+		state.Skipf("Test of pcapng with tshark skipped, no tshark on this host: %s", err.Error())
+	}
+
+	packets, keyLog, err := tlsPackets()
+
+	if err != nil {
+		state.Fatalf("Test of pcapng with tshark failed, cannot record a TLS session, error: %s", err.Error())
+	}
+
+	// with the key log in the file tshark finds the request, without it only TLS records
+	positiveCases := []struct {
+		KeyLog   []byte
+		Expected string
+	}{
+		{KeyLog: keyLog, Expected: "/decerter-dsb-check\n"},
+		{KeyLog: nil, Expected: ""},
+	}
+
+	for _, positive := range positiveCases {
+		path := filepath.Join(state.TempDir(), "capture.pcapng")
+		err = writeFile(path, positive.KeyLog, packets)
+
+		if err != nil {
+			state.Fatalf("Test of pcapng with tshark failed, cannot write file, error: %s", err.Error())
+		}
+
+		// no profile and no key log file of the user, only what is in the capture
+		command := exec.CommandContext(state.Context(), tshark, "-n", "-C", "Default", "-o", "tls.keylog_file:", "-r", path, "-Y", "http.request", "-T", "fields", "-e", "http.request.uri")
+		stdErr := &bytes.Buffer{}
+		command.Stderr = stdErr
+		output, runErr := command.Output()
+
+		if runErr != nil {
+			state.Errorf("Test of pcapng with tshark failed, tshark error: %s, stderr: %s", runErr.Error(), stdErr.String())
+			return
+		}
+
+		if string(output) != positive.Expected {
+			state.Errorf("Test of pcapng with tshark failed, with %d bytes of key log the output should be %q, output: %q, stderr: %s", len(positive.KeyLog), positive.Expected, output, stdErr.String())
+			return
+		}
+	}
+}
+
+// the capture as decerter writes it: the key log of the session before its packets
+func writeFile(path string, keyLog []byte, packets []pcapng.Packet) (err error) {
+	file, createErr := os.Create(path)
+
+	if err = createErr; err != nil {
+		return
+	}
+
+	defer func() {
+		err = errors.Join(err, file.Close())
+	}()
+
+	writer, newErr := pcapng.New(file, 1<<18, false)
+
+	if err = newErr; err != nil {
+		return
+	}
+
+	if keyLog != nil {
+		err = writer.WriteSecrets(keyLog)
+
+		if err != nil {
+			return
+		}
+	}
+
+	for _, packet := range packets {
+		err = writer.WritePacket(packet)
+
+		if err != nil {
+			return
+		}
+	}
+
+	err = writer.Flush()
+	return
+}
+
+// a crypto/tls TLS 1.3 session over a pipe with an HTTP/1.1 request, its bytes as IPv4 TCP packets of 10.0.0.1:40000 to 10.0.0.2:443
+// with a handshake in front; keyLog is what crypto/tls logged for it
+func tlsPackets() (packets []pcapng.Packet, keyLog []byte, err error) {
+	certificate, certificateErr := newCertificate()
+
+	if err = certificateErr; err != nil {
+		return
+	}
+
+	keyLogBuffer := &bytes.Buffer{}
+	clientSide, serverSide := net.Pipe()
+	chunks := &[]chunk{}
+	client := tls.Client(tap{Conn: clientSide, mutex: &sync.Mutex{}, chunks: chunks}, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS13, NextProtos: []string{"http/1.1"}, KeyLogWriter: keyLogBuffer})
+	server := tls.Server(serverSide, &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS13, NextProtos: []string{"http/1.1"}, SessionTicketsDisabled: true})
+	request := "GET /decerter-dsb-check HTTP/1.1\r\nHost: decerter.test\r\n\r\n"
+	response := "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"
+	serverErrChannel := make(chan error, 1)
+
+	// test tls server
+	go func() {
+		buffer := make([]byte, len(request))
+		_, readErr := io.ReadFull(server, buffer)
+		_, writeErr := server.Write([]byte(response))
+		serverErrChannel <- errors.Join(readErr, writeErr)
+	}()
+
+	_, writeErr := client.Write([]byte(request))
+	_, readErr := io.ReadFull(client, make([]byte, len(response)))
+	err = errors.Join(writeErr, readErr, <-serverErrChannel, clientSide.Close(), serverSide.Close())
+
+	if err != nil {
+		return
+	}
+
+	keyLog = keyLogBuffer.Bytes()
+	clientAddress, serverAddress := [4]byte{10, 0, 0, 1}, [4]byte{10, 0, 0, 2}
+	sequences := [2]uint32{1000, 5000}
+	addPacket := func(direction pcapng.Direction, flags byte, payload []byte) {
+		source, destination := clientAddress, serverAddress
+		sourcePort, destinationPort := uint16(40000), uint16(443)
+
+		if direction == pcapng.InboundDirection {
+			source, destination = destination, source
+			sourcePort, destinationPort = destinationPort, sourcePort
+		}
+
+		ip := []byte{0x45, 0, 0, 0, 0, 0, 0x40, 0, 64, 6, 0, 0}
+		binary.BigEndian.PutUint16(ip[2:4], uint16(40+len(payload)))
+		ip = append(append(ip, source[:]...), destination[:]...)
+		segment := binary.BigEndian.AppendUint16(nil, sourcePort)
+		segment = binary.BigEndian.AppendUint16(segment, destinationPort)
+		segment = binary.BigEndian.AppendUint32(segment, sequences[direction])
+		segment = binary.BigEndian.AppendUint32(segment, sequences[1-direction])
+		segment = append(segment, 5<<4, flags, 0xff, 0xff, 0, 0, 0, 0)
+		data := append(append(ip, segment...), payload...)
+		packets = append(packets, pcapng.Packet{Timestamp: timestamp + uint64(len(packets))*1000, Direction: direction, OriginalLength: uint32(len(data)), Data: data, Comment: ""})
+		sequences[direction] += uint32(len(payload))
+
+		// SYN and FIN take a sequence number
+		if (flags & 0x03) != 0 {
+			sequences[direction]++
+		}
+	}
+	addPacket(pcapng.OutboundDirection, 0x02, nil)
+	addPacket(pcapng.InboundDirection, 0x12, nil)
+	addPacket(pcapng.OutboundDirection, 0x10, nil)
+
+	for _, current := range *chunks {
+		addPacket(current.direction, 0x18, current.data)
+	}
+
+	return
+}
+
+// one write of the client or one read of what the server sent
+type chunk struct {
+	direction pcapng.Direction
+	data      []byte
+}
+
+// the client end of the pipe, it records the stream in the order the client sees it
+type tap struct {
+	net.Conn
+	mutex  *sync.Mutex
+	chunks *[]chunk
+}
+
+func (tap tap) Read(buffer []byte) (count int, err error) {
+	count, err = tap.Conn.Read(buffer)
+
+	if count > 0 {
+		tap.mutex.Lock()
+		defer tap.mutex.Unlock()
+		*tap.chunks = append(*tap.chunks, chunk{direction: pcapng.InboundDirection, data: bytes.Clone(buffer[:count])})
+	}
+
+	return
+}
+
+func (tap tap) Write(buffer []byte) (count int, err error) {
+	tap.mutex.Lock()
+	*tap.chunks = append(*tap.chunks, chunk{direction: pcapng.OutboundDirection, data: bytes.Clone(buffer)})
+	tap.mutex.Unlock()
+	count, err = tap.Conn.Write(buffer)
+	return
+}
+
+// a self signed ECDSA certificate
+func newCertificate() (certificate tls.Certificate, err error) {
+	key, keyErr := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+
+	if err = keyErr; err != nil {
+		return
+	}
+
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "decerter.test"},
+		DNSNames:     []string{"decerter.test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, createErr := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+
+	if err = createErr; err != nil {
+		return
+	}
+
+	certificate = tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+	return
 }
