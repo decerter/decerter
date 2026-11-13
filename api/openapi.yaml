@@ -46,14 +46,21 @@ info:
     capture decides a flow when it starts.
 
     Holding and rules need `decerter run --intercept`; otherwise those operations answer 409. Rules and the hold queue
-    with layer `http` take whole HTTP/1 messages after the record rules (HTTP/2 is read-only: its frames go on through
-    the record layer, and its messages carry a note while such a rule or hold exists): the editable form is the head as it came
-    followed by the body without chunk framing. An unchanged message goes on as it came; a changed one keeps its head
-    as written, gets its Content-Length set to the body (or one added when it had a body framing and now has neither
-    field) and a chunked body is sent as one chunk with the original trailers. A message is kept back from its first
-    byte while such a rule or hold may want it; a body over 1 MiB, a message not whole within the hold timeout, or a
-    TLS alert or KeyUpdate in between lets it go on as it came, with a note on its exchange. A held message blocks only
-    its own direction of its own flow. Rules run in this order: the rules compiled into decerter (the identity rule of
+    with layer `http` take whole HTTP/1 and HTTP/2 messages after the record rules. On HTTP/1 the editable form is the
+    head as it came followed by the body without chunk framing. An unchanged message goes on as it came; a changed one
+    keeps its head as written, gets its Content-Length set to the body (or one added when it had a body framing and now
+    has neither field) and a chunked body is sent as one chunk with the original trailers. On HTTP/2 the form is one
+    `name: value` line per header field, the pseudo-header fields first in their order (`:method`, `:scheme`,
+    `:authority`, `:path`, or `:status`), then the others in theirs, lines ending in CR LF, a blank line and the body
+    (the DATA payloads joined, without padding); trailers are not in it and go on as they came, a gRPC body is raw bytes
+    with its length prefixes (not recomputed). An unchanged form goes on as the original frames; an edited one gets its
+    head encoded again (names in lower case, `content-length` set to the body when there is one) and a changed body new
+    DATA frames without padding; decerter keeps HPACK and flow control consistent for both peers. A form that is no HTTP/2
+    message lets the message go on as it came, with a note; a dropped HTTP/2 message resets its stream for both peers.
+    A message is kept back from its first byte while such a rule or hold may want it; a body over 1 MiB, a message not
+    whole within the hold timeout, or (HTTP/1) a TLS alert or KeyUpdate in between lets it go on as it came, with a note
+    on its exchange. A held message blocks only its own direction of its own flow, on HTTP/2 only its own stream (and the
+    new streams the client opens after a held request). Rules run in this order: the rules compiled into decerter (the identity rule of
     `--intercept`), then the API rules in the order they were added, then the hold queue, so a held message shows what
     goes on the wire.
 
@@ -299,9 +306,9 @@ paths:
         With `enabled` the messages of `direction` (default `up`, the client's) and `layer` whose flow matches `filter`
         (default every flow) are held until forwarded, dropped or the hold timeout of `decerter run --hold-timeout`
         (default 60 s) passes, which forwards them as they are then. `layer` empty holds the messages of every record
-        layer, `http` whole HTTP/1 messages (their hold carries `exchange_id`), another layer only its own. Turning it
-        off forwards every held message as it is. A new filter, direction or layer applies to the messages that come
-        after it.
+        layer, `http` whole HTTP/1 and HTTP/2 messages (their hold carries `exchange_id`), another layer only its own.
+        Turning it off forwards every held message as it is. A new filter, direction or layer applies to the messages
+        that come after it.
       requestBody:
         required: true
         content:
@@ -710,7 +717,8 @@ components:
       type: string
       description: |
         tcp is one read of a plain stream, tls and dtls the application data of one record, udp one datagram; http is
-        one whole HTTP/1 message (head as it came, body without chunk framing) and only appears in rules and holds,
+        one whole HTTP/1 message (head as it came, body without chunk framing) or HTTP/2 message (`name: value` lines,
+        pseudo-header fields first, CR LF, a blank line, the body without padding) and only appears in rules and holds,
         which take it only when they name it
       enum: [tcp, tls, udp, dtls, http]
     Side:
@@ -793,9 +801,8 @@ components:
             note:
               type: string
               description: |
-                Why the HTTP layer let the message go on as it came (too large, too slow, not HTTP/1 any more); on HTTP/2
-                also a reset or GOAWAY, a cut gRPC message, and that rules and holds of layer http skipped it (HTTP/2 is
-                read-only)
+                Why the HTTP layer let the message go on as it came (too large, too slow, not HTTP/1 any more, an edit
+                that is no HTTP/2 message); on HTTP/2 also a reset or GOAWAY, a cut gRPC message, or a drop
             grpc_messages:
               type: array
               description: |

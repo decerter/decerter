@@ -28,7 +28,8 @@ const (
 	UDPLayer Layer = "udp"
 	// the application data of one decrypted DTLS record, a datagram can carry several
 	DTLSLayer Layer = "dtls"
-	// one whole HTTP/1 request or response, assembled from the messages of a tcp or TLS flow after their rules: the head as it came and the body without its chunk framing
+	// one whole HTTP request or response, assembled from the messages of a tcp or TLS flow after their rules: on HTTP/1 the head as it came and the body without its chunk framing,
+	// on HTTP/2 one "name: value" line per field (pseudo-header fields first, CR LF), a blank line and the body of its DATA frames without padding
 	HTTPLayer Layer = "http"
 )
 
@@ -126,6 +127,15 @@ func (pipeline *Pipeline) Wants(layer Layer) (isWanted bool) {
 func (pipeline *Pipeline) Matches(message Message) (isMatch bool) {
 	isMatch = slices.ContainsFunc(pipeline.rules, func(rule Rule) bool {
 		return rule.Match(message)
+	})
+	return
+}
+
+// whether a rule of the pipeline may wait in Apply for the message, a hold of the hold queue
+func (pipeline *Pipeline) Blocks(message Message) (isBlocking bool) {
+	isBlocking = slices.ContainsFunc(pipeline.rules, func(rule Rule) bool {
+		blockingRule, isBlockingRule := rule.(BlockingRule)
+		return isBlockingRule && blockingRule.Blocks(message)
 	})
 	return
 }

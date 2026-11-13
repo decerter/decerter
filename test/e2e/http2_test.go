@@ -207,6 +207,8 @@ func runClient(mode string, arguments []string) (code int) {
 		output, err = getLarge(ctx, client, target)
 	case "grpc":
 		output, err = callGRPC(ctx, client, target)
+	case "edit":
+		output, err = getEdits(ctx, client, target)
 	default:
 		err = fmt.Errorf("unknown client mode %q", mode)
 	}
@@ -369,12 +371,12 @@ func headerOf(headers []v1.Header, name string) (value string) {
 
 // Test if the API shows HTTP/2 as exchanges over TLS 1.2 and 1.3 with ALPN h2 and over h2c with prior knowledge: curl's three parallel requests on one connection with a field
 // the dynamic table repeats, a 2 MiB response over many DATA frames and WINDOW_UPDATEs, and a gRPC unary call (curl over TLS, the Go client over h2c, since Go's own TLS gives
-// decerter no secrets); a rule of layer http changes none of it and leaves its note.
+// decerter no secrets); a rule of layer http that finds nothing changes none of it, though every message goes through it.
 func TestHTTP2Positive(state *testing.T) {
 	client := startAPIDecerter(state, InterceptDecerterMode, []intercept.Rule{intercept.IdentityRule{}})
 	events := client.subscribe(state)
 	clientPath := copyClient(state)
-	ruleRequest := v1.RuleRequest{Filter: "", Direction: v1.UpDirection, Layer: v1.HTTPLayer, Find: v1.Value{Type: v1.TextValueType, Value: "/a"}, Replace: v1.Value{Type: v1.TextValueType, Value: "/z"}}
+	ruleRequest := v1.RuleRequest{Filter: "", Direction: v1.UpDirection, Layer: v1.HTTPLayer, Find: v1.Value{Type: v1.TextValueType, Value: "/nowhere"}, Replace: v1.Value{Type: v1.TextValueType, Value: "/z"}}
 	status, err := client.call(state.Context(), http.MethodPost, "/rules", ruleRequest, nil)
 
 	if (err != nil) || (status != http.StatusCreated) {
@@ -425,7 +427,7 @@ func TestHTTP2Positive(state *testing.T) {
 
 			if (err == nil) && ((exchange.Protocol != "HTTP/2") || (exchange.StreamID%2 != 1) || (request == nil) || (response == nil) || (request.Method != "GET") || (request.URL != scheme+"://"+host+request.Target) ||
 				(headerOf(request.Headers, repeatedField) != repeatedValue) || (headerOf(request.Headers, ":authority") != host) || (response.Status != 200) || (response.BodyLength != len(request.Target)) ||
-				(response.Framing != v1.FramesFraming) || (request.State != v1.CompleteHTTPState) || (response.State != v1.CompleteHTTPState) || request.Edited || !strings.Contains(request.Note, "do not take HTTP/2")) {
+				(response.Framing != v1.FramesFraming) || (request.State != v1.CompleteHTTPState) || (response.State != v1.CompleteHTTPState) || request.Edited || (request.Note != "")) {
 				err = fmt.Errorf("exchange %+v, request: %+v, response: %+v", exchange, request, response)
 			}
 		}

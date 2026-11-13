@@ -78,7 +78,7 @@ const (
 	UDPLayer Layer = "udp"
 	// the application data of one DTLS record
 	DTLSLayer Layer = "dtls"
-	// one whole HTTP/1 request or response of an exchange: the head as it came and the body without its chunk framing; only rules and holds name it, the messages of a flow are records
+	// one whole HTTP request or response of an exchange: on HTTP/1 the head as it came and the body without its chunk framing, on HTTP/2 "name: value" lines (pseudo-header fields first), a blank line and the body; only rules and holds name it, the messages of a flow are records
 	HTTPLayer Layer = "http"
 )
 
@@ -228,7 +228,7 @@ type HistoryLimits struct {
 }
 
 // GET /api/v1/status and PUT /api/v1/intercept; Available is false unless decerter runs with --intercept, holding and rules need the intercept pipeline
-// Layer empty holds the messages of every record layer (tcp, tls, udp, dtls), http whole HTTP/1 messages instead
+// Layer empty holds the messages of every record layer (tcp, tls, udp, dtls), http whole HTTP/1 and HTTP/2 messages instead
 type InterceptState struct {
 	Available          bool      `json:"available"`
 	Enabled            bool      `json:"enabled"`
@@ -432,7 +432,7 @@ type HTTPHead struct {
 // one HTTP message of an exchange as it went on, without its body (read it with GET /api/v1/exchanges/{id}/body)
 // URL is the scheme of the flow, the Host field and the target of a request; BodyLength is the body that went on without its chunk framing, StoredLength what the history kept of it
 // Edited is true when a rule or an edit of layer http changed the message, Original is then its head as it came and OriginalBodyLength its body; Verdict drop is a message that did not go on
-// Note says why the HTTP layer did not take the message as a whole: too large, too slow, or the stream stopped being HTTP/1; for HTTP/2 also a reset, a GOAWAY or that rules skip it
+// Note says why the HTTP layer did not take the message as a whole: too large, too slow, or the stream stopped being HTTP/1; an edit that is no HTTP/2 message; for HTTP/2 also a reset, a GOAWAY or a drop
 // GRPCMessages are the length-prefixed messages of a gRPC body (HTTP/2 with content-type application/grpc…), at most 1000
 type HTTPMessage struct {
 	HTTPHead

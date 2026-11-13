@@ -9,9 +9,11 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -21,6 +23,7 @@ import (
 
 	"github.com/decerter/decerter/api"
 	"github.com/decerter/decerter/internal/filter"
+	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/tlsrecord"
 )
@@ -69,23 +72,34 @@ type http2Piece struct {
 	IsClose   bool
 }
 
-// feed the pieces through the HTTP layer as the intercepting senders do; every output must be what went in, the layer never changes HTTP/2
+// feed the pieces through the HTTP layer as the intercepting senders do; what goes on in each direction must be what went in, a layer that edits nothing changes no byte
 func feedHTTP2(flowHTTP *httpFlow, flow intercept.Flow, pieces []http2Piece) (err error) {
+	outputs, inputs := relayHTTP2(flowHTTP, flow, pieces)
+
+	for index := range outputs {
+		if !bytes.Equal(outputs[index], inputs[index]) {
+			err = errors.Join(err, fmt.Errorf("the layer changed the bytes of direction %d: %d bytes in, %d out", index, len(inputs[index]), len(outputs[index])))
+		}
+	}
+
+	return
+}
+
+// the pieces through the HTTP layer as the intercepting senders do: what went on in each direction and what came in
+func relayHTTP2(flowHTTP *httpFlow, flow intercept.Flow, pieces []http2Piece) (outputs [2][]byte, inputs [2][]byte) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	for _, piece := range pieces {
 		if piece.IsClose {
-			if output := flowHTTP.close(context.Background(), flow, piece.Direction, logger); len(output) != 0 {
-				err = errors.Join(err, errors.New("the close let bytes go on"))
-			}
-
+			outputs[piece.Direction] = append(outputs[piece.Direction], flowHTTP.close(context.Background(), flow, piece.Direction, logger)...)
 			continue
 		}
 
-		output := flowHTTP.feed(context.Background(), flow, piece.Direction, piece.Data, true, logger)
+		inputs[piece.Direction] = append(inputs[piece.Direction], piece.Data...)
+		outputs[piece.Direction] = append(outputs[piece.Direction], flowHTTP.feed(context.Background(), flow, piece.Direction, piece.Data, true, logger).output...)
 
-		if !output.isWhole || !bytes.Equal(output.output, piece.Data) {
-			err = errors.Join(err, errors.New("the layer changed the bytes"))
+		for _, direction := range []tlsrecord.Direction{tlsrecord.ClientDirection, tlsrecord.ServerDirection} {
+			outputs[direction] = append(outputs[direction], flowHTTP.flush(direction, logger)...)
 		}
 	}
 
@@ -93,7 +107,7 @@ func feedHTTP2(flowHTTP *httpFlow, flow intercept.Flow, pieces []http2Piece) (er
 }
 
 // Test if the HTTP layer of the proxy returns with the expected output for HTTP/2: h2c with prior knowledge whose server speaks first, and TLS with ALPN h2 with a gRPC call,
-// a server push and a refused stream; a rule of layer http only adds its note, the bytes go on as they came.
+// a server push and a refused stream; a rule of layer http that finds nothing changes no byte, though the frames go on whole.
 func TestHTTP2LayerPositive(state *testing.T) {
 	// h2c: the server's SETTINGS come before the preface, the preface is cut in two
 	client, server := newHTTP2Writer(), newHTTP2Writer()
@@ -114,7 +128,7 @@ func TestHTTP2LayerPositive(state *testing.T) {
 		{Direction: tlsrecord.ClientDirection, Data: nil, IsClose: true},
 		{Direction: tlsrecord.ServerDirection, Data: nil, IsClose: true},
 	}
-	recorder, flowHTTP, _ := httpTestLayer(state, []intercept.MatchSpec{{Directions: intercept.UpDirections, Layer: intercept.HTTPLayer, Find: "a", Replace: "b"}}, time.Second)
+	recorder, flowHTTP, _ := httpTestLayer(state, []intercept.MatchSpec{{Directions: intercept.UpDirections, Layer: intercept.HTTPLayer, Find: "nowhere", Replace: "b"}}, time.Second)
 	flow := intercept.Flow{ID: 1, Destination: netip.MustParseAddrPort("127.0.0.1:8080")}
 	err := errors.Join(client.err, server.err, feedHTTP2(flowHTTP, flow, pieces))
 	exchanges, _, _ := recorder.Exchanges(1, 0, 10)
@@ -122,7 +136,7 @@ func TestHTTP2LayerPositive(state *testing.T) {
 	if (err != nil) || (len(exchanges) != 1) || (exchanges[0].Protocol != "HTTP/2") || (exchanges[0].StreamID != 1) || (exchanges[0].Request == nil) || (exchanges[0].Response == nil) ||
 		(exchanges[0].Request.Method != "GET") || (exchanges[0].Request.Target != "/a?b=c") || (exchanges[0].Request.URL != "http://h2c.test:8080/a?b=c") || (exchanges[0].Request.Framing != api.NoneFraming) ||
 		(exchanges[0].Response.Status != 200) || (exchanges[0].Response.Framing != api.FramesFraming) || (exchanges[0].Response.BodyLength != 5) || (exchanges[0].Response.State != api.CompleteHTTPState) ||
-		!strings.Contains(exchanges[0].Request.Note, "layer http rules and holds do not take HTTP/2") || (exchanges[0].Request.Headers[0].Name != ":method") {
+		(exchanges[0].Request.Note != "") || exchanges[0].Request.Edited || (exchanges[0].Request.Headers[0].Name != ":method") {
 		state.Errorf("Test of the http/2 layer failed, h2c should be one exchange, exchanges: %+v, error: %v", exchanges, err)
 		return
 	}
@@ -218,5 +232,186 @@ func TestHTTP2LayerNegative(state *testing.T) {
 	if (err != nil) || (len(exchanges) != 1) || (exchanges[0].Protocol != "HTTP/1.1") || (exchanges[0].Request.Method != "PRI") || (exchanges[0].StreamID != 0) {
 		state.Errorf("Test of the http/2 layer failed, a request like the preface should be HTTP/1, exchanges: %+v, error: %v", exchanges, err)
 		return
+	}
+}
+
+// the messages of an HTTP/2 byte stream as its receiver decodes them: the fields of each stream's header blocks, joined as "name: value" lines, and its DATA
+func readHTTP2(data []byte) (heads map[uint32][]string, bodies map[uint32][]byte, err error) {
+	heads, bodies = map[uint32][]string{}, map[uint32][]byte{}
+	framer := http2.NewFramer(nil, bytes.NewReader(bytes.TrimPrefix(data, []byte(http2.ClientPreface))))
+	framer.ReadMetaHeaders = hpack.NewDecoder(4096, nil)
+
+	for {
+		frame, readErr := framer.ReadFrame()
+
+		if errors.Is(readErr, io.EOF) {
+			return
+		}
+
+		if err = readErr; err != nil {
+			return
+		}
+
+		switch typed := frame.(type) {
+		case *http2.MetaHeadersFrame:
+			for _, field := range typed.Fields {
+				heads[typed.StreamID] = append(heads[typed.StreamID], field.Name+": "+field.Value)
+			}
+		case *http2.DataFrame:
+			bodies[typed.StreamID] = append(bodies[typed.StreamID], typed.Data()...)
+		default:
+		}
+	}
+}
+
+// Test if the HTTP layer of proxy.interceptTCP returns with the expected output for HTTP/2 over h2c: a rule rewrites :path, others grow one response by 200 KiB and shrink another
+// to a few bytes with its content-length; and a held response stalls only its stream, the others go on, and it follows edited once the hold queue lets it go.
+func TestInterceptHTTP2Positive(state *testing.T) {
+	grown := strings.Repeat("g", 200<<10)
+	specs := []intercept.MatchSpec{
+		{Directions: intercept.UpDirections, Layer: intercept.HTTPLayer, Find: ":path: /\r\n", Replace: ":path: /test\r\n"},
+		{Directions: intercept.DownDirections, Layer: intercept.HTTPLayer, Find: "GROW", Replace: "GROW" + grown},
+		{Directions: intercept.DownDirections, Layer: intercept.HTTPLayer, FindType: intercept.RegexValueType, Find: "z+", Replace: "tiny"},
+	}
+	recorder, flowHTTP, pipeline := httpTestLayer(state, specs, 5*time.Second)
+	client, server := newHTTP2Writer(), newHTTP2Writer()
+	client.buffer.WriteString(http2.ClientPreface)
+	client.err = errors.Join(client.err, client.framer.WriteSettings(http2.Setting{ID: http2.SettingInitialWindowSize, Val: 1 << 20}), client.framer.WriteWindowUpdate(0, 1<<20))
+	client.headers(1, true, ":method", "GET", ":scheme", "http", ":authority", "h2c.test", ":path", "/")
+	client.headers(3, true, ":method", "GET", ":scheme", "http", ":authority", "h2c.test", ":path", "/grow")
+	client.headers(5, true, ":method", "GET", ":scheme", "http", ":authority", "h2c.test", ":path", "/shrink")
+	server.err = errors.Join(server.err, server.framer.WriteSettings(), server.framer.WriteSettingsAck())
+	server.headers(1, false, ":status", "200")
+	server.err = errors.Join(server.err, server.framer.WriteData(1, true, []byte("index")))
+	server.headers(3, false, ":status", "200")
+	server.err = errors.Join(server.err, server.framer.WriteData(3, true, []byte("GROW")))
+	server.headers(5, false, ":status", "200", "content-length", "30000")
+
+	for range 2 {
+		server.err = errors.Join(server.err, server.framer.WriteData(5, false, bytes.Repeat([]byte("z"), 15000)))
+	}
+
+	server.err = errors.Join(server.err, server.framer.WriteData(5, true, nil))
+	upstream, downstream, err := relayWith(state, client.take(), server.take(), pipeline, flowHTTP)
+	requests, _, upErr := readHTTP2(upstream)
+	responses, bodies, downErr := readHTTP2(downstream)
+
+	if err = errors.Join(err, client.err, server.err, upErr, downErr); (err != nil) || !slices.Contains(requests[1], ":path: /test") || !slices.Contains(requests[3], ":path: /grow") ||
+		(string(bodies[1]) != "index") || (string(bodies[3]) != "GROW"+grown) || (string(bodies[5]) != "tiny") || !slices.Equal(responses[5], []string{":status: 200", "content-length: 4"}) {
+		state.Errorf("Test of the http/2 layer of proxy.interceptTCP failed, the rules should edit the messages, requests: %v, responses: %v, bodies: %d %d %q, error: %v", requests, responses, len(bodies[1]), len(bodies[3]), shorten(string(bodies[5])), err)
+		return
+	}
+
+	exchanges, _, _ := recorder.Exchanges(1, 0, 10)
+
+	if (len(exchanges) != 3) || !exchanges[0].Request.Edited || (exchanges[0].Response.State != api.CompleteHTTPState) || !exchanges[2].Response.Edited || (exchanges[2].Response.OriginalBodyLength != 30000) || (exchanges[2].Response.BodyLength != 4) {
+		state.Errorf("Test of the http/2 layer of proxy.interceptTCP failed, the history should show the edits, exchanges: %+v", exchanges)
+		return
+	}
+
+	// a hold on stream 1 while stream 3 goes on
+	holds := intercept.NewHoldQueue(5*time.Second, nil)
+	scope, err := filter.Parse("http2.streamid == 1")
+
+	if err != nil {
+		state.Fatalf("Could not parse the filter, error: %s", err.Error())
+	}
+
+	holds.Set(true, &scope, intercept.DownDirections, intercept.HTTPLayer)
+	recorder = history.New(history.DefaultLimits(), nil)
+	recorder.OpenFlow(1, filter.Values{}, [32]byte{})
+	flowHTTP = newHTTPFlow(1, recorder, HTTPLayer{Pipeline: intercept.New(nil, nil, nil).Derive([]intercept.Rule{holds}), Timeout: 5 * time.Second})
+	notifyChannel := make(chan tlsrecord.Direction, 16)
+	flowHTTP.notify = func(direction tlsrecord.Direction) {
+		notifyChannel <- direction
+	}
+	flow := intercept.Flow{ID: 1, Destination: netip.MustParseAddrPort("127.0.0.1:443"), Session: tlsrecord.Session{Version: tls.VersionTLS13, Protocol: "h2"}}
+	client, server = newHTTP2Writer(), newHTTP2Writer()
+	client.buffer.WriteString(http2.ClientPreface)
+	client.err = errors.Join(client.err, client.framer.WriteSettings())
+	client.headers(1, true, ":method", "GET", ":scheme", "https", ":authority", "hold.test", ":path", "/held")
+	client.headers(3, true, ":method", "GET", ":scheme", "https", ":authority", "hold.test", ":path", "/free")
+	server.err = errors.Join(server.err, server.framer.WriteSettings(), server.framer.WriteSettingsAck())
+	server.headers(1, false, ":status", "200")
+	server.err = errors.Join(server.err, server.framer.WriteData(1, true, []byte("one")))
+	server.headers(3, false, ":status", "200")
+	server.err = errors.Join(server.err, server.framer.WriteData(3, true, []byte("three")))
+	outputs, _ := relayHTTP2(flowHTTP, flow, []http2Piece{{Direction: tlsrecord.ClientDirection, Data: client.take(), IsClose: false}, {Direction: tlsrecord.ServerDirection, Data: server.take(), IsClose: false}})
+	_, bodies, err = readHTTP2(outputs[tlsrecord.ServerDirection])
+	held := holds.List()
+
+	// the hold queue takes the message on its own goroutine
+	for start := time.Now(); (len(held) == 0) && (time.Since(start) < 5*time.Second); held = holds.List() {
+		time.Sleep(time.Millisecond)
+	}
+
+	if err = errors.Join(err, client.err, server.err); (err != nil) || (string(bodies[3]) != "three") || (len(bodies[1]) != 0) || (len(held) != 1) || (string(held[0].Plain) != ":status: 200\r\n\r\none") || !flowHTTP.isWaiting(tlsrecord.ServerDirection) {
+		state.Errorf("Test of the http/2 layer of proxy.interceptTCP failed, the held response should stall only its stream, bodies: %v, held: %+v, error: %v", bodies, held, err)
+		return
+	}
+
+	_, err = holds.Edit(held[0].Message.ID, []byte(":status: 200\r\ncontent-type: text/plain\r\n\r\nedited body"))
+	err = errors.Join(err, holds.Forward(held[0].Message.ID))
+
+	// the server's direction is told, the client's may be told before for the window of the held body
+	for isTold := false; !isTold && (err == nil); {
+		select {
+		case direction := <-notifyChannel:
+			isTold = direction == tlsrecord.ServerDirection
+		case <-time.After(5 * time.Second):
+			err = errors.New("the sender was never told")
+		}
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	output := flowHTTP.flush(tlsrecord.ServerDirection, logger)
+	responses, bodies, readErr := readHTTP2(append(outputs[tlsrecord.ServerDirection], output...))
+	exchange, _ := recorder.Exchange(1)
+
+	if err = errors.Join(err, readErr); (err != nil) || (string(bodies[1]) != "edited body") || !slices.Equal(responses[1], []string{":status: 200", "content-type: text/plain"}) || flowHTTP.isWaiting(tlsrecord.ServerDirection) ||
+		(exchange.Response == nil) || !exchange.Response.Edited {
+		state.Errorf("Test of the http/2 layer of proxy.interceptTCP failed, the released response should follow edited, responses: %v, bodies: %v, exchange: %+v, error: %v", responses, bodies, exchange, err)
+	}
+}
+
+// Test if the HTTP layer of proxy.interceptTCP returns with the expected errors for HTTP/2: an edit that is no HTTP/2 message lets the message go on as it came with a note,
+// and a message that does not come whole before the timeout goes on as it came, its stream is not stalled.
+func TestInterceptHTTP2Negative(state *testing.T) {
+	recorder, flowHTTP, _ := httpTestLayer(state, []intercept.MatchSpec{{Directions: intercept.DownDirections, Layer: intercept.HTTPLayer, Find: ":status: 200", Replace: ":status 200"}}, 100*time.Millisecond)
+	flow := intercept.Flow{ID: 1, Destination: netip.MustParseAddrPort("127.0.0.1:443"), Session: tlsrecord.Session{Version: tls.VersionTLS13, Protocol: "h2"}}
+	client, server := newHTTP2Writer(), newHTTP2Writer()
+	client.buffer.WriteString(http2.ClientPreface)
+	client.err = errors.Join(client.err, client.framer.WriteSettings())
+	client.headers(1, true, ":method", "GET", ":scheme", "https", ":authority", "bad.test", ":path", "/")
+	client.headers(3, true, ":method", "GET", ":scheme", "https", ":authority", "bad.test", ":path", "/slow")
+	server.err = errors.Join(server.err, server.framer.WriteSettings(), server.framer.WriteSettingsAck())
+	server.headers(1, true, ":status", "200")
+	server.headers(3, false, ":status", "200")
+	server.err = errors.Join(server.err, server.framer.WriteData(3, false, []byte("part")))
+	serverData := server.take()
+	outputs, _ := relayHTTP2(flowHTTP, flow, []http2Piece{{Direction: tlsrecord.ClientDirection, Data: client.take(), IsClose: false}, {Direction: tlsrecord.ServerDirection, Data: serverData, IsClose: false}})
+	responses, _, err := readHTTP2(outputs[tlsrecord.ServerDirection])
+
+	if err = errors.Join(err, client.err, server.err); (err != nil) || !slices.Equal(responses[1], []string{":status: 200"}) || (len(responses[3]) != 0) {
+		state.Errorf("Test of the http/2 layer of proxy.interceptTCP failed, the bad edit should go on as it came and the slow response wait, responses: %v, error: %v", responses, err)
+		return
+	}
+
+	// the slow response goes on as it came once its time is over
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	time.Sleep(150 * time.Millisecond)
+	deadline := flowHTTP.deadline(tlsrecord.ServerDirection)
+	expired := flowHTTP.expire(tlsrecord.ServerDirection, logger)
+	all := append(bytes.Clone(outputs[tlsrecord.ServerDirection]), expired...)
+	server.err = errors.Join(server.err, server.framer.WriteData(3, true, []byte(" and the end")))
+	end := server.take()
+	all = append(all, flowHTTP.feed(context.Background(), flow, tlsrecord.ServerDirection, end, true, logger).output...)
+	serverData = append(serverData, end...)
+	responses, bodies, err := readHTTP2(all)
+	exchanges, _, _ := recorder.Exchanges(1, 0, 10)
+
+	if (err != nil) || deadline.IsZero() || !bytes.Equal(all, serverData) || (string(bodies[3]) != "part and the end") || (len(exchanges) != 2) ||
+		!strings.Contains(exchanges[0].Response.Note, "the edit is no HTTP/2 message") || exchanges[0].Response.Edited || !strings.Contains(exchanges[1].Response.Note, "not whole after 100ms") || !flowHTTP.deadline(tlsrecord.ServerDirection).IsZero() {
+		state.Errorf("Test of the http/2 layer of proxy.interceptTCP failed, the slow response should go on as it came, responses: %v, exchanges: %+v, error: %v", responses, exchanges, err)
 	}
 }

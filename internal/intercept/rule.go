@@ -30,6 +30,12 @@ type LayerRule interface {
 	Takes(layer Layer) (isTaken bool)
 }
 
+// a rule whose Apply may wait for a decision from outside, the hold queue: Blocks tells before it runs whether it would for the message
+// HTTP/2 runs such a message on its own, so the other streams of its direction go on meanwhile
+type BlockingRule interface {
+	Blocks(message Message) (isBlocking bool)
+}
+
 // a layer a rule or the hold queue asks for and the layer of a message: empty is every record layer (tcp, tls, udp, dtls), http is only taken when it is named
 func takesLayer(wanted Layer, layer Layer) (isTaken bool) {
 	if wanted == "" {

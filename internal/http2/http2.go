@@ -28,6 +28,7 @@ func New(maxStreams int) (conn *Conn) {
 	}
 
 	conn = &Conn{
+		isFraming:  false,
 		readers:    [2]*reader{newReader(ClientPeer), newReader(ServerPeer)},
 		streams:    map[uint32]*stream{},
 		lastStream: [2]uint32{0, 0},
@@ -56,6 +57,7 @@ func newReader(peer Peer) (newReader *reader) {
 		block:         nil,
 		acknowledged:  Settings{},
 		pending:       nil,
+		isFraming:     false,
 	}
 	newReader.decoder.SetMaxStringLength(maxStringBytes)
 	newReader.decoder.SetEmitFunc(newReader.emit)
@@ -103,6 +105,27 @@ func (conn *Conn) Close(peer Peer) (events []Event) {
 		}
 	}
 
+	return
+}
+
+// every whole frame gets a frame event from now on, before the events it makes, and header blocks keep all their fields for it
+func (conn *Conn) EmitFrames() {
+	conn.isFraming = true
+
+	for _, reader := range conn.readers {
+		reader.isFraming = true
+	}
+}
+
+// the stream ends now, as by a reset nobody sent: its open messages end incomplete with the note, it closes; nothing for a stream that is not open
+func (conn *Conn) Abort(id uint32, note string) (events []Event) {
+	current := conn.streams[id]
+
+	if (conn.err != nil) || (current == nil) {
+		return
+	}
+
+	events = conn.abort(current, Event{Type: EndEventType, StreamID: id, PromisedBy: current.promisedBy, Side: RequestSide, Start: 0, End: 0}, note)
 	return
 }
 
@@ -183,27 +206,52 @@ func (conn *Conn) frame(reader *reader, frame http2.Frame, start int64) (events 
 		return
 	}
 
+	described := &Frame{Type: header.Type, Flags: header.Flags, StreamID: header.StreamID, Length: header.Length, Data: nil, Increment: 0, ErrCode: 0, Priority: http2.PriorityParam{}, HasPriority: false, PromiseID: 0, Settings: nil, Block: nil}
+	block := (*headerBlock)(nil)
+
 	switch typed := frame.(type) {
 	case *http2.DataFrame:
+		described.Data = bytes.Clone(typed.Data())
 		events = conn.data(reader.peer, typed, start, end)
 	case *http2.HeadersFrame:
-		reader.block = &headerBlock{streamID: header.StreamID, isPush: false, promised: 0, endStream: typed.StreamEnded(), fields: nil, size: 0, isCut: false, start: start}
+		reader.block = &headerBlock{streamID: header.StreamID, isPush: false, promised: 0, endStream: typed.StreamEnded(), priority: typed.Priority, hasPriority: typed.HasPriority(), fields: nil, size: 0, isCut: false, start: start, all: nil, allSize: 0, isAllCut: false}
+		block = reader.block
 		events, err = conn.fragment(reader, typed.HeaderBlockFragment(), typed.HeadersEnded(), end)
 	case *http2.PushPromiseFrame:
-		reader.block = &headerBlock{streamID: header.StreamID, isPush: true, promised: typed.PromiseID, endStream: false, fields: nil, size: 0, isCut: false, start: start}
+		described.PromiseID = typed.PromiseID
+		reader.block = &headerBlock{streamID: header.StreamID, isPush: true, promised: typed.PromiseID, endStream: false, priority: http2.PriorityParam{}, hasPriority: false, fields: nil, size: 0, isCut: false, start: start, all: nil, allSize: 0, isAllCut: false}
+		block = reader.block
 		events, err = conn.fragment(reader, typed.HeaderBlockFragment(), typed.HeadersEnded(), end)
 	case *http2.ContinuationFrame:
+		block = reader.block
 		events, err = conn.fragment(reader, typed.HeaderBlockFragment(), typed.HeadersEnded(), end)
 	case *http2.RSTStreamFrame:
+		described.ErrCode = typed.ErrCode
 		events = conn.reset(reader.peer, header.StreamID, typed.ErrCode, start, end)
 	case *http2.GoAwayFrame:
 		events = conn.goAway(reader.peer, typed.LastStreamID, typed.ErrCode, start, end)
 	case *http2.SettingsFrame:
 		conn.settings(reader.peer, typed)
+
+		if typed.IsAck() {
+			described.Settings = maps.Clone(reader.acknowledged)
+		}
+	case *http2.WindowUpdateFrame:
+		described.Increment = typed.Increment
 	default:
-		// PING, PRIORITY, PRIORITY_UPDATE, WINDOW_UPDATE and unknown frames change nothing that is shown
+		// PING, PRIORITY, PRIORITY_UPDATE and unknown frames change nothing that is shown
 	}
 
+	if !conn.isFraming || (err != nil) {
+		return
+	}
+
+	// the block is whole once the reader let go of it
+	if (block != nil) && (reader.block == nil) {
+		described.Block = &Block{StreamID: block.streamID, IsPush: block.isPush, PromiseID: block.promised, EndStream: block.endStream, Priority: block.priority, HasPriority: block.hasPriority, Fields: block.all, IsCut: block.isAllCut}
+	}
+
+	events = append([]Event{{Type: FrameEventType, StreamID: header.StreamID, Side: sideOf(reader.peer), Start: start, End: end, Frame: described}}, events...)
 	return
 }
 
@@ -232,7 +280,7 @@ func (conn *Conn) fragment(reader *reader, fragment []byte, isEnd bool, end int6
 
 // a whole header block of a HEADERS frame: a head, a 1xx head or the trailers of a message; a PUSH_PROMISE opens its stream with the request
 func (conn *Conn) headers(peer Peer, block *headerBlock, end int64) (events []Event) {
-	head := headOf(block.fields, block.isCut)
+	head := HeadOf(block.fields, block.isCut)
 
 	if block.isPush {
 		events = conn.promise(block, head, end)
@@ -540,11 +588,24 @@ func (reader *reader) consume(size int) {
 func (reader *reader) emit(field hpack.HeaderField) {
 	block := reader.block
 
-	if (block == nil) || block.isCut {
+	if block == nil {
 		return
 	}
 
 	size := int(field.Size())
+
+	if reader.isFraming && !block.isAllCut {
+		if block.allSize+size > maxEditHeadBytes {
+			block.isAllCut = true
+		} else {
+			block.allSize += size
+			block.all = append(block.all, Field{Name: field.Name, Value: field.Value})
+		}
+	}
+
+	if block.isCut {
+		return
+	}
 
 	if block.size+size > MaxHeadBytes {
 		block.isCut = true
@@ -556,7 +617,7 @@ func (reader *reader) emit(field hpack.HeaderField) {
 }
 
 // the head of the fields of a header block
-func headOf(fields []Field, isCut bool) (head Head) {
+func HeadOf(fields []Field, isCut bool) (head Head) {
 	head = Head{Method: "", Scheme: "", Authority: "", Path: "", Protocol: "", Status: 0, Fields: fields, IsCut: isCut}
 
 	for _, field := range fields {

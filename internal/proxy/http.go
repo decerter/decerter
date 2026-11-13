@@ -39,7 +39,8 @@ type HTTPLayer struct {
 }
 
 // the HTTP layer of one tcp flow: version tells HTTP/1 from HTTP/2 once the ALPN or the client's first bytes did, undecided are the bytes of each direction before
-// HTTP/1: both sides parse into one conn, which pairs the requests with their responses; HTTP/2 goes to http2, which only reads
+// HTTP/1: both sides parse into one conn, which pairs the requests with their responses; HTTP/2 goes to http2, which keeps whole messages on their stream
+// notify wakes the sender of a direction HTTP/2 has frames for outside of its feeds, nil for a layer that only reads
 // exchanges are the history's exchanges by the index of the conn, requests the filter fields of each request for its response
 // the conn, the maps, isOff, version and undecided are shared by both directions under mutex; a side is used only by the sender of its direction
 type httpFlow struct {
@@ -55,6 +56,7 @@ type httpFlow struct {
 	version   httpVersion
 	undecided [2][]byte
 	http2     *http2Flow
+	notify    func(direction tlsrecord.Direction)
 }
 
 // one direction: offset is the stream offset of the next byte; kept are the bytes of the open message held back for the rules, from its first byte on, while isKeeping
@@ -100,6 +102,7 @@ func newHTTPFlow(flowID uint64, recorder *history.History, layer HTTPLayer) (flo
 		version:   undecidedHTTPVersion,
 		undecided: [2][]byte{nil, nil},
 		http2:     nil,
+		notify:    nil,
 	}
 	return
 }
@@ -114,7 +117,7 @@ func (httpFlow *httpFlow) decide(direction tlsrecord.Direction, data []byte, ses
 		httpFlow.version = versionOf(direction, httpFlow.undecided, data, session, isClose)
 
 		if httpFlow.version == http2HTTPVersion {
-			httpFlow.http2 = newHTTP2Flow(httpFlow.flowID, httpFlow.recorder, httpFlow.layer)
+			httpFlow.http2 = newHTTP2Flow(httpFlow.flowID, httpFlow.recorder, httpFlow.layer, httpFlow.notify)
 		}
 	}
 
@@ -155,7 +158,7 @@ func (httpFlow *httpFlow) parse(direction tlsrecord.Direction, data []byte, sess
 }
 
 // the next plaintext of a direction after the record rules; flow is the flow with its TLS session, canKeep is false for bytes that went on already
-// HTTP/2 is only read, an undecided or another protocol is not read: their bytes go on as they came
+// HTTP/2 goes to its editor, an undecided or another protocol is not read: their bytes go on as they came
 func (httpFlow *httpFlow) feed(ctx context.Context, flow intercept.Flow, direction tlsrecord.Direction, data []byte, canKeep bool, logger *slog.Logger) (result httpOutput) {
 	result = httpOutput{output: data, isWhole: true}
 	version, early := httpFlow.decide(direction, data, flow.Session, false)
@@ -163,10 +166,10 @@ func (httpFlow *httpFlow) feed(ctx context.Context, flow intercept.Flow, directi
 	switch version {
 	case http2HTTPVersion:
 		if len(early) > 0 {
-			httpFlow.http2.feed(flow, direction, early, logger)
+			httpFlow.http2.feed(ctx, flow, direction, early, false, logger)
 		}
 
-		httpFlow.http2.feed(flow, direction, data, logger)
+		result = httpFlow.http2.feed(ctx, flow, direction, data, canKeep, logger)
 	case http1HTTPVersion:
 		if len(early) > 0 {
 			httpFlow.feedHTTP1(ctx, flow, direction, early, false, logger)
@@ -202,8 +205,8 @@ func (httpFlow *httpFlow) close(ctx context.Context, flow intercept.Flow, direct
 
 	switch version {
 	case http2HTTPVersion:
-		httpFlow.http2.feed(flow, direction, early, logger)
-		httpFlow.http2.close(flow, direction, logger)
+		httpFlow.http2.feed(ctx, flow, direction, early, false, logger)
+		output = httpFlow.http2.close(ctx, flow, direction, logger)
 		return
 	case http1HTTPVersion:
 		if len(early) > 0 {
@@ -224,8 +227,43 @@ func (httpFlow *httpFlow) close(ctx context.Context, flow intercept.Flow, direct
 	return
 }
 
+// the HTTP/2 layer once the flow is HTTP/2, nil before and on any other
+func (httpFlow *httpFlow) h2() (flow *http2Flow) {
+	httpFlow.mutex.Lock()
+	defer httpFlow.mutex.Unlock()
+
+	if httpFlow.version == http2HTTPVersion {
+		flow = httpFlow.http2
+	}
+
+	return
+}
+
+// what HTTP/2 has for a direction outside of its feeds: frames a decision on a held message or the windows let go
+func (httpFlow *httpFlow) flush(direction tlsrecord.Direction, logger *slog.Logger) (output []byte) {
+	if flow := httpFlow.h2(); flow != nil {
+		output = flow.flush(direction, logger)
+	}
+
+	return
+}
+
+// whether a message of the direction is held by the rules on its own while the direction goes on, its sender waits for it before the end
+func (httpFlow *httpFlow) isWaiting(direction tlsrecord.Direction) (isWaiting bool) {
+	if flow := httpFlow.h2(); flow != nil {
+		isWaiting = flow.isProcessing(direction)
+	}
+
+	return
+}
+
 // the kept message waited too long for its end: what came of it goes on as it came, the rest follows as it comes
 func (httpFlow *httpFlow) expire(direction tlsrecord.Direction, logger *slog.Logger) (output []byte) {
+	if flow := httpFlow.h2(); flow != nil {
+		output = flow.expire(direction, logger)
+		return
+	}
+
 	side := &httpFlow.sides[direction]
 
 	if !side.isKeeping || time.Now().Before(side.deadline) {
@@ -236,8 +274,13 @@ func (httpFlow *httpFlow) expire(direction tlsrecord.Direction, logger *slog.Log
 	return
 }
 
-// the kept message can't wait for its end any more, note says why
+// the kept message can't wait for its end any more, note says why; HTTP/2 keeps its messages, only what it has ready goes on
 func (httpFlow *httpFlow) expireNow(direction tlsrecord.Direction, note string, logger *slog.Logger) (output []byte) {
+	if flow := httpFlow.h2(); flow != nil {
+		output = flow.flush(direction, logger)
+		return
+	}
+
 	side := &httpFlow.sides[direction]
 
 	if !side.isKeeping {
@@ -250,6 +293,11 @@ func (httpFlow *httpFlow) expireNow(direction tlsrecord.Direction, note string, 
 
 // the time the kept message of a direction may wait for its end, zero when nothing is kept
 func (httpFlow *httpFlow) deadline(direction tlsrecord.Direction) (deadline time.Time) {
+	if flow := httpFlow.h2(); flow != nil {
+		deadline = flow.deadline(direction)
+		return
+	}
+
 	side := &httpFlow.sides[direction]
 
 	if side.isKeeping {
@@ -259,8 +307,13 @@ func (httpFlow *httpFlow) deadline(direction tlsrecord.Direction) (deadline time
 	return
 }
 
-// whether a direction keeps bytes back now
+// whether a direction keeps bytes back now, or on HTTP/2 whether its frames ever went on other than they came
 func (httpFlow *httpFlow) isKeeping(direction tlsrecord.Direction) (isKeeping bool) {
+	if flow := httpFlow.h2(); flow != nil {
+		isKeeping = flow.isTouched()
+		return
+	}
+
 	isKeeping = httpFlow.sides[direction].isKeeping
 	return
 }

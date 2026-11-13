@@ -54,7 +54,7 @@ type MatchSpec struct {
 }
 
 // a declarative rule: every occurrence of find in a message of its directions, layer and filter becomes replace
-// a find that spans two messages is not found, a message is one TLS record, one read of a tcp stream or one datagram, or with layer http one whole HTTP/1 message
+// a find that spans two messages is not found, a message is one TLS record, one read of a tcp stream or one datagram, or with layer http one whole HTTP/1 or HTTP/2 message
 // ID and Created are given by the rule set, hits counts the messages the rule changed
 type MatchRule struct {
 	ID      uint64

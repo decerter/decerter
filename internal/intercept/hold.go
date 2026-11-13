@@ -112,6 +112,12 @@ func (queue *HoldQueue) Match(message Message) (isMatch bool) {
 	return
 }
 
+// a message the queue takes waits in Apply
+func (queue *HoldQueue) Blocks(message Message) (isBlocking bool) {
+	isBlocking = queue.Match(message)
+	return
+}
+
 func (queue *HoldQueue) Takes(layer Layer) (isTaken bool) {
 	queue.mutex.Lock()
 	defer queue.mutex.Unlock()

@@ -58,6 +58,8 @@ const (
 	chunkSendKind sendKind = "chunk"
 	// a TLS record and what to do with it
 	recordSendKind sendKind = "record"
+	// the HTTP/2 layer has frames for the direction outside of a feed: a held message was let go, or the windows let waiting DATA go on
+	flushSendKind sendKind = "flush"
 )
 
 type sendItem struct {
@@ -133,6 +135,11 @@ func interceptTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPCon
 	}
 	interception.pollTimer = time.AfterFunc(time.Hour, interception.poll)
 	interception.pollTimer.Stop()
+
+	if httpFlow != nil {
+		httpFlow.notify = interception.wakeHTTP
+	}
+
 	abortOnce := sync.Once{}
 	abort := func() {
 		abortOnce.Do(func() {
@@ -471,6 +478,30 @@ func (interception *interception) end(direction tlsrecord.Direction) {
 	interception.wake.Broadcast()
 }
 
+// the HTTP layer has frames for a direction: its sender takes them in the order of its queue
+func (interception *interception) wakeHTTP(direction tlsrecord.Direction) {
+	interception.mutex.Lock()
+	defer interception.mutex.Unlock()
+
+	if interception.aborted || interception.finished {
+		return
+	}
+
+	queue := interception.queues[direction]
+
+	if (len(queue) == 0) || (queue[len(queue)-1].kind != flushSendKind) {
+		interception.push(direction, sendItem{kind: flushSendKind})
+	}
+
+	interception.wake.Broadcast()
+}
+
+// a message of the direction is held by the rules on its own, the HTTP/2 layer sends it later
+func (interception *interception) isHTTPWaiting(direction tlsrecord.Direction) (isWaiting bool) {
+	isWaiting = (interception.http != nil) && interception.http.isWaiting(direction)
+	return
+}
+
 // held records of the direction still wait in the record layer, they come with the secrets or the release
 func (interception *interception) isPending(direction tlsrecord.Direction) (isPending bool) {
 	isPending = (interception.mode == tlsInterceptMode) && interception.conn.HoldingFor(direction)
@@ -493,7 +524,7 @@ func (interception *interception) next(direction tlsrecord.Direction, deadline t
 		defer alarm.Stop()
 	}
 
-	for (len(interception.queues[direction]) == 0) && !interception.aborted && (!interception.ended[direction] || interception.isPending(direction)) {
+	for (len(interception.queues[direction]) == 0) && !interception.aborted && (!interception.ended[direction] || interception.isPending(direction) || interception.isHTTPWaiting(direction)) {
 		if !deadline.IsZero() && !time.Now().Before(deadline) {
 			isExpired = true
 			return
@@ -509,7 +540,7 @@ func (interception *interception) next(direction tlsrecord.Direction, deadline t
 
 	items = interception.queues[direction]
 	interception.queues[direction] = nil
-	isEnd = interception.ended[direction] && !interception.isPending(direction)
+	isEnd = interception.ended[direction] && !interception.isPending(direction) && !interception.isHTTPWaiting(direction)
 	return
 }
 
@@ -530,7 +561,7 @@ func (interception *interception) send(ctx context.Context, destination *net.TCP
 	for {
 		deadline := time.Time{}
 
-		if interception.http != nil {
+		if (interception.http != nil) && interception.canSeal(carrier) {
 			deadline = interception.http.deadline(direction)
 		}
 
@@ -621,6 +652,12 @@ func (interception *interception) currentFlow(carrier *tlsrecord.Record) (flow i
 	return
 }
 
+// whether bytes of the HTTP layer can go on now: on TLS only under the keys of an application data record, a KeyUpdate changed them and the next record brings the new ones
+func (interception *interception) canSeal(carrier *tlsrecord.Record) (canSeal bool) {
+	canSeal = !interception.wasTLS || ((carrier != nil) && ((carrier.ContentType == tlsrecord.ApplicationDataContentType) || isTicketRecord(*carrier)))
+	return
+}
+
 // bytes the HTTP layer let go outside of a record: plain on tcp, sealed as application data with the keys of the last record on TLS
 func (interception *interception) flushHTTP(data []byte, encrypter *tlsrecord.Encrypter, carrier *tlsrecord.Record) (wire []byte, err error) {
 	if len(data) == 0 {
@@ -664,6 +701,13 @@ func (interception *interception) prepare(ctx context.Context, direction tlsreco
 		}
 	case recordSendKind:
 		wire, err = interception.prepareRecord(ctx, direction, item, encrypter, carrier, stats, logger)
+	case flushSendKind:
+		// without keys to seal them under the frames wait for the next record of the direction
+		if (interception.http == nil) || !interception.canSeal(*carrier) {
+			return
+		}
+
+		wire, err = interception.flushHTTP(interception.http.flush(direction, logger), encrypter, *carrier)
 	}
 
 	return

@@ -101,6 +101,11 @@ func TestMain(main *testing.M) {
 		os.Exit(runClient(mode, os.Args[1:]))
 	}
 
+	// the test binary is the root's Go h2c server of the http/2 editing case
+	if os.Getenv(serverCommandEnvironment) == "1" {
+		os.Exit(runServer())
+	}
+
 	err := prepare()
 
 	if err != nil {

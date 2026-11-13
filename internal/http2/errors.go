@@ -13,4 +13,9 @@ var (
 	ErrFrame         = errors.New("malformed http/2 frame")
 	ErrFrameOrder    = errors.New("http/2 header block interrupted")
 	ErrHPACK         = errors.New("hpack decoding failed")
+	// what the editor could not do right, the receiver may see broken frames
+	ErrEditOrder          = errors.New("http/2 bytes went on out of their order")
+	ErrHeaderListTooLarge = errors.New("http/2 header block too large to encode again")
+	// an edit form that is no HTTP/2 message
+	ErrForm = errors.New("malformed http/2 edit form")
 )

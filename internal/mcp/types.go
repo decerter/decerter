@@ -271,7 +271,7 @@ type SetInterceptInput struct {
 	Enabled   bool         `json:"enabled" jsonschema:"true holds the messages of direction whose flow the filter takes until forward_held, drop_held or the hold timeout; false forwards every held message as it is and holds nothing more"`
 	Filter    string       `json:"filter,omitzero" jsonschema:"a filter in the language of decerter --filter, only the flows it takes are held; empty holds every flow in scope"`
 	Direction v1.Direction `json:"direction,omitzero" jsonschema:"up (default: what the client sends), down (what the server answers) or both"`
-	Layer     v1.Layer     `json:"layer,omitzero" jsonschema:"empty (default) holds the messages of every record layer (one TLS record, TCP read or datagram); http holds whole HTTP/1 messages (the head as it came and the body without chunk framing; HTTP/2 is not held, its frames are records); tcp, tls, udp or dtls only that layer"`
+	Layer     v1.Layer     `json:"layer,omitzero" jsonschema:"empty (default) holds the messages of every record layer (one TLS record, TCP read or datagram); http holds whole HTTP messages (HTTP/1: the head as it came and the body without chunk framing; HTTP/2: one name: value line per field, pseudo-header fields first, CR LF, a blank line and the body without padding, only its stream waits); tcp, tls, udp or dtls only that layer"`
 }
 
 type EditHeldInput struct {
@@ -298,7 +298,7 @@ type RuleReplace struct {
 type AddRuleInput struct {
 	Filter    string       `json:"filter,omitzero" jsonschema:"a filter in the language of decerter --filter, the rule only changes the flows it takes; empty is every flow in scope"`
 	Direction v1.Direction `json:"direction,omitzero" jsonschema:"up (what the client sends), down (what the server answers) or both (default)"`
-	Layer     v1.Layer     `json:"layer,omitzero" jsonschema:"only messages of this layer: tcp, tls, udp or dtls, or http for whole HTTP/1 messages (head and body without chunk framing; Content-Length and chunking are fixed after the replace; HTTP/2 is not changed by it); empty is every record layer, not http"`
+	Layer     v1.Layer     `json:"layer,omitzero" jsonschema:"only messages of this layer: tcp, tls, udp or dtls, or http for whole HTTP messages (HTTP/1: head and body without chunk framing, Content-Length and chunking fixed after the replace; HTTP/2: name: value lines with the pseudo-header fields first, a blank line and the body, encoded again with content-length fixed); empty is every record layer, not http"`
 	Find      RuleFind     `json:"find"`
 	Replace   RuleReplace  `json:"replace"`
 }

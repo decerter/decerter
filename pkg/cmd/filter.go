@@ -50,8 +50,8 @@ is true for any value, != when every value differs), and the filters of rules an
 has its method, target, Host and User-Agent and a response the fields of its request plus its status code.
 http.request.uri is the request-target as sent, http.host the Host field. On HTTP/2 they come from the pseudo-header
 fields: http.request.method is :method, http.request.uri :path, http.host :authority (or Host), http.response.code
-:status; http2.streamid is the stream of an HTTP/2 exchange, an HTTP/1 flow has none (http && !http2.streamid).
-HTTP/2 is read-only for now: rules and holds of layer http do not take its messages.
+:status; http2.streamid is the stream of an HTTP/2 exchange, an HTTP/1 flow has none (http && !http2.streamid), and in
+a rule or hold of layer http it is the stream of the message.
 
 Examples:
   sudo decerter run --uid 1001 --decrypt --filter 'proc.comm == "curl" && tls.sni contains "example"'
