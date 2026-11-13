@@ -48,9 +48,8 @@ const (
 	releaseSweep time.Duration = time.Second
 	// how often the BoringSSL uprobe's layout errors are looked at
 	layoutCheck time.Duration = time.Second
-	// in the platform's data directory: the netd hooks decerter shared, and the lock held while decerter runs
-	netdStateName string = "netd-hooks.json"
-	lockName      string = "decerter.lock"
+	// in the platform's data directory, the lock held while decerter runs; the netd hooks decerter shared are in platform.NetdStateName next to it
+	lockName string = "decerter.lock"
 )
 
 type cgroupAttachment struct {
@@ -1179,7 +1178,7 @@ func (app *App) RestoreNetdHooks() (err error) {
 // isStale is the check at start, a state file then means the decerter before did not exit cleanly
 // the state file is removed only when every hook is back
 func (app *App) restoreNetdState(isStale bool) (err error) {
-	statePath := filepath.Join(app.platform.DataDirectory, netdStateName)
+	statePath := filepath.Join(app.platform.DataDirectory, platform.NetdStateName)
 	state, readErr := attach.ReadNetdState(statePath)
 
 	if errors.Is(readErr, fs.ErrNotExist) {
@@ -1258,7 +1257,7 @@ func (app *App) ShareNetdHooks() (err error) {
 		return
 	}
 
-	statePath := filepath.Join(app.platform.DataDirectory, netdStateName)
+	statePath := filepath.Join(app.platform.DataDirectory, platform.NetdStateName)
 	shared, shareErr := attach.ShareHooks(attach.CgroupRoot, hooks, statePath)
 
 	if err = shareErr; err != nil {

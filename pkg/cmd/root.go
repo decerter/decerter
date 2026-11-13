@@ -30,7 +30,8 @@ eBPF cgroup hooks pick the sockets of the selected processes and a uprobe on the
 so there is no CA certificate to install, no proxy setting and no change to the app.
 
 decerter runs as root on Linux 6.6 or newer with BTF, and on rooted Android 15 or newer (GKI android15-6.6 or newer).
-Nothing is selected until --uid or --pid, or a proc.uid or proc.pid term of --filter, names a process.
+Nothing is selected until --uid or --pid, --package on Android, or a proc.uid or proc.pid term of --filter, names a process.
+On Android, decerter android setup on the Linux host pushes decerter to the device and prints how to run it.
 Logs are JSON lines on stderr; stdout carries the output of the command.
 
 Every flag can also be set with an environment variable DECERTER_<FLAG>, upper case with - as _, for example DECERTER_LOG_LEVEL=debug.

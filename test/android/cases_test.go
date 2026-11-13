@@ -102,11 +102,11 @@ func TestRedirectNegative(state *testing.T) {
 	stopDeviceDecerter(state, decerter, true)
 }
 
-// Test if decerter run --decrypt prints the request line of a Conscrypt call over TLS 1.3 and TLS 1.2, which reaches the server unchanged.
+// Test if decerter run --decrypt --package prints the request line of a Conscrypt call over TLS 1.3 and TLS 1.2, which reaches the server unchanged.
 func TestDecryptPositive(state *testing.T) {
 	requireDex(state)
 	servers := startHTTPSServers(state, nil)
-	decerter := startDeviceDecerter(state, decerterBinary, "decrypt", "run --decrypt --uid "+strconv.FormatUint(uint64(appUID), 10)+" --dst-cidr "+hostCIDR, redirectReady)
+	decerter := startDeviceDecerter(state, decerterBinary, "decrypt", "run --decrypt --package "+appPackage+" --dst-cidr "+hostCIDR, redirectReady)
 
 	for _, server := range servers {
 		err := testDex(state.Context(), appUID, server, "/decrypt", "/decrypt")
@@ -126,6 +126,7 @@ func TestDecryptPositive(state *testing.T) {
 		}
 	}
 
+	checkSelectedPackage(state, decerter)
 	stopDeviceDecerter(state, decerter, true)
 }
 
@@ -134,7 +135,7 @@ func TestKeylogPositive(state *testing.T) {
 	requireDex(state)
 	serverKeyLog := newLockedBuffer()
 	servers := startHTTPSServers(state, serverKeyLog)
-	decerter := startDeviceDecerter(state, decerterBinary, "keylog", "keylog --uid "+strconv.FormatUint(uint64(appUID), 10), keylogReady)
+	decerter := startDeviceDecerter(state, decerterBinary, "keylog", "keylog --package "+appPackage, keylogReady)
 
 	for _, server := range servers {
 		err := testDex(state.Context(), appUID, server, "/keylog", "/keylog")
@@ -176,7 +177,7 @@ func TestKeylogNegative(state *testing.T) {
 	requireDex(state)
 	serverKeyLog := newLockedBuffer()
 	servers := startHTTPSServers(state, serverKeyLog)
-	decerter := startDeviceDecerter(state, decerterBinary, "keylog-negative", "keylog --uid "+strconv.FormatUint(uint64(appUID), 10), keylogReady)
+	decerter := startDeviceDecerter(state, decerterBinary, "keylog-negative", "keylog --package "+appPackage, keylogReady)
 
 	for _, server := range servers {
 		err := testDex(state.Context(), shellUID, server, "/keylog", "/keylog")
@@ -268,7 +269,7 @@ func TestCapturePositive(state *testing.T) {
 // Test if decerter android restore puts netd's hooks back after decerter run was killed with SIGKILL while it shared them.
 func TestRestorePositive(state *testing.T) {
 	guardDevice(state)
-	decerter := startDeviceDecerter(state, decerterBinary, "restore", "run --uid "+strconv.FormatUint(uint64(appUID), 10)+" --dst-cidr "+hostCIDR, redirectReady)
+	decerter := startDeviceDecerter(state, decerterBinary, "restore", "run --package "+appPackage+" --dst-cidr "+hostCIDR, redirectReady)
 	shared, err := attachList(state.Context())
 
 	if err != nil {
@@ -324,6 +325,21 @@ func TestRestoreNegative(state *testing.T) {
 	}
 
 	checkPristine(state)
+}
+
+// decerter resolved --package to the app's uid, the one pm lists
+func checkSelectedPackage(state *testing.T, decerter deviceDecerter) {
+	log, err := decerter.log(state.Context())
+
+	if err != nil {
+		state.Fatalf("Could not read the log of %s, error: %s", decerter.Binary, err.Error())
+	}
+
+	selected := fmt.Sprintf(`"msg":"Selected package","package":%q,"uid":%d}`, appPackage, appUID)
+
+	if !strings.Contains(log, selected) {
+		state.Errorf("%s should log %s, log:\n%s", decerter.Binary, selected, log)
+	}
 }
 
 // skip without a device, then compare the attach list with the baseline when the test ends, after a decerter that is still running was stopped and netd's hooks were restored
@@ -672,7 +688,7 @@ func startCapture(state *testing.T, servers []httpsServer) (capture *liveCapture
 
 	capture = &liveCapture{output: newLockedBuffer(), errors: newLockedBuffer()}
 	decerter := deviceDecerter{Binary: decerterBinary, Name: "capture"}
-	command := fmt.Sprintf("cd %s && rm -f capture.log && exec ./%s capture -w - --uid %d --dst-cidr %s 2>%s/capture.log", deviceDirectory, decerterBinary, appUID, hostCIDR, deviceDirectory)
+	command := fmt.Sprintf("cd %s && rm -f capture.log && exec ./%s capture -w - --package %s --dst-cidr %s 2>%s/capture.log", deviceDirectory, decerterBinary, appPackage, hostCIDR, deviceDirectory)
 	capture.adb = device.execOut(state.Context(), command)
 	capture.adb.Stdout = writer
 	capture.adb.Stderr = capture.errors

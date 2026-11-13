@@ -14,16 +14,21 @@ import (
 
 const (
 	// every Android system image has it, no Linux distribution does
-	buildPropPath   string = "system/build.prop"
-	sdkProperty     string = "ro.build.version.sdk"
-	releaseProperty string = "ro.build.version.release"
-	// the binary is pushed to /data/local/tmp/decerter, so the directory needs another name
-	androidDataDirectory string = "/data/local/tmp/decerter.d"
-	linuxDataDirectory   string = "/run/decerter"
+	buildPropPath      string = "system/build.prop"
+	sdkProperty        string = "ro.build.version.sdk"
+	releaseProperty    string = "ro.build.version.release"
+	linuxDataDirectory string = "/run/decerter"
+	linuxAPISocket     string = "/run/decerter/api.sock"
+	// decerter android setup pushes the binary here, so the data directory needs another name
+	AndroidBinaryPath    string = "/data/local/tmp/decerter"
+	AndroidDataDirectory string = "/data/local/tmp/decerter.d"
 	// adbd can't connect to a socket file made by root in /data/local/tmp unless adbd runs as root, an abstract socket works with adb forward localabstract:decerter-api
 	// an abstract socket has no file mode, the API server checks the peer with SO_PEERCRED
-	androidAPISocket string = "@decerter-api"
-	linuxAPISocket   string = "/run/decerter/api.sock"
+	AndroidAPISocket string = "@decerter-api"
+	// in the data directory: the netd hooks a running decerter shared, decerter android restore puts them back from it after a SIGKILL
+	NetdStateName string = "netd-hooks.json"
+	// the installed apps with their uid, one line each, readable by root (system:package_info 0640)
+	AndroidPackagesList string = "/data/system/packages.list"
 )
 
 // root is the filesystem root, / outside of tests
@@ -54,8 +59,8 @@ func Detect(root string) (platform Platform) {
 		Type:          AndroidType,
 		SDK:           sdk,
 		Release:       properties[releaseProperty],
-		DataDirectory: androidDataDirectory,
-		APISocket:     androidAPISocket,
+		DataDirectory: AndroidDataDirectory,
+		APISocket:     AndroidAPISocket,
 	}
 	return
 }

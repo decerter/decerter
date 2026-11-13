@@ -20,7 +20,7 @@ session one CLIENT_RANDOM line. The logs go to stderr.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			quiet(cmd)
-			err = internal.Keylog(selection, libssl, &logger)
+			err = internal.Keylog(selection, packageNames, libssl, &logger)
 			return
 		},
 	}

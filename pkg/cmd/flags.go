@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"unicode"
 
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/filter"
@@ -17,16 +18,18 @@ import (
 
 // the flags more than one command has, one command runs per process
 var (
-	selection   redirect.Filter
-	scopeFilter *filter.Filter
-	libssl      string
-	flowTable   bool
+	selection    redirect.Filter
+	packageNames []string
+	scopeFilter  *filter.Filter
+	libssl       string
+	flowTable    bool
 )
 
 // the processes whose flows and secrets decerter reads: run, capture and keylog
 func addProcessFlags(flags *pflag.FlagSet) {
-	flags.Func("uid", "select the processes of the user with this `uid`, repeatable or comma separated (default is none; without --uid or --pid nothing is selected)", parseUIDs)
+	flags.Func("uid", "select the processes of the user with this `uid`, repeatable or comma separated (default is none; without --uid, --pid or --package nothing is selected)", parseUIDs)
 	flags.Func("pid", "select the process with this `pid`, repeatable or comma separated, its children are not followed (default is none)", parsePIDs)
+	flags.Func("package", "select the Android app with this package `name` by its uid from /data/system/packages.list, like --uid; an unknown name fails with the closest installed ones, repeatable or comma separated (default is none; Android only, on Linux select with --uid)", parsePackageNames)
 }
 
 // which flows of the selected processes are in scope: run and capture
@@ -54,6 +57,22 @@ func parseUIDs(value string) (err error) {
 		}
 
 		selection.UIDs = append(selection.UIDs, uint32(uid))
+	}
+
+	return
+}
+
+// the names are resolved to uids when the command runs, on the device
+func parsePackageNames(value string) (err error) {
+	for part := range strings.SplitSeq(value, ",") {
+		name := strings.TrimSpace(part)
+
+		if (name == "") || strings.ContainsFunc(name, unicode.IsSpace) {
+			err = fmt.Errorf("invalid package name %q", part)
+			return
+		}
+
+		packageNames = append(packageNames, name)
 	}
 
 	return

@@ -56,7 +56,7 @@ exports the flows of the history from the packets decerter keeps of them (the la
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			quiet(cmd)
-			err = internal.Capture(selection, scopeFilter, capturePath, apiSocket, plaintext, snaplen, flowTable, libssl, defaultProxyPort, &logger)
+			err = internal.Capture(selection, packageNames, scopeFilter, capturePath, apiSocket, plaintext, snaplen, flowTable, libssl, defaultProxyPort, &logger)
 			return
 		},
 	}

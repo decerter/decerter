@@ -12,11 +12,18 @@ import (
 	"github.com/decerter/decerter/pkg/internal/logging"
 )
 
-// print the TLS secrets of the processes selected by uid and pid as NSS key log lines on stdout until stopped; only the secrets uprobe is attached, there is no redirect object and no proxy port
-func Keylog(selection redirect.Filter, libssl string, logger *logging.Logger) (err error) {
+// print the TLS secrets of the processes selected by uid, pid and Android package as NSS key log lines on stdout until stopped; only the secrets uprobe is attached, there is no redirect object and no proxy port
+func Keylog(selection redirect.Filter, packageNames []string, libssl string, logger *logging.Logger) (err error) {
+	currentPlatform := platform.Detect("/")
+	selection, err = selectPackages(selection, packageNames, currentPlatform, platform.AndroidPackagesList, logger)
+
+	if err != nil {
+		return
+	}
+
 	ctx, cancel := shutdownContext()
 	defer cancel()
-	decerter := app.New(ctx, selection, nil, 0, time.Duration(0), false, true, false, nil, "", time.Duration(0), libssl, false, "", false, capturebpf.MaxSnaplen, platform.Detect("/"), logger.Slog())
+	decerter := app.New(ctx, selection, nil, 0, time.Duration(0), false, true, false, nil, "", time.Duration(0), libssl, false, "", false, capturebpf.MaxSnaplen, currentPlatform, logger.Slog())
 	err = serve(ctx, &decerter, logger)
 	return
 }

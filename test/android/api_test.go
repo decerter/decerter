@@ -157,9 +157,9 @@ func TestHoldPositive(state *testing.T) {
 	stopDeviceDecerter(state, decerter, true)
 }
 
-// decerter run with --intercept and the API on its abstract socket, debug logs name the uid of every api client
+// decerter run with --intercept, --package and the API on its abstract socket, debug logs name the uid of every api client
 func apiArguments() (arguments string) {
-	arguments = "--log-level debug run --intercept --api-socket " + apiSocket + " --uid " + strconv.FormatUint(uint64(appUID), 10) + " --dst-cidr " + hostCIDR
+	arguments = "--log-level debug run --intercept --api-socket " + apiSocket + " --package " + appPackage + " --dst-cidr " + hostCIDR
 	return
 }
 

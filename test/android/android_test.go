@@ -61,6 +61,8 @@ var (
 	// the attach list of /sys/fs/cgroup before the first case, every case has to leave it like this
 	baseline   string
 	tsharkPath string
+	// decerter android setup of TestMain: cold when it booted the AVD, otherwise against the running emulator
+	setupResult setupRun
 )
 
 func TestMain(main *testing.M) {
@@ -91,7 +93,7 @@ func TestMain(main *testing.M) {
 		code = 1
 	}
 
-	fmt.Fprintf(os.Stderr, "Android e2e wall time %s, emulator started by the tests: %v\n", time.Since(start).Round(time.Second), device.process != nil)
+	fmt.Fprintf(os.Stderr, "Android e2e wall time %s, emulator started by the tests: %v, booted by decerter android setup: %v\n", time.Since(start).Round(time.Second), device.process != nil, setupResult.BootedSerial != "")
 	os.Exit(code)
 }
 
@@ -153,6 +155,13 @@ func setup() (err error) {
 		err = nil
 	}
 
+	// decerter android setup boots the AVD itself when no emulator runs, that is the cold setup case
+	setupResult, err = coldSetup(ctx, account, sdk, adb)
+
+	if err != nil {
+		return
+	}
+
 	device, err = connectEmulator(ctx, account, sdk, adb, filepath.Join(workDirectory, "emulator.log"))
 
 	if errors.Is(err, errNoAVD) || errors.Is(err, errNoRoot) || errors.Is(err, errUnsupportedImage) {
@@ -169,6 +178,10 @@ func setup() (err error) {
 	if err != nil {
 		err = fmt.Errorf("%w: %w", errSkip, err)
 		return
+	}
+
+	if !setupResult.IsCold {
+		setupResult = runSetup(ctx, account, sdk, adb, "--serial", device.Serial, "--package", appPackage)
 	}
 
 	err = pushFiles(ctx)
@@ -359,7 +372,8 @@ func teardown() (err error) {
 
 	if device.Serial != "" {
 		// sync before the emulator is killed, a removal still in the page cache would be lost
-		_, removeErr := device.shell(ctx, "rm -rf "+deviceDirectory+" "+dataDirectory+" && sync")
+		_, removeErr := device.shell(ctx, "rm -rf "+deviceDirectory+" "+dataDirectory+" "+setupBinary+" && sync")
+		removeErr = errors.Join(removeErr, removeAPIForwards(ctx))
 		left, listErr := device.shell(ctx, "ls -A /data/local/tmp")
 		err = errors.Join(err, removeErr, listErr)
 
@@ -369,7 +383,7 @@ func teardown() (err error) {
 		}
 	}
 
-	err = errors.Join(err, device.stop())
+	err = errors.Join(err, device.stop(), stopBooted(setupResult))
 
 	if workDirectory != "" {
 		err = errors.Join(err, os.RemoveAll(workDirectory))

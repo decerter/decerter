@@ -134,8 +134,8 @@ test-unit: ## Run unit tests with the race detector
 test-e2e: ## Run the e2e tests with sudo, needs root and the local users test and nobody
 	sudo go test -tags=e2e -count=1 ./test/e2e/
 
-# decerter runs on the emulator, never on the host: the tests use a running x86_64 emulator or boot the AVD decerter-a15 (system-images;android-35;google_apis;x86_64,
-# google_apis because its adbd may run as root) from ANDROID_SDK_ROOT or ~/Android/Sdk, and stop it again; javac (a JDK) and the SDK's d8 build the Conscrypt client, tshark reads the live capture
+# decerter runs on the emulator, never on the host: the tests use a running x86_64 emulator, or decerter android setup boots the AVD decerter-a15 (system-images;android-35;google_apis;x86_64,
+# google_apis because its adbd may run as root) from ANDROID_SDK_ROOT or ~/Android/Sdk as the cold setup case, and they stop it again; javac (a JDK) and the SDK's d8 build the Conscrypt client, tshark reads the live capture
 .PHONY: test-e2e-android
 test-e2e-android: ## Run the Android e2e tests on the emulator with sudo, needs the Android SDK with the emulator and the AVD decerter-a15, a JDK and tshark
 	sudo go test -tags=e2e_android -count=1 ./test/android/

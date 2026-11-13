@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/decerter/decerter/internal/android"
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/ui"
@@ -32,6 +33,9 @@ func TestParseFlagsPositive(state *testing.T) {
 		{Parse: parseUIDs, Value: "1001, 1002"},
 		{Parse: parseUIDs, Value: "0"},
 		{Parse: parsePIDs, Value: "42,43"},
+		{Parse: parsePackageNames, Value: "com.example.app, com.example.other"},
+		{Parse: parsePackageNames, Value: "android"},
+		{Parse: parseSetupPort, Value: "8080"},
 		// a bare address is one host, a prefix with host bits set is masked
 		{Parse: parseDestinationCIDRs, Value: "10.1.2.3, 10.1.2.3/8 ,2001:db8::1"},
 		{Parse: parseDestinationCIDRs, Value: "2001:db8::/32"},
@@ -64,6 +68,11 @@ func TestParseFlagsPositive(state *testing.T) {
 
 	if !reflect.DeepEqual(selection, expected) {
 		state.Errorf("Test of the flag parsers failed, selection should be %+v, selection: %+v", expected, selection)
+		return
+	}
+
+	if !reflect.DeepEqual(packageNames, []string{"com.example.app", "com.example.other", "android"}) || (setupOptions.Port != 8080) {
+		state.Errorf("Test of the flag parsers failed, packages %q, setup port %d", packageNames, setupOptions.Port)
 		return
 	}
 
@@ -112,6 +121,15 @@ func TestExecuteNegative(state *testing.T) {
 		{Args: []string{"ui", "extra"}, Text: `unknown command "extra" for "decerter ui"`},
 		{Args: []string{"mcp", "--api-socket", "[::2]:8080"}, Text: `invalid api socket: a tcp api address must be a loopback ip address`},
 		{Args: []string{"mcp", "extra"}, Text: `unknown command "extra" for "decerter mcp"`},
+		{Args: []string{"run", "--package", "com.example.app,"}, Text: `invalid package name ""`},
+		{Args: []string{"keylog", "--package", "com.example app"}, Text: `invalid package name "com.example app"`},
+		// the tests run on Linux, where a package has no uid
+		{Args: []string{"run", "--package", "com.example.app"}, Text: "--package needs Android"},
+		{Args: []string{"capture", "-w", "-", "--package", "com.example.app"}, Text: "--package needs Android"},
+		{Args: []string{"android", "setup", "--serial", "emulator-5554", "--avd", "decerter-a15"}, Text: "if any flags in the group [serial avd] are set none of the others can be"},
+		{Args: []string{"android", "setup", "--remove", "--package", "com.example.app"}, Text: "if any flags in the group [remove package] are set none of the others can be"},
+		{Args: []string{"android", "setup", "--port", "0"}, Text: `invalid port "0": must be between 1 and 65535`},
+		{Args: []string{"android", "setup", "extra"}, Text: `unknown command "extra" for "decerter android setup"`},
 	}
 
 	for _, negative := range negativeCases {
@@ -141,7 +159,9 @@ func TestExecutePositive(state *testing.T) {
 		{Args: []string{"--version"}, Text: []string{"decerter ", "(commit "}},
 		{Args: []string{"help", "filter"}, Text: []string{"subset of Wireshark's display filter language", "  proc.comm      string, flow, comm_map\n", "  tls.alpn       string, several values, clienthello\n"}},
 		{Args: []string{"run", "--help"}, Text: []string{"--decrypt", "--udp-idle-timeout duration", "--api-socket path", "--hold-timeout duration", "--log-level level"}},
-		{Args: []string{"capture", "--help"}, Text: []string{"-w, --write file", "--snaplen bytes"}},
+		{Args: []string{"capture", "--help"}, Text: []string{"-w, --write file", "--snaplen bytes", "--package name"}},
+		{Args: []string{"android", "--help"}, Text: []string{"setup", "restore", "adb forward tcp:8080 localabstract:decerter-api", "/data/local/tmp/decerter.d"}},
+		{Args: []string{"android", "setup", "--help"}, Text: []string{"--serial serial", "--avd avd", "--package name", "--binary path", "--port port", "--remove", "decerter android setup --avd decerter-a15 --package com.example.app"}},
 		{Args: []string{"ui", "--help"}, Text: []string{"--api-socket address", "--open", "adb forward tcp:8080 localabstract:decerter-api"}},
 		{Args: []string{"mcp", "--help"}, Text: []string{"--api-socket address", "--output-dir directory", "--allow-write", "claude mcp add decerter -- decerter mcp --allow-write", "<untrusted-traffic"}},
 	}
@@ -211,6 +231,9 @@ func execute(state *testing.T, args []string) (output string, err error) {
 // the commands and their flag variables are package globals, each case starts from the defaults
 func resetState(state *testing.T) {
 	selection = redirect.Filter{}
+	packageNames = nil
+	setupOptions = android.Options{}
+	setupRemove = false
 	scopeFilter = nil
 	libssl = ""
 	flowTable = false

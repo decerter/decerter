@@ -61,11 +61,14 @@ own TLS library, such as Chrome, Cronet, Flutter or Go programs, is relayed with
   # the control API: hold the test user's requests, list the flows
   sudo decerter run --uid 1001 --intercept --api-socket /run/decerter/api.sock
   sudo curl --unix-socket /run/decerter/api.sock -X PUT -d '{"enabled": true}' http://decerter/api/v1/intercept
-  sudo curl --unix-socket /run/decerter/api.sock http://decerter/api/v1/flows`,
+  sudo curl --unix-socket /run/decerter/api.sock http://decerter/api/v1/flows
+
+  # an Android app on the device after decerter android setup, selected by its package name
+  adb shell -t /data/local/tmp/decerter run --package com.example.app --decrypt`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			quiet(cmd)
-			err = internal.Run(selection, scopeFilter, proxyPort, udpIdleTimeout, flowTable, decrypt, interceptFlows, apiSocket, holdTimeout, libssl, &logger)
+			err = internal.Run(selection, packageNames, scopeFilter, proxyPort, udpIdleTimeout, flowTable, decrypt, interceptFlows, apiSocket, holdTimeout, libssl, &logger)
 			return
 		},
 	}

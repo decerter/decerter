@@ -44,7 +44,8 @@ eBPF cgroup hooks pick the sockets of the selected processes and a uprobe on the
 so there is no CA certificate to install, no proxy setting and no change to the app.
 
 decerter runs as root on Linux 6.6 or newer with BTF, and on rooted Android 15 or newer (GKI android15-6.6 or newer).
-Nothing is selected until --uid or --pid, or a proc.uid or proc.pid term of --filter, names a process.
+Nothing is selected until --uid or --pid, --package on Android, or a proc.uid or proc.pid term of --filter, names a process.
+On Android, decerter android setup on the Linux host pushes decerter to the device and prints how to run it.
 Logs are JSON lines on stderr; stdout carries the output of the command.
 
 Every flag can also be set with an environment variable DECERTER_<FLAG>, upper case with - as _, for example DECERTER_LOG_LEVEL=debug.
@@ -54,11 +55,12 @@ Usage:
   decerter [command]
 
 Available Commands:
-  android     Android helpers
+  android     Set decerter up on an Android device or emulator, and put netd's hooks back
   capture     Write the selected flows to pcapng with their TLS secrets, or decrypted, without redirecting them
   completion  Generate the autocompletion script for the specified shell
   help        Help about any command
   keylog      Print the TLS secrets of the selected processes in NSS key log format
+  mcp         Serve an MCP server on stdio, a client of the control API, for an LLM client to read and with --allow-write change decerter's state
   run         Redirect the selected flows through decerter's proxy, optionally decrypting or intercepting them
   ui          Serve the minimal web UI on 127.0.0.1, a client of the control API
 
@@ -73,7 +75,7 @@ Additional help topics:
 Use "decerter [command] --help" for more information about a command.
 ```
 
-The examples select a separate local user `test` (UID 1001) and run the client as that user, so decerter never touches your own traffic. Nothing is selected without `--uid`, `--pid` or a `proc.uid` / `proc.pid` term in `--filter`.
+The examples select a separate local user `test` (UID 1001) and run the client as that user, so decerter never touches your own traffic. Nothing is selected without `--uid`, `--pid`, `--package` (Android) or a `proc.uid` / `proc.pid` term in `--filter`.
 
 ### run
 ```sh
@@ -242,23 +244,71 @@ sudo -u test curl -s https://example.com/ > /dev/null
 A TLS 1.3 session gets four lines (handshake and application traffic secrets of both sides), a TLS 1.2 or DTLS 1.2 session one `CLIENT_RANDOM` line.
 
 ## Android
-decerter runs on rooted Android 15 or newer with a GKI kernel android15-6.6 or newer (android15-6.6, android16-6.12, android17-6.18). Every app has its own UID, so `--uid` selects one app. Only the x86_64 Android 15 emulator was tested, with `adb root`; real arm64 devices, Magisk and KernelSU are not verified.
+decerter runs on rooted Android 15 or newer with a GKI kernel android15-6.6 or newer (android15-6.6, android16-6.12, android17-6.18), on x86_64 emulators and arm64 devices. Every app has its own UID, so `--package` (or `--uid`) selects one app. Only the x86_64 Android 15 emulator was tested, with `adb root`; real devices are accepted as experimental, and arm64 at runtime, Magisk and KernelSU are not verified.
+
+### Quickstart
+`decerter android setup` runs on the Linux host as your user, not as root: adb and the emulator belong to your user, and adb as root would start a second adb server.
+
+```sh
+make build                                            # ./decerter; make build-arm64 adds ./decerter-arm64 for arm64 devices
+./decerter android setup --avd decerter-a15 --package com.example.app
+```
+```
+adb      /usr/bin/adb
+boot     decerter-a15 as emulator-5554 without a window, its log is /tmp/decerter-emulator-2388541067.log
+device   emulator-5554, sdk_gphone64_x86_64 (emulator)
+android  15 (API level 35, userdebug build), x86_64, kernel 6.6.50-android15-8-g8adecb593e9b-ab12525588
+root     adbd runs as root (adb root)
+package  com.example.app, uid 10092
+binary   /data/local/tmp/decerter, decerter development (commit d1bca63, …), pushed from /home/user/decerter/decerter
+tls      Conscrypt offsets for Android 15 on x86_64
+api      adb forward tcp:35415 localabstract:decerter-api
+
+Start decerter on the device, Ctrl-C stops it and puts netd's hooks back:
+  adb -s emulator-5554 shell -t /data/local/tmp/decerter run --intercept --api-socket @decerter-api --package com.example.app
+Then the UI on this machine, in another terminal:
+  ./decerter ui --api-socket 127.0.0.1:35415
+Undo the setup with: ./decerter android setup --remove --serial emulator-5554
+```
+
+Run the two printed commands, open the URL `decerter ui` prints, and use the app: its HTTPS requests show up decrypted in the flow list, and the intercept switch holds them for editing.
+
+What setup does:
+- adb comes from `ADB`, then `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `PATH` and `~/Android/Sdk`. The device is the one adb sees, the one `--serial` names, or the emulator of `--avd`, which setup boots without a window (`-no-snapshot`, a cold boot) when it doesn't run; that emulator keeps running, `adb -s <serial> emu kill` stops it.
+- It reads the ABI, the Android release and the kernel and refuses Android before 15 and kernels before android15-6.6, with the reason. Then `adb root`; a Google Play image is a production build where adbd can't be root, and setup says so (a Google APIs image works). On a rooted production build (Magisk, KernelSU) it uses `su` instead and prints the command with `su -c`; that path is not tested.
+- It pushes the static binary for the device's ABI to `/data/local/tmp/decerter`: itself for x86_64, `decerter-arm64` next to it for arm64, or `--binary`. A dynamically linked binary or one for another architecture is refused. The binary path and decerter's data directory `/data/local/tmp/decerter.d` have different names; setup refuses a directory at the binary path. It is refused while a decerter runs on the device.
+- It checks that decerter has Conscrypt offsets for the Android release (15, 16 and 17 today); without them it warns, and decerter on the device relays TLS without decrypting it.
+- `--package` is looked up on the device the same way `decerter run --package` does it, so a typo fails before anything is pushed. Without it the printed command has `PACKAGE` in its place.
+- It forwards a host port to the API's abstract socket `@decerter-api`. `--port` picks the port; without it setup keeps the forward an earlier setup made, or lets adb pick a free one. adb forward's port is open to every local user of the workstation.
+- `--remove` undoes it: refused while decerter runs, it puts back netd's hooks a killed decerter left shared (`decerter android restore` on the device), then removes the binary, `/data/local/tmp/decerter.d` and the forwards to `@decerter-api`.
+
+### --package
+`run`, `capture` and `keylog` take `--package <name>`, repeatable or comma separated. decerter reads the app's UID from `/data/system/packages.list` on the device when it starts and adds it to the UIDs of `--uid`, so a package selects exactly what `--uid <its uid>` selects, also together with `--filter`, `--dst-cidr` and `--dst-port`. An unknown name fails before anything is attached and lists the closest installed packages:
+
+```
+unknown package "no.such.app", the closest installed packages: android, com.android.mtp, com.android.bips, com.android.egg, com.android.nfc (adb shell pm list packages lists all of them)
+```
+
+The UID is the app's UID in user 0, the device owner; for a work profile or another user, select with `--uid <user>*100000+<app uid>`. Some system packages share a UID (`android.uid.system`, 1000, is also `system_server`); decerter warns, because then every process of that UID is selected. On Linux there is no packages list, and `--package` fails with an error that points to `--uid` and `--pid`.
+
+### By hand
+Without `decerter android setup`, the same steps with adb:
 
 ```sh
 make build                  # the x86_64 emulator; make build-arm64 builds decerter-arm64 for arm64 devices
 adb root                    # the emulator's adbd as root; its su takes no -c, so decerter runs directly in adb shell
 adb push decerter /data/local/tmp/decerter
-adb shell pm list packages -U | grep <package>      # the app's uid, e.g. uid:10092
+adb shell pm list packages -U | grep <package>      # the app's uid for --uid, e.g. uid:10092
 
 # run mode, stdout and the logs in the adb shell
-adb shell /data/local/tmp/decerter run --uid 10092 --decrypt
+adb shell /data/local/tmp/decerter run --package com.example.app --decrypt
 
 # live capture into tshark or Wireshark on the host; adb exec-out shares one pty for stdout and stderr,
 # so the logs have to go to a file on the device
 adb exec-out sh -c '/data/local/tmp/decerter capture --uid 10092 -w - 2>/data/local/tmp/decerter.log' | tshark -l -i - -Y 'http or http2'
 
 # the control API and the minimal UI on the workstation; adb forward's port is open to every local user of the workstation
-adb shell /data/local/tmp/decerter run --uid 10092 --intercept --api-socket @decerter-api
+adb shell /data/local/tmp/decerter run --package com.example.app --intercept --api-socket @decerter-api
 adb forward tcp:8080 localabstract:decerter-api
 ./decerter ui --api-socket 127.0.0.1:8080
 
@@ -268,6 +318,10 @@ curl -N http://127.0.0.1:8080/api/v1/captures/stream | tshark -l -i - -Y 'http o
 
 # after decerter was killed with SIGKILL: put netd's hooks back
 adb shell /data/local/tmp/decerter android restore
+
+# clean up
+adb shell rm -rf /data/local/tmp/decerter /data/local/tmp/decerter.d
+adb forward --remove tcp:8080
 ```
 
 netd holds most cgroup hooks exclusively. While decerter runs it attaches netd's programs again in shared mode next to its own and writes down what it changed in its data directory `/data/local/tmp/decerter.d` (the binary and its data directory need different names). On exit, also on SIGHUP when the adb shell closes, it puts netd's hooks back. After a SIGKILL they stay shared, and a netd restart then fails until `decerter android restore` ran; a decerter that starts over a leftover state file restores first by itself.
