@@ -34,12 +34,20 @@ info:
     http/1.1 or none) into the history: request and response heads with their fields in order and case, and the
     bodies without chunk framing, at most 100000 exchanges and 32 MiB of heads and bodies in total, 10000 exchanges
     and 1 MiB per flow, apart from the message payloads. Upgrade (101) and CONNECT stop it for the rest of the flow.
-    The filter fields `http`, `http.request.method`, `http.request.uri`, `http.host`, `http.response.code` and
-    `http.user_agent` match a flow by any of its exchanges, and a message of layer `http` by its own head (a response
-    with the fields of its request); a capture filter can't use them, a capture decides a flow when it starts.
+    HTTP/2 (TLS with ALPN h2, or a flow without ALPN that starts with the connection preface, h2c with prior knowledge)
+    is read the same way, one exchange per stream (`stream_id`): the pseudo-header fields give method, target
+    (`:path`), status and URL (`:scheme`, `:authority`) and stay in `headers` in the order they came, a header block
+    after the body is the trailers, a server push is an exchange with the promised request (`promise_stream_id`), a
+    reset or GOAWAY ends a stream with a note, and a gRPC body lists its length-prefixed messages in `grpc_messages`.
+    At most 1000 streams of a flow are followed at once.
+    The filter fields `http`, `http.request.method`, `http.request.uri`, `http.host` (`:authority` on HTTP/2),
+    `http.response.code`, `http.user_agent` and `http2.streamid` match a flow by any of its exchanges, and a message of
+    layer `http` by its own head (a response with the fields of its request); a capture filter can't use them, a
+    capture decides a flow when it starts.
 
     Holding and rules need `decerter run --intercept`; otherwise those operations answer 409. Rules and the hold queue
-    with layer `http` take whole HTTP/1 messages after the record rules: the editable form is the head as it came
+    with layer `http` take whole HTTP/1 messages after the record rules (HTTP/2 is read-only: its frames go on through
+    the record layer, and its messages carry a note while such a rule or hold exists): the editable form is the head as it came
     followed by the body without chunk framing. An unchanged message goes on as it came; a changed one keeps its head
     as written, gets its Content-Length set to the body (or one added when it had a body framing and now has neither
     field) and a chunked body is sent as one chunk with the original trailers. A message is kept back from its first
@@ -755,11 +763,11 @@ components:
               description: When the head came
             framing:
               type: string
-              description: How the body is delimited
-              enum: [none, length, chunked, close]
+              description: How the body is delimited; frames is HTTP/2, the body comes in DATA frames until END_STREAM
+              enum: [none, length, chunked, close, frames]
             state:
               type: string
-              description: head (body still coming), complete, incomplete (the stream ended or stopped being HTTP/1 first)
+              description: head (body still coming), complete, incomplete (the stream ended, was reset or stopped being HTTP first)
               enum: [head, complete, incomplete]
             trailers:
               type: array
@@ -784,7 +792,32 @@ components:
               $ref: "#/components/schemas/HTTPHead"
             note:
               type: string
-              description: Why the HTTP layer let the message go on as it came (too large, too slow, not HTTP/1 any more)
+              description: |
+                Why the HTTP layer let the message go on as it came (too large, too slow, not HTTP/1 any more); on HTTP/2
+                also a reset or GOAWAY, a cut gRPC message, and that rules and holds of layer http skipped it (HTTP/2 is
+                read-only)
+            grpc_messages:
+              type: array
+              description: |
+                The length-prefixed messages of a gRPC body (HTTP/2 with a content-type starting with application/grpc),
+                in body order, at most 1000; the body itself (GET /exchanges/{id}/body) keeps the prefixes
+              items:
+                $ref: "#/components/schemas/GRPCMessage"
+    GRPCMessage:
+      type: object
+      required: [offset, length]
+      properties:
+        offset:
+          type: integer
+          format: int64
+          description: Body offset of the 5-byte prefix; the message starts 5 bytes later
+        length:
+          type: integer
+          format: uint32
+          description: Message bytes after the prefix as the prefix says; past the body length the message was cut short
+        compressed:
+          type: boolean
+          description: The compressed flag of the prefix; the message is not decoded
     Exchange:
       type: object
       required: [id, flow_id, protocol]
@@ -797,7 +830,17 @@ components:
           format: uint64
         protocol:
           type: string
-          description: HTTP/1.1
+          description: HTTP/1.1 or HTTP/2
+        stream_id:
+          type: integer
+          format: uint32
+          description: HTTP/2 only, the stream of the exchange
+        promise_stream_id:
+          type: integer
+          format: uint32
+          description: |
+            HTTP/2 server push only: the stream whose PUSH_PROMISE opened this exchange; its request is the one the
+            server promised
         request:
           $ref: "#/components/schemas/HTTPMessage"
         interim:

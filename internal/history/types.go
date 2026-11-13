@@ -27,6 +27,8 @@ const (
 	DefaultFlowExchangeBytes int64 = 1 << 20
 	// the distinct values of each http field a flow keeps for the filter
 	maxFlowHTTPValues int = 256
+	// the bytes a gRPC message boundary counts in the history
+	grpcMessageBytes int64 = 16
 )
 
 // how much the history keeps: flows, messages and payload bytes in total and per flow, exchanges and their bytes in total and per flow
@@ -70,13 +72,21 @@ type flowRecord struct {
 }
 
 // one exchange of a flow: its request and final response by api.Side, the 1xx responses before it; bytes is what it keeps of heads and bodies
+// stream is its HTTP/2 stream, zero for HTTP/1
 type exchangeRecord struct {
 	id       uint64
 	flowID   uint64
 	protocol string
+	stream   Stream
 	messages map[api.Side]*httpRecord
 	interim  []api.HTTPMessage
 	bytes    int64
+}
+
+// the HTTP/2 stream of an exchange: ID, and PromisedBy the stream whose PUSH_PROMISE opened a server push, 0 for any other
+type Stream struct {
+	ID         uint32
+	PromisedBy uint32
 }
 
 // one HTTP message: view without StoredLength, body what went on and original what the peer sent when it was edited, both cut by the limits

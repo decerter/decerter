@@ -363,5 +363,24 @@ func TestExchangesPositive(state *testing.T) {
 
 	if _, found = flows.Exchange(first); found || (flows.Status().ExchangeBytes != 0) || (flows.Status().Exchanges != 0) {
 		state.Errorf("Test of history.History exchanges failed, an evicted flow should take its exchanges, status: %+v", flows.Status())
+		return
+	}
+
+	// HTTP/2: a stream and a server push, :authority as the host, gRPC boundaries kept with the head, none for a side without a message
+	flows = history.New(history.DefaultLimits(), nil)
+	flowID = flows.OpenFlow(1, testValues(443, filter.AbsentTLSState), [32]byte{})
+	request := api.HTTPMessage{HTTPHead: api.HTTPHead{Method: "POST", Target: "/a.B/C", Version: "HTTP/2", Headers: []api.Header{{Name: ":authority", Value: "grpc.test"}, {Name: "host", Value: "other"}}}, Framing: api.FramesFraming, State: api.HeadHTTPState}
+	first = flows.OpenStream(flowID, "HTTP/2", history.Stream{ID: 3, PromisedBy: 0}, api.RequestSide, request)
+	pushed := flows.OpenStream(flowID, "HTTP/2", history.Stream{ID: 2, PromisedBy: 3}, api.RequestSide, testRequest("GET", "/pushed"))
+	flows.AppendGRPC(first, api.RequestSide, []api.GRPCMessage{{Offset: 0, Length: 4, Compressed: false}, {Offset: 9, Length: 1, Compressed: true}})
+	flows.AppendGRPC(first, api.ResponseSide, []api.GRPCMessage{{Offset: 0, Length: 1, Compressed: false}})
+	exchange, _ = flows.Exchange(first)
+	pushedExchange, _ := flows.Exchange(pushed)
+	parsed, err := filter.Parse(`http2.streamid == 2 && http2.streamid == 3 && http.host == "grpc.test"`)
+	matched, _ := flows.Flows(&parsed, 0, 10)
+
+	if (err != nil) || (exchange.StreamID != 3) || (exchange.PromiseStreamID != 0) || (len(exchange.Request.GRPCMessages) != 2) || !exchange.Request.GRPCMessages[1].Compressed || (exchange.Response != nil) ||
+		(pushedExchange.StreamID != 2) || (pushedExchange.PromiseStreamID != 3) || (len(matched) != 1) {
+		state.Errorf("Test of history.History streams failed, exchange: %+v, pushed: %+v, flows: %d, error: %v", exchange, pushedExchange, len(matched), err)
 	}
 }

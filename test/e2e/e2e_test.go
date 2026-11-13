@@ -96,6 +96,11 @@ func TestMain(main *testing.M) {
 		os.Exit(0)
 	}
 
+	// the test binary is the Go HTTP/2 client of the test user in the http/2 cases
+	if mode := os.Getenv(clientCommandEnvironment); mode != "" {
+		os.Exit(runClient(mode, os.Args[1:]))
+	}
+
 	err := prepare()
 
 	if err != nil {

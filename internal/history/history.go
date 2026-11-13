@@ -490,6 +490,7 @@ func flowValues(record *flowRecord) (values filter.Values) {
 			Hosts:      slices.Clone(record.http.Hosts),
 			Codes:      slices.Clone(record.http.Codes),
 			UserAgents: slices.Clone(record.http.UserAgents),
+			StreamIDs:  slices.Clone(record.http.StreamIDs),
 		}
 	}
 

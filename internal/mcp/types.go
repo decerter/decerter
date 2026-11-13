@@ -131,18 +131,22 @@ type HeldMessage struct {
 
 // one exchange of list_exchanges without its header fields: the request line, the status, how far each message came and the lengths of the bodies; strings are escaped
 type ExchangeSummary struct {
-	ID                 uint64       `json:"id"`
-	FlowID             uint64       `json:"flow_id"`
-	Protocol           string       `json:"protocol"`
-	Method             string       `json:"method,omitzero"`
-	URL                string       `json:"url,omitzero" jsonschema:"untrusted, escaped: the scheme of the flow, the Host field and the target"`
-	Status             int          `json:"status,omitzero"`
-	RequestState       v1.HTTPState `json:"request_state,omitzero" jsonschema:"head (body still coming), complete or incomplete"`
-	ResponseState      v1.HTTPState `json:"response_state,omitzero"`
-	RequestBodyLength  int          `json:"request_body_length"`
-	ResponseBodyLength int          `json:"response_body_length"`
-	Edited             bool         `json:"edited" jsonschema:"a rule or an edit of layer http changed the request or the response"`
-	Note               string       `json:"note,omitzero" jsonschema:"why the HTTP layer let a message go on as it came"`
+	ID                   uint64       `json:"id"`
+	FlowID               uint64       `json:"flow_id"`
+	Protocol             string       `json:"protocol"`
+	StreamID             uint32       `json:"stream_id,omitzero" jsonschema:"the HTTP/2 stream"`
+	PromiseStreamID      uint32       `json:"promise_stream_id,omitzero" jsonschema:"an HTTP/2 server push: the stream whose PUSH_PROMISE carried its request"`
+	Method               string       `json:"method,omitzero"`
+	URL                  string       `json:"url,omitzero" jsonschema:"untrusted, escaped: the scheme of the flow, the Host field and the target"`
+	Status               int          `json:"status,omitzero"`
+	RequestState         v1.HTTPState `json:"request_state,omitzero" jsonschema:"head (body still coming), complete or incomplete"`
+	ResponseState        v1.HTTPState `json:"response_state,omitzero"`
+	RequestBodyLength    int          `json:"request_body_length"`
+	ResponseBodyLength   int          `json:"response_body_length"`
+	RequestGRPCMessages  int          `json:"request_grpc_messages,omitzero" jsonschema:"length-prefixed gRPC messages listed in the request body, get_exchange has their offsets"`
+	ResponseGRPCMessages int          `json:"response_grpc_messages,omitzero"`
+	Edited               bool         `json:"edited" jsonschema:"a rule or an edit of layer http changed the request or the response"`
+	Note                 string       `json:"note,omitzero" jsonschema:"why the HTTP layer let a message go on as it came"`
 }
 
 type ExchangeSummaryList struct {
@@ -267,7 +271,7 @@ type SetInterceptInput struct {
 	Enabled   bool         `json:"enabled" jsonschema:"true holds the messages of direction whose flow the filter takes until forward_held, drop_held or the hold timeout; false forwards every held message as it is and holds nothing more"`
 	Filter    string       `json:"filter,omitzero" jsonschema:"a filter in the language of decerter --filter, only the flows it takes are held; empty holds every flow in scope"`
 	Direction v1.Direction `json:"direction,omitzero" jsonschema:"up (default: what the client sends), down (what the server answers) or both"`
-	Layer     v1.Layer     `json:"layer,omitzero" jsonschema:"empty (default) holds the messages of every record layer (one TLS record, TCP read or datagram); http holds whole HTTP/1 messages (the head as it came and the body without chunk framing); tcp, tls, udp or dtls only that layer"`
+	Layer     v1.Layer     `json:"layer,omitzero" jsonschema:"empty (default) holds the messages of every record layer (one TLS record, TCP read or datagram); http holds whole HTTP/1 messages (the head as it came and the body without chunk framing; HTTP/2 is not held, its frames are records); tcp, tls, udp or dtls only that layer"`
 }
 
 type EditHeldInput struct {
@@ -294,7 +298,7 @@ type RuleReplace struct {
 type AddRuleInput struct {
 	Filter    string       `json:"filter,omitzero" jsonschema:"a filter in the language of decerter --filter, the rule only changes the flows it takes; empty is every flow in scope"`
 	Direction v1.Direction `json:"direction,omitzero" jsonschema:"up (what the client sends), down (what the server answers) or both (default)"`
-	Layer     v1.Layer     `json:"layer,omitzero" jsonschema:"only messages of this layer: tcp, tls, udp or dtls, or http for whole HTTP/1 messages (head and body without chunk framing; Content-Length and chunking are fixed after the replace); empty is every record layer, not http"`
+	Layer     v1.Layer     `json:"layer,omitzero" jsonschema:"only messages of this layer: tcp, tls, udp or dtls, or http for whole HTTP/1 messages (head and body without chunk framing; Content-Length and chunking are fixed after the replace; HTTP/2 is not changed by it); empty is every record layer, not http"`
 	Find      RuleFind     `json:"find"`
 	Replace   RuleReplace  `json:"replace"`
 }

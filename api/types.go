@@ -99,6 +99,8 @@ const (
 	ChunkedFraming Framing = "chunked"
 	// the response body ends with the stream
 	CloseFraming Framing = "close"
+	// HTTP/2: the body comes in DATA frames, END_STREAM ends it
+	FramesFraming Framing = "frames"
 )
 
 // how far an HTTP message came
@@ -109,7 +111,7 @@ const (
 	HeadHTTPState HTTPState = "head"
 	// the whole message went on
 	CompleteHTTPState HTTPState = "complete"
-	// the stream ended or stopped being HTTP/1 before the message did
+	// the stream ended, was reset or stopped being HTTP before the message did
 	IncompleteHTTPState HTTPState = "incomplete"
 )
 
@@ -430,32 +432,45 @@ type HTTPHead struct {
 // one HTTP message of an exchange as it went on, without its body (read it with GET /api/v1/exchanges/{id}/body)
 // URL is the scheme of the flow, the Host field and the target of a request; BodyLength is the body that went on without its chunk framing, StoredLength what the history kept of it
 // Edited is true when a rule or an edit of layer http changed the message, Original is then its head as it came and OriginalBodyLength its body; Verdict drop is a message that did not go on
-// Note says why the HTTP layer did not take the message as a whole: too large, too slow, or the stream stopped being HTTP/1
+// Note says why the HTTP layer did not take the message as a whole: too large, too slow, or the stream stopped being HTTP/1; for HTTP/2 also a reset, a GOAWAY or that rules skip it
+// GRPCMessages are the length-prefixed messages of a gRPC body (HTTP/2 with content-type application/grpc…), at most 1000
 type HTTPMessage struct {
 	HTTPHead
-	URL                string    `json:"url,omitzero"`
-	Time               time.Time `json:"time"`
-	Framing            Framing   `json:"framing"`
-	State              HTTPState `json:"state"`
-	Trailers           []Header  `json:"trailers,omitzero"`
-	BodyLength         int       `json:"body_length"`
-	OriginalBodyLength int       `json:"original_body_length"`
-	StoredLength       int       `json:"stored_length"`
-	Edited             bool      `json:"edited"`
-	Verdict            Verdict   `json:"verdict,omitzero"`
-	Original           *HTTPHead `json:"original,omitzero"`
-	Note               string    `json:"note,omitzero"`
+	URL                string        `json:"url,omitzero"`
+	Time               time.Time     `json:"time"`
+	Framing            Framing       `json:"framing"`
+	State              HTTPState     `json:"state"`
+	Trailers           []Header      `json:"trailers,omitzero"`
+	BodyLength         int           `json:"body_length"`
+	OriginalBodyLength int           `json:"original_body_length"`
+	StoredLength       int           `json:"stored_length"`
+	Edited             bool          `json:"edited"`
+	Verdict            Verdict       `json:"verdict,omitzero"`
+	Original           *HTTPHead     `json:"original,omitzero"`
+	Note               string        `json:"note,omitzero"`
+	GRPCMessages       []GRPCMessage `json:"grpc_messages,omitzero"`
+}
+
+// one length-prefixed message of a gRPC body: Offset is the body offset of its 5-byte prefix, Length the message bytes after the prefix as the prefix says
+// (a message whose Offset+5+Length is past the body length was cut short), Compressed the flag of the prefix; the message is not decoded
+type GRPCMessage struct {
+	Offset     int64  `json:"offset"`
+	Length     uint32 `json:"length"`
+	Compressed bool   `json:"compressed,omitzero"`
 }
 
 // one HTTP request and its response on a flow, in the order the requests came; Interim are the 1xx responses before the final one
 // a response without a request (the server spoke first) is an exchange of its own
+// HTTP/2: StreamID is the stream of the exchange, PromiseStreamID the stream whose PUSH_PROMISE made it a server push (its request is the one the server promised)
 type Exchange struct {
-	ID       uint64        `json:"id"`
-	FlowID   uint64        `json:"flow_id"`
-	Protocol string        `json:"protocol"`
-	Request  *HTTPMessage  `json:"request,omitzero"`
-	Interim  []HTTPMessage `json:"interim,omitzero"`
-	Response *HTTPMessage  `json:"response,omitzero"`
+	ID              uint64        `json:"id"`
+	FlowID          uint64        `json:"flow_id"`
+	Protocol        string        `json:"protocol"`
+	StreamID        uint32        `json:"stream_id,omitzero"`
+	PromiseStreamID uint32        `json:"promise_stream_id,omitzero"`
+	Request         *HTTPMessage  `json:"request,omitzero"`
+	Interim         []HTTPMessage `json:"interim,omitzero"`
+	Response        *HTTPMessage  `json:"response,omitzero"`
 }
 
 // GET /api/v1/flows/{id}/exchanges, oldest first

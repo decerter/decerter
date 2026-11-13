@@ -118,7 +118,7 @@ func TestTypesPositive(state *testing.T) {
 		"Traffic": v1.Traffic{}, "Flow": v1.Flow{}, "FlowList": v1.FlowList{}, "Message": v1.Message{}, "MessageList": v1.MessageList{},
 		"Payload": v1.Payload{}, "MessageDetail": v1.MessageDetail{}, "Hold": v1.Hold{}, "HoldList": v1.HoldList{}, "EditRequest": v1.EditRequest{},
 		"RuleRequest": v1.RuleRequest{}, "Rule": v1.Rule{}, "RuleList": v1.RuleList{}, "Event": v1.Event{},
-		"Header": v1.Header{}, "HTTPHead": v1.HTTPHead{}, "HTTPMessage": v1.HTTPMessage{}, "Exchange": v1.Exchange{}, "ExchangeList": v1.ExchangeList{}, "ExchangeBody": v1.ExchangeBody{},
+		"Header": v1.Header{}, "HTTPHead": v1.HTTPHead{}, "HTTPMessage": v1.HTTPMessage{}, "GRPCMessage": v1.GRPCMessage{}, "Exchange": v1.Exchange{}, "ExchangeList": v1.ExchangeList{}, "ExchangeBody": v1.ExchangeBody{},
 		"CaptureStatus": v1.CaptureStatus{}, "CaptureLimits": v1.CaptureLimits{}, "CaptureRequest": v1.CaptureRequest{}, "Capture": v1.Capture{}, "CaptureList": v1.CaptureList{},
 	}
 
@@ -772,6 +772,13 @@ func newTestBackend(ctx context.Context) (test testBackend, err error) {
 	backend.History.AppendBody(test.exchange, v1.ResponseSide, []byte("hello world"))
 	edit := history.HTTPEdit{Head: response.HTTPHead, URL: "", Body: []byte("hello planet"), Verdict: v1.ForwardVerdict}
 	backend.History.EndMessage(test.exchange, v1.ResponseSide, history.HTTPEnd{State: v1.CompleteHTTPState, Trailers: []v1.Header{{Name: "X-Sum", Value: "1"}}, Note: "", Edit: &edit})
+	// an HTTP/2 server push on the same flow whose response is a gRPC message cut short
+	pushed := backend.History.OpenStream(test.tlsFlow, "HTTP/2", history.Stream{ID: 2, PromisedBy: 1}, v1.RequestSide, v1.HTTPMessage{HTTPHead: v1.HTTPHead{Method: "POST", Target: "/a.B/C", Version: "HTTP/2", Headers: []v1.Header{{Name: ":method", Value: "POST"}, {Name: ":path", Value: "/a.B/C"}}}, URL: "https://example.com/a.B/C", Time: time.Now(), Framing: v1.NoneFraming, State: v1.HeadHTTPState})
+	backend.History.EndMessage(pushed, v1.RequestSide, history.HTTPEnd{State: v1.CompleteHTTPState, Trailers: nil, Note: "", Edit: nil})
+	backend.History.AddHead(pushed, v1.ResponseSide, v1.HTTPMessage{HTTPHead: v1.HTTPHead{Version: "HTTP/2", Status: 200, Headers: []v1.Header{{Name: ":status", Value: "200"}, {Name: "content-type", Value: "application/grpc"}}}, Time: time.Now(), Framing: v1.FramesFraming, State: v1.HeadHTTPState}, false)
+	backend.History.AppendBody(pushed, v1.ResponseSide, []byte{1, 0, 0, 0, 9, 'h', 'i'})
+	backend.History.AppendGRPC(pushed, v1.ResponseSide, []v1.GRPCMessage{{Offset: 0, Length: 9, Compressed: true}})
+	backend.History.EndMessage(pushed, v1.ResponseSide, history.HTTPEnd{State: v1.IncompleteHTTPState, Trailers: nil, Note: "the server reset the stream: CANCEL; the last gRPC message is cut short", Edit: nil})
 	backend.History.CloseFlow(test.tlsFlow, history.Counters{Bytes: 100, Datagrams: 0}, history.Counters{Bytes: 200, Datagrams: 0})
 	// an open udp flow whose TLS state was never read
 	udpValues := filter.Values{PID: 43, UID: 1001, GID: 1001, Comm: "dig", IPProtocol: syscall.IPPROTO_UDP, Source: netip.MustParseAddrPort("[::ffff:127.0.0.1]:5353"), Destination: netip.MustParseAddrPort("127.0.0.1:53"), TLS: filter.UnknownTLSState}

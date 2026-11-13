@@ -14,11 +14,17 @@ import (
 
 // a new exchange of a flow, from the head of a request or of a response that came without one; id is 0 when the flow is gone or keeps no more exchanges
 func (history *History) OpenExchange(flowID uint64, protocol string, side api.Side, message api.HTTPMessage) (id uint64) {
+	id = history.OpenStream(flowID, protocol, Stream{ID: 0, PromisedBy: 0}, side, message)
+	return
+}
+
+// OpenExchange for an HTTP/2 stream
+func (history *History) OpenStream(flowID uint64, protocol string, stream Stream, side api.Side, message api.HTTPMessage) (id uint64) {
 	if history == nil {
 		return
 	}
 
-	view, found := history.openExchange(flowID, protocol, side, message)
+	view, found := history.openExchange(flowID, protocol, stream, side, message)
 
 	if found {
 		id = view.ID
@@ -28,7 +34,7 @@ func (history *History) OpenExchange(flowID uint64, protocol string, side api.Si
 	return
 }
 
-func (history *History) openExchange(flowID uint64, protocol string, side api.Side, message api.HTTPMessage) (view api.Exchange, found bool) {
+func (history *History) openExchange(flowID uint64, protocol string, stream Stream, side api.Side, message api.HTTPMessage) (view api.Exchange, found bool) {
 	history.mutex.Lock()
 	defer history.mutex.Unlock()
 	flow, found := history.flows[flowID]
@@ -54,6 +60,7 @@ func (history *History) openExchange(flowID uint64, protocol string, side api.Si
 		id:       history.nextExchangeID,
 		flowID:   flowID,
 		protocol: protocol,
+		stream:   stream,
 		messages: map[api.Side]*httpRecord{},
 		interim:  nil,
 		bytes:    0,
@@ -106,7 +113,7 @@ func (history *History) setHead(flow *flowRecord, record *exchangeRecord, side a
 	}
 
 	record.messages[side] = &httpRecord{view: message, body: nil, original: nil}
-	addHTTPValues(flow, message)
+	addHTTPValues(flow, message, record.stream.ID)
 }
 
 // body bytes of a message as they went on, without chunk framing; what does not fit is counted but not kept
@@ -127,6 +134,29 @@ func (history *History) AppendBody(id uint64, side api.Side, data []byte) {
 	message.view.BodyLength += len(data)
 	message.view.OriginalBodyLength = message.view.BodyLength
 	message.body = append(message.body, history.keepExchange(flow, record, data)...)
+}
+
+// the boundaries of gRPC messages of a body as they came, kept with the head: each counts a few bytes, the HTTP layer lists at most 1000 per message
+func (history *History) AppendGRPC(id uint64, side api.Side, messages []api.GRPCMessage) {
+	if (history == nil) || (id == 0) || (len(messages) == 0) {
+		return
+	}
+
+	history.mutex.Lock()
+	defer history.mutex.Unlock()
+	record, flow, found := history.exchangeOf(id)
+
+	if !found || (record.messages[side] == nil) {
+		return
+	}
+
+	size := grpcMessageBytes * int64(len(messages))
+	history.makeRoom(flow, size)
+	record.bytes += size
+	flow.exchangeBytes += size
+	history.exchangeBytes += size
+	message := record.messages[side]
+	message.view.GRPCMessages = append(message.view.GRPCMessages, messages...)
 }
 
 // the message ended, or the HTTP layer stopped reading it; an edit replaces its head and body, what came before is kept as the original
@@ -176,7 +206,7 @@ func (history *History) endMessage(id uint64, side api.Side, end HTTPEnd) (view 
 			record.bytes += size
 			flow.exchangeBytes += size
 			history.exchangeBytes += size
-			addHTTPValues(flow, message.view)
+			addHTTPValues(flow, message.view, record.stream.ID)
 		}
 	}
 
@@ -299,10 +329,14 @@ func headBytes(head api.HTTPHead) (size int64) {
 	return
 }
 
-// the flow's http fields get the method, target, Host and User-Agent of a request, the status of a final response; each distinct value once, up to maxFlowHTTPValues per field
-func addHTTPValues(flow *flowRecord, message api.HTTPMessage) {
+// the flow's http fields get the method, target, Host (:authority on HTTP/2) and User-Agent of a request, the status of a final response, the HTTP/2 stream of either; each distinct value once, up to maxFlowHTTPValues per field
+func addHTTPValues(flow *flowRecord, message api.HTTPMessage, streamID uint32) {
 	if flow.http == nil {
-		flow.http = &filter.HTTPValues{Methods: nil, URIs: nil, Hosts: nil, Codes: nil, UserAgents: nil}
+		flow.http = &filter.HTTPValues{Methods: nil, URIs: nil, Hosts: nil, Codes: nil, UserAgents: nil, StreamIDs: nil}
+	}
+
+	if (streamID != 0) && !slices.Contains(flow.http.StreamIDs, streamID) && (len(flow.http.StreamIDs) < maxFlowHTTPValues) {
+		flow.http.StreamIDs = append(flow.http.StreamIDs, streamID)
 	}
 
 	if message.Status != 0 {
@@ -315,7 +349,7 @@ func addHTTPValues(flow *flowRecord, message api.HTTPMessage) {
 
 	flow.http.Methods = addValue(flow.http.Methods, message.Method)
 	flow.http.URIs = addValue(flow.http.URIs, message.Target)
-	flow.http.Hosts = addValue(flow.http.Hosts, headerValue(message.HTTPHead, "Host"))
+	flow.http.Hosts = addValue(flow.http.Hosts, HostOf(message.HTTPHead))
 	flow.http.UserAgents = addValue(flow.http.UserAgents, headerValue(message.HTTPHead, "User-Agent"))
 }
 
@@ -324,6 +358,17 @@ func addValue(values []string, value string) (result []string) {
 
 	if (value != "") && !slices.Contains(values, value) && (len(values) < maxFlowHTTPValues) {
 		result = append(result, value)
+	}
+
+	return
+}
+
+// the host a request names: :authority of HTTP/2, the Host field otherwise
+func HostOf(head api.HTTPHead) (host string) {
+	host = headerValue(head, ":authority")
+
+	if host == "" {
+		host = headerValue(head, "Host")
 	}
 
 	return
@@ -343,12 +388,14 @@ func headerValue(head api.HTTPHead, name string) (value string) {
 
 func exchangeView(record *exchangeRecord) (exchange api.Exchange) {
 	exchange = api.Exchange{
-		ID:       record.id,
-		FlowID:   record.flowID,
-		Protocol: record.protocol,
-		Request:  nil,
-		Interim:  slices.Clone(record.interim),
-		Response: nil,
+		ID:              record.id,
+		FlowID:          record.flowID,
+		Protocol:        record.protocol,
+		StreamID:        record.stream.ID,
+		PromiseStreamID: record.stream.PromisedBy,
+		Request:         nil,
+		Interim:         slices.Clone(record.interim),
+		Response:        nil,
 	}
 
 	if message := record.messages[api.RequestSide]; message != nil {
@@ -367,6 +414,7 @@ func messageOf(record *httpRecord) (message api.HTTPMessage) {
 	message.StoredLength = len(record.body)
 	message.Headers = slices.Clone(message.Headers)
 	message.Trailers = slices.Clone(message.Trailers)
+	message.GRPCMessages = slices.Clone(message.GRPCMessages)
 
 	if message.Headers == nil {
 		message.Headers = []api.Header{}

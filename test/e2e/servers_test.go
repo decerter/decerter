@@ -30,12 +30,14 @@ const (
 
 // what a test server serves: plain HTTP when Certificate is nil, TLS pinned to Version and CipherSuite when they are set
 // the server picks HTTP/2 through ALPN when HTTP2 is true, or with prior knowledge on plain HTTP; KeyLog gets the server's NSS key log lines, nil is none
+// Frames counts the HTTP/2 frames of a plain server, nil counts none
 type serverConfig struct {
 	Certificate *certificate
 	Version     uint16
 	CipherSuite uint16
 	HTTP2       bool
 	KeyLog      io.Writer
+	Frames      *frameCounts
 }
 
 // what a test server saw of one request; Body and ContentLength only for the paths of the HTTP layer tests, the other tests compare the rest
@@ -71,7 +73,8 @@ func startServer(state *testing.T, config serverConfig) (server testServer) {
 		Handler:   http.HandlerFunc(server.handle),
 		Protocols: protocols,
 		// the cipher-suite matrix runs HTTP/2 over the CBC and RSA key exchange suites too, as eproxy's server allowed
-		HTTP2: &http.HTTP2Config{PermitProhibitedCipherSuites: true},
+		// a client that allows a larger HPACK table gets one, so the table size changes during a test
+		HTTP2: &http.HTTP2Config{PermitProhibitedCipherSuites: true, MaxEncoderHeaderTableSize: 65536},
 	}
 
 	if config.Certificate != nil {
@@ -102,6 +105,10 @@ func startServer(state *testing.T, config serverConfig) (server testServer) {
 		listener = tls.NewListener(listener, tlsConfig)
 	} else if config.HTTP2 {
 		protocols.SetUnencryptedHTTP2(true)
+
+		if config.Frames != nil {
+			listener = frameListener{Listener: listener, counts: config.Frames}
+		}
 	}
 
 	serveErrChannel := make(chan error, 1)
@@ -160,6 +167,11 @@ func (server testServer) handle(writer http.ResponseWriter, request *http.Reques
 		answer = []string{fmt.Sprintf("len=%d body=%s", request.ContentLength, body)}
 	case "/chunked":
 		answer = []string{"hello wor", "ld, chunked!"}
+	case "/large":
+		answer = largeBody()
+	case grpcPath:
+		server.answerGRPC(writer, request, received)
+		return
 	default:
 	}
 

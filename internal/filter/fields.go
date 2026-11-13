@@ -44,6 +44,7 @@ const (
 	HTTPHostField    Field = "http.host"
 	HTTPCodeField    Field = "http.response.code"
 	HTTPAgentField   Field = "http.user_agent"
+	HTTP2StreamField Field = "http2.streamid"
 )
 
 // what the values of a field are
@@ -67,7 +68,7 @@ const (
 	ProcSourceType SourceType = "proc"
 	// the TLS or DTLS ClientHello the client sends first, known only after it
 	ClientHelloSourceType SourceType = "clienthello"
-	// the HTTP/1 heads the HTTP layer read: a message of layer http has the fields of its request (and a response its code), a flow of the history every value of its exchanges
+	// the HTTP/1 and HTTP/2 heads the HTTP layer read: a message of layer http has the fields of its request (and a response its code), a flow of the history every value of its exchanges
 	// a flow is in scope or not before any of them is known, so the scope and capture filters refuse them
 	HTTPSourceType SourceType = "http"
 )
@@ -123,6 +124,7 @@ var (
 		HTTPHostField:    {Name: HTTPHostField, Type: StringFieldType, IsMulti: true, Source: HTTPSourceType, Pushdown: "", maximum: 0},
 		HTTPCodeField:    {Name: HTTPCodeField, Type: NumberFieldType, IsMulti: true, Source: HTTPSourceType, Pushdown: "", maximum: 999},
 		HTTPAgentField:   {Name: HTTPAgentField, Type: StringFieldType, IsMulti: true, Source: HTTPSourceType, Pushdown: "", maximum: 0},
+		HTTP2StreamField: {Name: HTTP2StreamField, Type: NumberFieldType, IsMulti: true, Source: HTTPSourceType, Pushdown: "", maximum: math.MaxInt32},
 	}
 )
 

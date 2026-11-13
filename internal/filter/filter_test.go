@@ -71,9 +71,11 @@ var (
 		Protocols:   nil,
 	}
 	// a flow of curl with two exchanges: POST /login answered 200 and GET / answered 404
-	httpValues = withHTTP(curlValues, &filter.HTTPValues{Methods: []string{"POST", "GET"}, URIs: []string{"/login?x=1", "/"}, Hosts: []string{"example.com"}, Codes: []uint16{200, 404}, UserAgents: []string{"curl/8.17.0"}})
+	httpValues = withHTTP(curlValues, &filter.HTTPValues{Methods: []string{"POST", "GET"}, URIs: []string{"/login?x=1", "/"}, Hosts: []string{"example.com"}, Codes: []uint16{200, 404}, UserAgents: []string{"curl/8.17.0"}, StreamIDs: nil})
+	// an HTTP/2 flow of curl with three streams
+	http2Values = withHTTP(curlValues, &filter.HTTPValues{Methods: []string{"GET"}, URIs: []string{"/a", "/b", "/c"}, Hosts: []string{"example.com"}, Codes: []uint16{200}, UserAgents: []string{"curl/8.20.0"}, StreamIDs: []uint32{1, 3, 5}})
 	// a request that has no response yet
-	requestValues = withHTTP(curlValues, &filter.HTTPValues{Methods: []string{"GET"}, URIs: []string{"/"}, Hosts: nil, Codes: nil, UserAgents: nil})
+	requestValues = withHTTP(curlValues, &filter.HTTPValues{Methods: []string{"GET"}, URIs: []string{"/"}, Hosts: nil, Codes: nil, UserAgents: nil, StreamIDs: nil})
 )
 
 func withHTTP(values filter.Values, http *filter.HTTPValues) (result filter.Values) {
@@ -141,6 +143,8 @@ func TestParseNegative(state *testing.T) {
 		{Filter: `tcp ||`, Column: 7, Err: filter.ErrSyntax},
 		{Filter: `tls.sni == "ü" && x`, Column: 19, Err: filter.ErrUnknownField},
 		{Filter: `tls.sni == 'x'`, Column: 12, Err: filter.ErrSyntax},
+		{Filter: `http2.streamid == 2147483648`, Column: 19, Err: filter.ErrRange},
+		{Filter: `http2.streamid == "1"`, Column: 19, Err: filter.ErrType},
 	}
 
 	for _, negative := range negativeCases {
@@ -216,6 +220,12 @@ func TestEvaluatePositive(state *testing.T) {
 		{Filter: `http.response.code`, Values: requestValues, Result: filter.FalseResult},
 		{Filter: `http.request.method == "GET"`, Values: curlValues, Result: filter.FalseResult},
 		{Filter: `!http`, Values: curlValues, Result: filter.TrueResult},
+		// http2.streamid: any stream of an HTTP/2 flow, absent on HTTP/1
+		{Filter: `http2.streamid == 3 && http.request.uri == "/b" && http.host == "example.com"`, Values: http2Values, Result: filter.TrueResult},
+		{Filter: `http2.streamid in {2 4 6}`, Values: http2Values, Result: filter.FalseResult},
+		{Filter: `http2.streamid > 4`, Values: http2Values, Result: filter.TrueResult},
+		{Filter: `http2.streamid`, Values: httpValues, Result: filter.FalseResult},
+		{Filter: `http && !http2.streamid`, Values: httpValues, Result: filter.TrueResult},
 	}
 
 	for _, positive := range positiveCases {
@@ -361,6 +371,7 @@ func TestFieldsPositive(state *testing.T) {
 		{Name: "http.host", Type: filter.StringFieldType, IsMulti: true, Source: filter.HTTPSourceType, Pushdown: ""},
 		{Name: "http.response.code", Type: filter.NumberFieldType, IsMulti: true, Source: filter.HTTPSourceType, Pushdown: ""},
 		{Name: "http.user_agent", Type: filter.StringFieldType, IsMulti: true, Source: filter.HTTPSourceType, Pushdown: ""},
+		{Name: "http2.streamid", Type: filter.NumberFieldType, IsMulti: true, Source: filter.HTTPSourceType, Pushdown: ""},
 	}
 
 	for _, positive := range positiveCases {
@@ -383,7 +394,7 @@ func TestFieldsPositive(state *testing.T) {
 		return cmp.Compare(first.Name, second.Name)
 	})
 
-	if !isSorted || (len(infos) != 32) {
+	if !isSorted || (len(infos) != 33) {
 		state.Errorf("Test of filter.Fields function failed, fields: %d", len(infos))
 		return
 	}

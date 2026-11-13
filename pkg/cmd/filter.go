@@ -40,7 +40,7 @@ a CIDR prefix; sets are separated by commas or spaces and can hold number ranges
 Not supported: slices, arithmetic, functions and bitwise operators.
 
 Fields (type; where the value comes from: flow is the kernel's flow record, proc is /proc of the process, clienthello
-the TLS ClientHello, http the HTTP/1 heads the HTTP layer read; the kernel map an == or in term on it goes into):
+the TLS ClientHello, http the HTTP/1 and HTTP/2 heads the HTTP layer read; the kernel map an == or in term on it goes into):
 ` + fieldsHelp() + `
 In run mode ip.src is 127.0.0.1, the address the proxy sees.
 
@@ -48,12 +48,16 @@ The http fields are only known after a flow started, so --filter and the filter 
 where the API filters what it has seen: the flow list and exports (a flow matches when any of its exchanges does: ==
 is true for any value, != when every value differs), and the filters of rules and holds of layer http, where a request
 has its method, target, Host and User-Agent and a response the fields of its request plus its status code.
-http.request.uri is the request-target as sent, http.host the Host field.
+http.request.uri is the request-target as sent, http.host the Host field. On HTTP/2 they come from the pseudo-header
+fields: http.request.method is :method, http.request.uri :path, http.host :authority (or Host), http.response.code
+:status; http2.streamid is the stream of an HTTP/2 exchange, an HTTP/1 flow has none (http && !http2.streamid).
+HTTP/2 is read-only for now: rules and holds of layer http do not take its messages.
 
 Examples:
   sudo decerter run --uid 1001 --decrypt --filter 'proc.comm == "curl" && tls.sni contains "example"'
   sudo decerter capture -w out.pcapng --filter 'proc.uid == 1001 && tcp.dstport in {443 8443}'
-  curl --unix-socket /run/decerter/api.sock 'http://decerter/api/v1/flows?filter=http.request.method+==+"POST"'`,
+  curl --unix-socket /run/decerter/api.sock 'http://decerter/api/v1/flows?filter=http.request.method+==+"POST"'
+  curl --unix-socket /run/decerter/api.sock 'http://decerter/api/v1/flows?filter=http2.streamid+>+99'`,
 	}
 )
 

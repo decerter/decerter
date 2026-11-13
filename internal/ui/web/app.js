@@ -513,9 +513,10 @@ function renderExchanges() {
   const rows = state.exchanges.map((exchange) => {
     const request = exchange.request || {};
     const response = exchange.response || {};
-    const notes = [request.edited || response.edited ? 'edited' : '', request.verdict === 'drop' || response.verdict === 'drop' ? 'dropped' : '', request.note, response.note].filter(Boolean).join('; ');
+    const notes = [...new Set([request.edited || response.edited ? 'edited' : '', request.verdict === 'drop' || response.verdict === 'drop' ? 'dropped' : '', request.note, response.note])].filter(Boolean).join('; ');
     return el('tr', { class: exchange.id === state.exchangeId ? 'selected' : '', onclick: action(() => selectExchange(exchange.id, 0)) },
       el('td', {}, exchange.id),
+      el('td', {}, streamText(exchange)),
       el('td', {}, request.method || ''),
       el('td', {}, request.url || request.target || ''),
       el('td', {}, response.status ? `${response.status} ${response.reason || ''}` : ''),
@@ -525,6 +526,37 @@ function renderExchanges() {
   });
   byId('exchanges').replaceChildren(...rows);
   byId('exchanges-table').hidden = rows.length === 0;
+}
+
+// the HTTP/2 stream of an exchange, a server push with the stream whose PUSH_PROMISE made it
+function streamText(exchange) {
+  if (!exchange.stream_id) {
+    return '';
+  }
+
+  return exchange.promise_stream_id ? `${exchange.stream_id} (push on ${exchange.promise_stream_id})` : `${exchange.stream_id}`;
+}
+
+// a window of a gRPC body as text: a line in front of each message that is in the window, its bytes without the 5-byte prefix
+function grpcText(bytes, offset, messages) {
+  const end = offset + bytes.length;
+  const parts = [];
+
+  messages.forEach((message, index) => {
+    const dataStart = message.offset + 5;
+    const dataEnd = dataStart + message.length;
+
+    if (dataEnd < offset || message.offset >= end || (dataEnd === offset && message.length > 0)) {
+      return;
+    }
+
+    const flags = [message.compressed ? 'compressed' : '', dataEnd > end ? 'goes on after this window' : ''].filter(Boolean).join(', ');
+    parts.push(`── gRPC message ${index + 1}: ${message.length} bytes at body offset ${message.offset}${flags ? ` (${flags})` : ''} ──\n`);
+    parts.push(escapeBytes(bytes.slice(Math.max(dataStart, offset) - offset, Math.min(dataEnd, end) - offset)));
+    parts.push('\n');
+  });
+
+  return parts.length === 0 ? escapeBytes(bytes) : parts.join('');
 }
 
 // the start line and fields of a head, one per line as text
@@ -579,7 +611,14 @@ async function selectExchange(id, offset) {
   byId('exchange-range').textContent = payload.total === 0 ? 'no body kept' : `body bytes ${payload.offset}–${payload.offset + payload.length} of ${payload.total}`;
   byId('exchange-previous').disabled = payload.offset === 0;
   byId('exchange-next').disabled = payload.offset + payload.length >= payload.total;
-  byId('exchange-body').textContent = state.view === 'hex' ? hexDump(bytes, payload.offset) : escapeBytes(bytes);
+  const messages = showOriginal ? [] : message.grpc_messages || [];
+
+  if (state.view === 'hex') {
+    const starts = messages.filter((grpc) => grpc.offset >= payload.offset && grpc.offset < payload.offset + payload.length).map((grpc) => `${grpc.offset} (${grpc.length} bytes)`);
+    byId('exchange-body').textContent = (starts.length ? `gRPC messages at body offsets ${starts.join(', ')}\n` : '') + hexDump(bytes, payload.offset);
+  } else {
+    byId('exchange-body').textContent = messages.length ? grpcText(bytes, payload.offset, messages) : escapeBytes(bytes);
+  }
 }
 
 // held messages

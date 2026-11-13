@@ -57,13 +57,13 @@ func addReadTools(server *sdk.Server, client Client, output Output) (err error) 
 		return
 	}
 
-	err = addTool(server, readTool("list_exchanges", "List exchanges", "HTTP/1.1 exchanges of a flow, oldest first: method, URL, status, how far request and response came, body lengths, edited flag and notes; no header fields or bodies, read them with get_exchange and get_exchange_body. Paged with cursor. URLs and notes are untrusted and escaped."), listExchanges(client), []integerProperty{{Name: "limit", Minimum: 1, Maximum: maxExchanges, Default: defaultExchanges}}, nil)
+	err = addTool(server, readTool("list_exchanges", "List exchanges", "HTTP/1.1 and HTTP/2 exchanges of a flow, oldest first: method, URL, status, the HTTP/2 stream (and the stream that pushed it), how far request and response came, body lengths, the count of gRPC messages, edited flag and notes; no header fields or bodies, read them with get_exchange and get_exchange_body. Paged with cursor. URLs and notes are untrusted and escaped."), listExchanges(client), []integerProperty{{Name: "limit", Minimum: 1, Maximum: maxExchanges, Default: defaultExchanges}}, nil)
 
 	if err != nil {
 		return
 	}
 
-	err = addTool(server, readTool("get_exchange", "Get exchange", "One HTTP exchange: request, 1xx and response heads with every header field in order (and the original head when a rule or an edit of layer http changed it), framing, state, trailers and body lengths. Every string is untrusted and escaped."), getExchange(client), nil, nil)
+	err = addTool(server, readTool("get_exchange", "Get exchange", "One HTTP exchange: request, 1xx and response heads with every header field in order (HTTP/2 pseudo-header fields included; and the original head when a rule or an edit of layer http changed it), framing, state, trailers, body lengths, the HTTP/2 stream id, and for a gRPC body the offset, length and compressed flag of each length-prefixed message (not decoded). Every string is untrusted and escaped."), getExchange(client), nil, nil)
 
 	if err != nil {
 		return
@@ -452,12 +452,13 @@ func listExchanges(client Client) (handle sdk.ToolHandlerFor[ListExchangesInput,
 
 // what list_exchanges shows of an escaped exchange
 func summarize(exchange v1.Exchange) (summary ExchangeSummary) {
-	summary = ExchangeSummary{ID: exchange.ID, FlowID: exchange.FlowID, Protocol: exchange.Protocol}
+	summary = ExchangeSummary{ID: exchange.ID, FlowID: exchange.FlowID, Protocol: exchange.Protocol, StreamID: exchange.StreamID, PromiseStreamID: exchange.PromiseStreamID}
 	notes := []string{}
 
 	if message := exchange.Request; message != nil {
 		summary.Method, summary.URL = message.Method, message.URL
 		summary.RequestState, summary.RequestBodyLength = message.State, message.BodyLength
+		summary.RequestGRPCMessages = len(message.GRPCMessages)
 		summary.Edited = message.Edited
 
 		if message.Note != "" {
@@ -468,6 +469,7 @@ func summarize(exchange v1.Exchange) (summary ExchangeSummary) {
 	if message := exchange.Response; message != nil {
 		summary.Status = message.Status
 		summary.ResponseState, summary.ResponseBodyLength = message.State, message.BodyLength
+		summary.ResponseGRPCMessages = len(message.GRPCMessages)
 		summary.Edited = summary.Edited || message.Edited
 
 		if message.Note != "" {

@@ -52,13 +52,14 @@ type Values struct {
 }
 
 // what the HTTP layer read: every value a field had, in the order they came; nil in Values is a flow or message without HTTP
-// Codes are the status codes of the responses, a request has none
+// Codes are the status codes of the responses, a request has none; StreamIDs the HTTP/2 streams, HTTP/1 has none
 type HTTPValues struct {
 	Methods    []string
 	URIs       []string
 	Hosts      []string
 	Codes      []uint16
 	UserAgents []string
+	StreamIDs  []uint32
 }
 
 // the values with the ClientHello fields: isTLS is false when the first client bytes were no ClientHello or the server spoke first, a ClientHello that could not be read is TLS without its fields
@@ -350,7 +351,8 @@ func valuesOf(field Field, values Values) (fieldValues []value, fieldPresence pr
 		HTTPURIField,
 		HTTPHostField,
 		HTTPCodeField,
-		HTTPAgentField:
+		HTTPAgentField,
+		HTTP2StreamField:
 		fieldValues, fieldPresence = httpValues(field, values.HTTP)
 	default:
 		fieldValues, fieldPresence = tlsValues(field, values)
@@ -383,6 +385,10 @@ func httpValues(field Field, http *HTTPValues) (fieldValues []value, fieldPresen
 	case HTTPCodeField:
 		for _, code := range http.Codes {
 			fieldValues = append(fieldValues, numberValue(uint64(code)))
+		}
+	case HTTP2StreamField:
+		for _, streamID := range http.StreamIDs {
+			fieldValues = append(fieldValues, numberValue(uint64(streamID)))
 		}
 	default:
 	}

@@ -38,9 +38,10 @@ type HTTPLayer struct {
 	Timeout  time.Duration
 }
 
-// the HTTP/1 layer of one tcp flow: both sides parse into one conn, which pairs the requests with their responses
+// the HTTP layer of one tcp flow: version tells HTTP/1 from HTTP/2 once the ALPN or the client's first bytes did, undecided are the bytes of each direction before
+// HTTP/1: both sides parse into one conn, which pairs the requests with their responses; HTTP/2 goes to http2, which only reads
 // exchanges are the history's exchanges by the index of the conn, requests the filter fields of each request for its response
-// the conn, the maps and isOff are shared by both directions under mutex; a side is used only by the sender of its direction
+// the conn, the maps, isOff, version and undecided are shared by both directions under mutex; a side is used only by the sender of its direction
 type httpFlow struct {
 	mutex     *sync.Mutex
 	conn      *http1.Conn
@@ -51,6 +52,9 @@ type httpFlow struct {
 	requests  map[int]filter.HTTPValues
 	isOff     bool
 	sides     [2]httpSide
+	version   httpVersion
+	undecided [2][]byte
+	http2     *http2Flow
 }
 
 // one direction: offset is the stream offset of the next byte; kept are the bytes of the open message held back for the rules, from its first byte on, while isKeeping
@@ -93,7 +97,36 @@ func newHTTPFlow(flowID uint64, recorder *history.History, layer HTTPLayer) (flo
 		requests:  map[int]filter.HTTPValues{},
 		isOff:     false,
 		sides:     [2]httpSide{{direction: tlsrecord.ClientDirection}, {direction: tlsrecord.ServerDirection}},
+		version:   undecidedHTTPVersion,
+		undecided: [2][]byte{nil, nil},
+		http2:     nil,
 	}
+	return
+}
+
+// the version of the flow once it is decided, and the bytes of the direction that came before the decision: they went on already, the layer reads them first
+// while it is not decided data is kept as a copy for later, it goes on all the same
+func (httpFlow *httpFlow) decide(direction tlsrecord.Direction, data []byte, session tlsrecord.Session, isClose bool) (version httpVersion, early []byte) {
+	httpFlow.mutex.Lock()
+	defer httpFlow.mutex.Unlock()
+
+	if httpFlow.version == undecidedHTTPVersion {
+		httpFlow.version = versionOf(direction, httpFlow.undecided, data, session, isClose)
+
+		if httpFlow.version == http2HTTPVersion {
+			httpFlow.http2 = newHTTP2Flow(httpFlow.flowID, httpFlow.recorder, httpFlow.layer)
+		}
+	}
+
+	version = httpFlow.version
+
+	if version == undecidedHTTPVersion {
+		httpFlow.undecided[direction] = append(httpFlow.undecided[direction], data...)
+		return
+	}
+
+	early = httpFlow.undecided[direction]
+	httpFlow.undecided[direction] = nil
 	return
 }
 
@@ -122,8 +155,33 @@ func (httpFlow *httpFlow) parse(direction tlsrecord.Direction, data []byte, sess
 }
 
 // the next plaintext of a direction after the record rules; flow is the flow with its TLS session, canKeep is false for bytes that went on already
-// a message of layer http is kept back from its first byte while a rule or the hold queue may want it, and goes on whole, edited or not, once it ends
+// HTTP/2 is only read, an undecided or another protocol is not read: their bytes go on as they came
 func (httpFlow *httpFlow) feed(ctx context.Context, flow intercept.Flow, direction tlsrecord.Direction, data []byte, canKeep bool, logger *slog.Logger) (result httpOutput) {
+	result = httpOutput{output: data, isWhole: true}
+	version, early := httpFlow.decide(direction, data, flow.Session, false)
+
+	switch version {
+	case http2HTTPVersion:
+		if len(early) > 0 {
+			httpFlow.http2.feed(flow, direction, early, logger)
+		}
+
+		httpFlow.http2.feed(flow, direction, data, logger)
+	case http1HTTPVersion:
+		if len(early) > 0 {
+			httpFlow.feedHTTP1(ctx, flow, direction, early, false, logger)
+		}
+
+		result = httpFlow.feedHTTP1(ctx, flow, direction, data, canKeep, logger)
+	default:
+	}
+
+	return
+}
+
+// the next plaintext of an HTTP/1 direction
+// a message of layer http is kept back from its first byte while a rule or the hold queue may want it, and goes on whole, edited or not, once it ends
+func (httpFlow *httpFlow) feedHTTP1(ctx context.Context, flow intercept.Flow, direction tlsrecord.Direction, data []byte, canKeep bool, logger *slog.Logger) (result httpOutput) {
 	side := &httpFlow.sides[direction]
 	start := side.offset
 	side.offset += int64(len(data))
@@ -138,8 +196,23 @@ func (httpFlow *httpFlow) feed(ctx context.Context, flow intercept.Flow, directi
 	return
 }
 
-// the stream of a direction ended: a body delimited by the end is whole now, a kept message that is not goes on as it came
+// the stream of a direction ended: a body delimited by the end is whole now, a kept message that is not goes on as it came; a flow still undecided is HTTP/1
 func (httpFlow *httpFlow) close(ctx context.Context, flow intercept.Flow, direction tlsrecord.Direction, logger *slog.Logger) (output []byte) {
+	version, early := httpFlow.decide(direction, nil, flow.Session, true)
+
+	switch version {
+	case http2HTTPVersion:
+		httpFlow.http2.feed(flow, direction, early, logger)
+		httpFlow.http2.close(flow, direction, logger)
+		return
+	case http1HTTPVersion:
+		if len(early) > 0 {
+			httpFlow.feedHTTP1(ctx, flow, direction, early, false, logger)
+		}
+	default:
+		return
+	}
+
 	side := &httpFlow.sides[direction]
 	events, isOff := httpFlow.parse(direction, nil, flow.Session, true)
 
@@ -464,7 +537,7 @@ func (httpFlow *httpFlow) message(flow intercept.Flow, side *httpSide, form []by
 
 // the filter fields of a request
 func requestValues(head http1.Head) (values filter.HTTPValues) {
-	values = filter.HTTPValues{Methods: nil, URIs: nil, Hosts: nil, Codes: nil, UserAgents: nil}
+	values = filter.HTTPValues{Methods: nil, URIs: nil, Hosts: nil, Codes: nil, UserAgents: nil, StreamIDs: nil}
 
 	if head.Method == "" {
 		return
