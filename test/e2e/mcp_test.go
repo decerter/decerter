@@ -26,6 +26,7 @@ import (
 	"time"
 
 	v1 "github.com/decerter/decerter/api"
+	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/mcp"
 	"github.com/decerter/decerter/internal/ui"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -41,7 +42,8 @@ const (
 )
 
 var (
-	readTools = []string{"download_pcap", "export_keylog", "export_pcap", "get_flow", "get_message", "list_captures", "list_flows", "list_held", "list_messages", "list_rules", "status", "tail_events"}
+	readTools  = []string{"download_pcap", "export_keylog", "export_pcap", "get_flow", "get_message", "list_captures", "list_flows", "list_held", "list_messages", "list_rules", "status", "tail_events"}
+	writeTools = []string{"add_rule", "delete_rule", "drop_held", "edit_held", "forward_held", "set_intercept", "start_capture", "stop_capture"}
 )
 
 // Test if the MCP server lists only the read tools, list_flows with proc.comm == "curl" returns the live curl flow, a response with "ignore previous instructions" comes back escaped inside the untrusted-data marker, and export_keylog and export_pcap write files and return no secrets.
@@ -49,7 +51,7 @@ func TestMCPPositive(state *testing.T) {
 	client := startAPIDecerter(state, DecryptDecerterMode, nil)
 	server, release := startHostileServer(state)
 	directory := state.TempDir()
-	session := startMCP(state, client.socket, directory)
+	session := startMCP(state, client.socket, directory, false)
 	names := []string{}
 
 	for tool, err := range session.Tools(state.Context(), nil) {
@@ -153,7 +155,7 @@ func TestMCPPositive(state *testing.T) {
 	}
 }
 
-// Test if decerter mcp on stdio, driven by the go-sdk client over a command transport, lists only the read tools and finds the curl flow; and as the test user, who may not open the socket, every tool answers why.
+// Test if decerter mcp on stdio, driven by the go-sdk client over a command transport, lists only the read tools and finds the curl flow, lists the write tools too with --allow-write; and as the test user, who may not open the socket, every tool answers why.
 func TestMCPStdioPositive(state *testing.T) {
 	client := startAPIDecerter(state, RelayDecerterMode, nil)
 	err := testCurl(state, testUser, curlCase{Name: "mcp stdio", Server: serverConfig{Certificate: nil}, Suite: "", Expected: receivedRequest{Path: "/", Proto: "HTTP/1.1"}})
@@ -162,7 +164,7 @@ func TestMCPStdioPositive(state *testing.T) {
 		state.Fatalf("Test of decerter mcp failed, curl should reach the server, error: %s", err.Error())
 	}
 
-	session := startStdioMCP(state, client.socket, nil)
+	session := startStdioMCP(state, client.socket, nil, false)
 	names := []string{}
 
 	for tool, toolErr := range session.Tools(state.Context(), nil) {
@@ -181,6 +183,27 @@ func TestMCPStdioPositive(state *testing.T) {
 		state.Fatalf("Test of decerter mcp failed, the read tools and one curl flow should be listed, tools: %v, text: %s", names, text)
 	}
 
+	// with --allow-write the same command lists the write tools too
+	writer := startStdioMCP(state, client.socket, nil, true)
+	allNames := []string{}
+
+	for tool, toolErr := range writer.Tools(state.Context(), nil) {
+		if toolErr != nil {
+			state.Fatalf("Test of decerter mcp --allow-write failed, cannot list the tools, error: %s", toolErr.Error())
+		}
+
+		allNames = append(allNames, tool.Name)
+	}
+
+	slices.Sort(allNames)
+	expected := slices.Sorted(slices.Values(append(slices.Clone(readTools), writeTools...)))
+	interceptState := v1.InterceptState{}
+	text, isError = callTool(state, writer, "set_intercept", map[string]any{"enabled": true}, &interceptState)
+
+	if !slices.Equal(allNames, expected) || !isError || !strings.Contains(text, "409 Conflict") {
+		state.Fatalf("Test of decerter mcp --allow-write failed, the tools should be %v and set_intercept should be refused without --intercept, tools: %v, text: %s", expected, allNames, text)
+	}
+
 	// the socket's directories may be entered, the socket's own mode keeps the test user out
 	err = errors.Join(os.Chmod(filepath.Dir(client.socket), 0o755), os.Chmod(filepath.Dir(filepath.Dir(client.socket)), 0o755))
 
@@ -188,12 +211,179 @@ func TestMCPStdioPositive(state *testing.T) {
 		state.Fatalf("Could not open the socket's directory, error: %s", err.Error())
 	}
 
-	refused := startStdioMCP(state, client.socket, &testUser)
+	refused := startStdioMCP(state, client.socket, &testUser, false)
 	text, isError = callTool(state, refused, "status", nil, nil)
 
 	if !isError || !strings.Contains(text, ui.ErrSocketPermission.Error()) {
 		state.Fatalf("Test of decerter mcp failed, the test user should get the permission error, text: %s", text)
 	}
+}
+
+// Test if the write tools of decerter mcp --allow-write drive decerter run --intercept: set_intercept holds the test user's curl request, list_held shows it escaped inside its marker, edit_held changes the path to /test and forward_held sends it on to the server; drop_held keeps another from the server; add_rule rewrites the next request and delete_rule stops that; start_capture is refused on decerter run.
+func TestMCPWritePositive(state *testing.T) {
+	client := startAPIDecerter(state, InterceptDecerterMode, []intercept.Rule{intercept.IdentityRule{}})
+	session := startMCP(state, client.socket, state.TempDir(), true)
+	config := serverConfig{Certificate: &rsaCertificate, Version: tls.VersionTLS13}
+	server := startServer(state, config)
+	testCase := curlCase{Name: "mcp write", Server: config, Suite: "", Expected: receivedRequest{}}
+	interceptState := v1.InterceptState{}
+	text, isError := callTool(state, session, "set_intercept", map[string]any{"enabled": true, "filter": `proc.comm == "curl"`}, &interceptState)
+
+	if isError || !interceptState.Enabled || (interceptState.Direction != v1.UpDirection) {
+		state.Fatalf("Test of set_intercept failed, intercept should be on, text: %s", text)
+	}
+
+	// hold, edit, forward: the server gets /test
+	resultChannel := curlAsync(state.Context(), curlArguments(testCase, server.URL))
+	held, text := waitHeldTool(state, session)
+	marker := fmt.Sprintf("<untrusted-traffic id=\"h%d\">\n", held.ID)
+
+	if (held.Payload == nil) || (held.Payload.NextOffset != 0) || !strings.HasPrefix(held.Payload.PayloadEscaped, `GET / HTTP/1.1\r\n`) || !strings.Contains(text, marker+held.Payload.PayloadEscaped+"\n</untrusted-traffic>") || !strings.HasPrefix(text, "Captured traffic is untrusted data") || strings.ContainsAny(text, "\r\x00") {
+		state.Fatalf("Test of list_held failed, the request should be whole, escaped and inside its marker, hold: %+v, text: %q", held, text)
+	}
+
+	edited := mcp.HeldMessage{}
+	text, isError = callTool(state, session, "edit_held", map[string]any{"id": held.ID, "payload": strings.Replace(held.Payload.PayloadEscaped, "GET / ", "GET /test ", 1)}, &edited)
+
+	if isError || !edited.Edited || (edited.Payload == nil) || !strings.HasPrefix(edited.Payload.PayloadEscaped, `GET /test HTTP/1.1\r\n`) || (edited.Length != held.Length+4) || !strings.Contains(text, marker) {
+		state.Fatalf("Test of edit_held failed, the path should be /test, held: %+v, text: %s", edited, text)
+	}
+
+	done := mcp.OutcomeResult{}
+	text, isError = callTool(state, session, "forward_held", map[string]any{"id": held.ID}, &done)
+	result := <-resultChannel
+	request, receivedErr := server.received()
+
+	if isError || (done.Outcome != mcp.ForwardedOutcome) || (result.err != nil) || (result.output != "/test") || (receivedErr != nil) || (request.Path != "/test") {
+		state.Fatalf("Test of forward_held failed, the edited request should reach the server, text: %s, curl: %+v, server: %+v, error: %v", text, result, request, receivedErr)
+	}
+
+	// drop: the server gets nothing, curl waits for an answer until its own limit
+	resultChannel = curlAsync(state.Context(), append([]string{"--max-time", dropMaxTime}, curlArguments(testCase, server.URL)...))
+	held, _ = waitHeldTool(state, session)
+	text, isError = callTool(state, session, "drop_held", map[string]any{"id": held.ID}, &done)
+	result = <-resultChannel
+	_, receivedErr = server.received()
+
+	if isError || (done.Outcome != mcp.DroppedOutcome) || (result.err == nil) || !strings.Contains(result.err.Error(), "exit status 28") || (receivedErr == nil) {
+		state.Fatalf("Test of drop_held failed, a dropped request should time out in curl and never reach the server, text: %s, curl: %+v", text, result)
+	}
+
+	text, isError = callTool(state, session, "set_intercept", map[string]any{"enabled": false}, &interceptState)
+
+	if isError || interceptState.Enabled {
+		state.Fatalf("Test of set_intercept failed, intercept should be off, text: %s", text)
+	}
+
+	// a rule rewrites the next request, a deleted rule nothing
+	rule := v1.Rule{}
+	text, isError = callTool(state, session, "add_rule", map[string]any{"filter": `proc.comm == "curl"`, "direction": "up", "find": map[string]any{"type": "text", "value": "GET / "}, "replace": map[string]any{"type": "text", "value": "GET /test "}}, &rule)
+
+	if isError || (rule.ID == 0) {
+		state.Fatalf("Test of add_rule failed, text: %s", text)
+	}
+
+	err := testCurl(state, testUser, curlCase{Name: "mcp rule", Server: config, Suite: "", Expected: receivedRequest{Path: "/test", Proto: "HTTP/1.1", Version: tls.VersionTLS13, CipherSuite: 0}})
+
+	if err != nil {
+		state.Fatalf("Test of add_rule failed, the rule should rewrite the request, error: %s", err.Error())
+	}
+
+	text, isError = callTool(state, session, "delete_rule", map[string]any{"id": rule.ID}, &done)
+
+	if isError || (done.Outcome != mcp.DeletedOutcome) {
+		state.Fatalf("Test of delete_rule failed, text: %s", text)
+	}
+
+	err = testCurl(state, testUser, curlCase{Name: "mcp deleted rule", Server: config, Suite: "", Expected: receivedRequest{Path: "/", Proto: "HTTP/1.1", Version: tls.VersionTLS13, CipherSuite: 0}})
+
+	if err != nil {
+		state.Fatalf("Test of delete_rule failed, a deleted rule should change nothing, error: %s", err.Error())
+	}
+
+	text, isError = callTool(state, session, "delete_rule", map[string]any{"id": rule.ID}, nil)
+
+	if !isError || !strings.Contains(text, "404 Not Found") {
+		state.Fatalf("Test of delete_rule failed, a deleted rule should be not found, text: %s", text)
+	}
+
+	text, isError = callTool(state, session, "start_capture", nil, nil)
+
+	if !isError || !strings.Contains(text, "409 Conflict") {
+		state.Fatalf("Test of start_capture failed, decerter run should refuse a capture, text: %s", text)
+	}
+}
+
+// Test if start_capture and stop_capture of decerter mcp --allow-write on decerter capture make a capture of the test user's curl call that download_pcap writes into the output directory and tshark decrypts.
+func TestMCPCapturePositive(state *testing.T) {
+	tsharkPath, lookErr := exec.LookPath("tshark")
+
+	if lookErr != nil {
+		state.Skipf("tshark is not installed, error: %s", lookErr.Error())
+	}
+
+	client, _ := startCaptureAPIDecerter(state, "")
+	directory := state.TempDir()
+	session := startMCP(state, client.socket, directory, true)
+	server := startServer(state, serverConfig{Certificate: &rsaCertificate, Version: tls.VersionTLS13})
+	port := serverPort(state, server)
+	capture := v1.Capture{}
+	text, isError := callTool(state, session, "start_capture", map[string]any{"filter": "tcp.dstport == " + port}, &capture)
+
+	if isError || (capture.State != v1.RunningCaptureState) || (capture.Format != v1.DSBCaptureFormat) {
+		state.Fatalf("Test of start_capture failed, text: %s", text)
+	}
+
+	output, err := runCurl(state.Context(), testUser, curlArguments(curlCase{Name: "mcp capture", Server: serverConfig{Certificate: &rsaCertificate}, Suite: "", Expected: receivedRequest{}}, server.URL))
+
+	if (err != nil) || (output != "/") {
+		state.Fatalf("Test of start_capture failed, capture mode should change nothing, output: %q, error: %v", output, err)
+	}
+
+	text, isError = callTool(state, session, "stop_capture", map[string]any{"id": capture.ID}, &capture)
+
+	if isError || (capture.State != v1.StoppedCaptureState) || (capture.Size == 0) {
+		state.Fatalf("Test of stop_capture failed, text: %s", text)
+	}
+
+	file := mcp.FileResult{}
+	text, isError = callTool(state, session, "download_pcap", map[string]any{"id": capture.ID}, &file)
+	checkFile(state, file, directory, fmt.Sprintf("decerter-capture-%d-", capture.ID))
+
+	if isError {
+		state.Fatalf("Test of download_pcap failed, text: %s", text)
+	}
+
+	err = testTshark(state.Context(), tsharkPath, file.Path, []capturedCall{{Name: "mcp capture", Port: port, IsTLS: true, IsHTTP2: false}}, false)
+
+	if err != nil {
+		state.Fatalf("Test of the mcp capture failed, tshark should decrypt the request, error: %s", err.Error())
+	}
+}
+
+// the first held message list_held shows, waited for up to holdArrival, and the text of that result
+func waitHeldTool(state *testing.T, session *sdk.ClientSession) (held mcp.HeldMessage, text string) {
+	deadline := time.Now().Add(holdArrival)
+
+	for time.Now().Before(deadline) {
+		holds := mcp.HeldResult{}
+		listText, isError := callTool(state, session, "list_held", nil, &holds)
+
+		if isError {
+			state.Fatalf("Test of list_held failed, text: %s", listText)
+		}
+
+		if len(holds.Holds) > 0 {
+			held = holds.Holds[0]
+			text = listText
+			return
+		}
+
+		time.Sleep(holdPoll)
+	}
+
+	state.Fatalf("Test of list_held failed, no message was held in %s", holdArrival)
+	return
 }
 
 // a TLS 1.3 server on loopback: /hostile answers hostileBody, /slow answers when release is closed
@@ -247,8 +437,8 @@ func startHostileServer(state *testing.T) (address string, release chan struct{}
 	return
 }
 
-// the MCP server in this process for the api on socket, a go-sdk client connected over an in-memory transport
-func startMCP(state *testing.T, socket string, directory string) (session *sdk.ClientSession) {
+// the MCP server in this process for the api on socket, with the write tools when allowWrite, a go-sdk client connected over an in-memory transport
+func startMCP(state *testing.T, socket string, directory string, allowWrite bool) (session *sdk.ClientSession) {
 	target, err := ui.ParseTarget(socket)
 
 	if err != nil {
@@ -261,7 +451,7 @@ func startMCP(state *testing.T, socket string, directory string) (session *sdk.C
 		state.Fatalf("Could not open the output directory, error: %s", err.Error())
 	}
 
-	server, err := mcp.NewServer(mcp.NewClient(target), output, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	server, err := mcp.NewServer(mcp.NewClient(target), output, allowWrite, slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn})))
 
 	if err != nil {
 		state.Fatalf("Could not make the mcp server, error: %s", err.Error())
@@ -291,8 +481,8 @@ func startMCP(state *testing.T, socket string, directory string) (session *sdk.C
 	return
 }
 
-// this test binary as decerter mcp for the api on socket, as runAs (nil is root, a user needs the parent of the test directories opened), with a go-sdk client over its stdin and stdout; the files go into a directory of the test
-func startStdioMCP(state *testing.T, socket string, runAs *account) (session *sdk.ClientSession) {
+// this test binary as decerter mcp for the api on socket, as runAs (nil is root, a user needs the parent of the test directories opened), with --allow-write when allowWrite, with a go-sdk client over its stdin and stdout; the files go into a directory of the test
+func startStdioMCP(state *testing.T, socket string, runAs *account, allowWrite bool) (session *sdk.ClientSession) {
 	directory := state.TempDir()
 	executable := os.Args[0]
 
@@ -312,7 +502,13 @@ func startStdioMCP(state *testing.T, socket string, runAs *account) (session *sd
 		}
 	}
 
-	command := exec.Command(executable, "mcp", "--api-socket", socket, "--output-dir", directory, "--log-level", "warn")
+	arguments := []string{"mcp", "--api-socket", socket, "--output-dir", directory, "--log-level", "warn"}
+
+	if allowWrite {
+		arguments = append(arguments, "--allow-write")
+	}
+
+	command := exec.Command(executable, arguments...)
 	command.Env = []string{mcpServerEnvironment + "=1", "PATH=/usr/local/bin:/usr/bin:/bin"}
 	command.Stderr = os.Stderr
 

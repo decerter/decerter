@@ -77,7 +77,7 @@ type integerProperty struct {
 	Default int
 }
 
-// an argument, or the items of an array argument, that takes only these values
+// an argument, or the items of an array argument, that takes only these values; a.b is property b of the object argument a
 type enumProperty struct {
 	Name   string
 	Values []any
@@ -141,6 +141,28 @@ type FileResult struct {
 	SHA256 string `json:"sha256"`
 }
 
+// the form of edit_held's payload
+type PayloadFormat string
+
+const (
+	EscapedPayloadFormat PayloadFormat = "escaped"
+	HexPayloadFormat     PayloadFormat = "hex"
+)
+
+// what forward_held, drop_held and delete_rule did
+type Outcome string
+
+const (
+	ForwardedOutcome Outcome = "forwarded"
+	DroppedOutcome   Outcome = "dropped"
+	DeletedOutcome   Outcome = "deleted"
+)
+
+type OutcomeResult struct {
+	ID      uint64  `json:"id"`
+	Outcome Outcome `json:"outcome" jsonschema:"forwarded, dropped or deleted"`
+}
+
 // the tool arguments
 type NoInput struct{}
 
@@ -189,4 +211,52 @@ type ExportPcapInput struct {
 
 type DownloadPcapInput struct {
 	ID uint64 `json:"id" jsonschema:"the capture id from list_captures, a stopped capture"`
+}
+
+type SetInterceptInput struct {
+	Enabled   bool         `json:"enabled" jsonschema:"true holds the messages of direction whose flow the filter takes until forward_held, drop_held or the hold timeout; false forwards every held message as it is and holds nothing more"`
+	Filter    string       `json:"filter,omitzero" jsonschema:"a filter in the language of decerter --filter, only the flows it takes are held; empty holds every flow in scope"`
+	Direction v1.Direction `json:"direction,omitzero" jsonschema:"up (default: what the client sends), down (what the server answers) or both"`
+}
+
+type EditHeldInput struct {
+	ID      uint64        `json:"id" jsonschema:"the id of the held message from list_held"`
+	Payload string        `json:"payload" jsonschema:"the whole new payload in format, it replaces the held payload as a whole"`
+	Format  PayloadFormat `json:"format,omitzero" jsonschema:"escaped (default): the form of payload_escaped, where \\\\ \\n \\r \\t and \\xNN are bytes and every other character is its UTF-8 bytes (a real line break too); hex: hex digits, white space is ignored"`
+}
+
+type HoldInput struct {
+	ID uint64 `json:"id" jsonschema:"the id of the held message from list_held"`
+}
+
+// the find value of a rule; text is the characters as they are (UTF-8), not the escaped form of the read tools
+type RuleFind struct {
+	Type  v1.ValueType `json:"type" jsonschema:"text (the UTF-8 bytes of value as they are), hex (hex digits) or regex (RE2 over the bytes, (?s) for . to match a newline; it must not match the empty string)"`
+	Value string       `json:"value" jsonschema:"what to find in a message"`
+}
+
+type RuleReplace struct {
+	Type  v1.ValueType `json:"type" jsonschema:"text (the UTF-8 bytes of value as they are; after a regex find a template: $1, ${1}, ${name} are groups and $$ is a $) or hex (hex digits)"`
+	Value string       `json:"value" jsonschema:"what every match becomes"`
+}
+
+type AddRuleInput struct {
+	Filter    string       `json:"filter,omitzero" jsonschema:"a filter in the language of decerter --filter, the rule only changes the flows it takes; empty is every flow in scope"`
+	Direction v1.Direction `json:"direction,omitzero" jsonschema:"up (what the client sends), down (what the server answers) or both (default)"`
+	Layer     v1.Layer     `json:"layer,omitzero" jsonschema:"only messages of this layer: tcp, tls, udp or dtls; empty is every layer"`
+	Find      RuleFind     `json:"find"`
+	Replace   RuleReplace  `json:"replace"`
+}
+
+type RuleInput struct {
+	ID uint64 `json:"id" jsonschema:"the rule id from list_rules or add_rule"`
+}
+
+type StartCaptureInput struct {
+	Filter    string `json:"filter,omitzero" jsonschema:"a filter in the language of decerter --filter, only the flows it takes are captured; empty is every flow in scope"`
+	Plaintext bool   `json:"plaintext,omitzero" jsonschema:"true writes synthesized decrypted packets, false (default) the packets as captured with their TLS secrets (dsb)"`
+}
+
+type CaptureInput struct {
+	ID uint64 `json:"id" jsonschema:"the capture id from list_captures or start_capture"`
 }

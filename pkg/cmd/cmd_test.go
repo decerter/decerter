@@ -143,7 +143,7 @@ func TestExecutePositive(state *testing.T) {
 		{Args: []string{"run", "--help"}, Text: []string{"--decrypt", "--udp-idle-timeout duration", "--api-socket path", "--hold-timeout duration", "--log-level level"}},
 		{Args: []string{"capture", "--help"}, Text: []string{"-w, --write file", "--snaplen bytes"}},
 		{Args: []string{"ui", "--help"}, Text: []string{"--api-socket address", "--open", "adb forward tcp:8080 localabstract:decerter-api"}},
-		{Args: []string{"mcp", "--help"}, Text: []string{"--api-socket address", "--output-dir directory", "claude mcp add decerter -- decerter mcp", "<untrusted-traffic"}},
+		{Args: []string{"mcp", "--help"}, Text: []string{"--api-socket address", "--output-dir directory", "--allow-write", "claude mcp add decerter -- decerter mcp --allow-write", "<untrusted-traffic"}},
 	}
 
 	for _, positive := range positiveCases {
@@ -226,6 +226,7 @@ func resetState(state *testing.T) {
 	uiTarget = ui.Target{}
 	openBrowser = false
 	mcpTarget = ui.Target{}
+	allowWrite = false
 	logger.ChangeLogLevel(slog.LevelInfo)
 	commands := []*cobra.Command{rootCmd}
 

@@ -43,6 +43,71 @@ func (client Client) getJSON(ctx context.Context, path string, query url.Values,
 		err = errors.Join(err, response.Body.Close())
 	}()
 
+	err = client.decode(response, http.MethodGet, path, result)
+	return
+}
+
+// one PUT, POST or DELETE to the api with body as JSON (nil is none); the JSON answer is decoded into result, nil takes an answer without a body (204)
+// an answer other than 2xx is an error with the api's message
+func (client Client) sendJSON(ctx context.Context, method string, path string, body any, result any) (err error) {
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+	reader := io.Reader(http.NoBody)
+
+	if body != nil {
+		encoded, encodeErr := json.Marshal(body)
+
+		if err = encodeErr; err != nil {
+			return
+		}
+
+		reader = bytes.NewReader(encoded)
+	}
+
+	address := url.URL{Scheme: "http", Host: v1.HostName, Path: v1.BasePath + path}
+	request, err := http.NewRequestWithContext(ctx, method, address.String(), reader)
+
+	if err != nil {
+		return
+	}
+
+	if body != nil {
+		request.Header.Set("Content-Type", jsonMediaType)
+	}
+
+	response, err := client.client.Do(request)
+
+	if err != nil {
+		err = ui.Explain(err, client.target)
+		return
+	}
+
+	defer func() {
+		err = errors.Join(err, response.Body.Close())
+	}()
+
+	if (response.StatusCode < http.StatusOK) || (response.StatusCode >= http.StatusMultipleChoices) {
+		err = apiError(response, method, path)
+		return
+	}
+
+	if result == nil {
+		return
+	}
+
+	actual, _, parseErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
+
+	if (parseErr != nil) || (actual != jsonMediaType) {
+		err = fmt.Errorf("%w: %s %s: %q, expected %s", ErrContentType, method, path, response.Header.Get("Content-Type"), jsonMediaType)
+		return
+	}
+
+	err = client.decode(response, method, path, result)
+	return
+}
+
+// the JSON body of an answer into result, at most maxJSONBytes
+func (client Client) decode(response *http.Response, method string, path string, result any) (err error) {
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxJSONBytes+1))
 
 	if err != nil {
@@ -51,14 +116,14 @@ func (client Client) getJSON(ctx context.Context, path string, query url.Values,
 	}
 
 	if int64(len(body)) > maxJSONBytes {
-		err = fmt.Errorf("%w: GET %s: the answer is larger than %d bytes", ErrAPI, path, maxJSONBytes)
+		err = fmt.Errorf("%w: %s %s: the answer is larger than %d bytes", ErrAPI, method, path, maxJSONBytes)
 		return
 	}
 
 	err = json.Unmarshal(body, result)
 
 	if err != nil {
-		err = fmt.Errorf("%w: GET %s: %w", ErrAPI, path, err)
+		err = fmt.Errorf("%w: %s %s: %w", ErrAPI, method, path, err)
 	}
 
 	return
@@ -157,7 +222,7 @@ func (client Client) get(ctx context.Context, path string, query url.Values, med
 	}
 
 	if response.StatusCode != http.StatusOK {
-		err = errors.Join(apiError(response, path), response.Body.Close())
+		err = errors.Join(apiError(response, http.MethodGet, path), response.Body.Close())
 		response = nil
 		return
 	}
@@ -173,8 +238,8 @@ func (client Client) get(ctx context.Context, path string, query url.Values, med
 	return
 }
 
-// the error of an answer that is not 200: the message of the api's error body, or the start of the body
-func apiError(response *http.Response, path string) (err error) {
+// the error of an answer the call does not take: the message of the api's error body, or the start of the body
+func apiError(response *http.Response, method string, path string) (err error) {
 	body, readErr := io.ReadAll(io.LimitReader(response.Body, maxErrorBytes))
 	message := strings.TrimSpace(string(body))
 	apiErr := v1.Error{}
@@ -183,6 +248,6 @@ func apiError(response *http.Response, path string) (err error) {
 		message = apiErr.Error
 	}
 
-	err = fmt.Errorf("%w: GET %s: %s: %s", ErrAPI, path, response.Status, message)
+	err = fmt.Errorf("%w: %s %s: %s: %s", ErrAPI, method, path, response.Status, message)
 	return
 }

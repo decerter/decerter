@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	v1 "github.com/decerter/decerter/api"
@@ -111,7 +112,7 @@ func readTool(name string, title string, description string) (tool *sdk.Tool) {
 	return
 }
 
-// add a tool with the input schema of In, its integer properties bounded and defaulted (Maximum -1 is none) and its enum properties (or their items) limited to their values
+// add a tool with the input schema of In, its integer properties bounded and defaulted (Maximum -1 is none) and its enum properties (or their items) limited to their values, a.b names property b of object property a
 // the SDK checks the arguments against the schema and fills in the defaults before handle runs
 func addTool[In any, Out any](server *sdk.Server, tool *sdk.Tool, handle sdk.ToolHandlerFor[In, Out], integers []integerProperty, enums []enumProperty) (err error) {
 	schema, err := jsonschema.For[In](&jsonschema.ForOptions{})
@@ -140,7 +141,14 @@ func addTool[In any, Out any](server *sdk.Server, tool *sdk.Tool, handle sdk.Too
 	}
 
 	for _, enum := range enums {
-		property, isProperty := schema.Properties[enum.Name]
+		property, isProperty := schema, true
+
+		// a property of an object property is named with dots: find.type
+		for name := range strings.SplitSeq(enum.Name, ".") {
+			if property, isProperty = property.Properties[name]; !isProperty {
+				break
+			}
+		}
 
 		if !isProperty {
 			err = fmt.Errorf("tool %s: no property %s", tool.Name, enum.Name)

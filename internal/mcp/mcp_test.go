@@ -141,6 +141,7 @@ func startFakeAPI(state *testing.T) (target ui.Target) {
 
 		writeBody(writer, pcapngMediaType, testPcapng)
 	})
+	addFakeWrites(state, mux, writeJSON)
 	// three events, then an overflow when the request asks for it, otherwise the stream stays open
 	mux.HandleFunc("GET /api/v1/events", func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "text/event-stream")
@@ -184,15 +185,15 @@ func startFakeAPI(state *testing.T) (target ui.Target) {
 	return
 }
 
-// an MCP client session with the server for target over an in-memory transport, the export tools write into directory
-func connect(state *testing.T, target ui.Target, directory string) (session *sdk.ClientSession) {
+// an MCP client session with the server for target over an in-memory transport, the export tools write into directory, with the write tools when allowWrite
+func connect(state *testing.T, target ui.Target, directory string, allowWrite bool) (session *sdk.ClientSession) {
 	output, err := OpenOutput(directory)
 
 	if err != nil {
 		state.Fatalf("Could not open the output directory, error: %s", err.Error())
 	}
 
-	server, err := NewServer(NewClient(target), output, slog.New(slog.DiscardHandler))
+	server, err := NewServer(NewClient(target), output, allowWrite, slog.New(slog.DiscardHandler))
 
 	if err != nil {
 		state.Fatalf("Could not make the mcp server, error: %s", err.Error())
@@ -261,9 +262,9 @@ func afterNote(text string) (rest string) {
 	return
 }
 
-// Test if the server lists exactly the read tools, each annotated read-only and closed-world, with the bounds of their arguments.
+// Test if the server without --allow-write lists exactly the read tools, each annotated read-only and closed-world, with the bounds of their arguments, and its instructions name no write tool.
 func TestListToolsPositive(state *testing.T) {
-	session := connect(state, startFakeAPI(state), state.TempDir())
+	session := connect(state, startFakeAPI(state), state.TempDir(), false)
 	expected := []string{"download_pcap", "export_keylog", "export_pcap", "get_flow", "get_message", "list_captures", "list_flows", "list_held", "list_messages", "list_rules", "status", "tail_events"}
 	names := []string{}
 
@@ -287,6 +288,11 @@ func TestListToolsPositive(state *testing.T) {
 		return
 	}
 
+	if instructions := session.InitializeResult().Instructions; strings.Contains(instructions, "allow-write") || strings.Contains(instructions, "edit_held") || !strings.Contains(instructions, untrustedNote) {
+		state.Errorf("Test of the tool list failed, the instructions should have the note and no write tool, instructions: %s", instructions)
+		return
+	}
+
 	for tool, err := range session.Tools(state.Context(), nil) {
 		if (err != nil) || (tool.Name != "get_message") {
 			continue
@@ -303,7 +309,7 @@ func TestListToolsPositive(state *testing.T) {
 
 // Test if each read tool returns with the expected output for the answers of the api: traffic strings escaped, payloads in the marker, the hold budget, the paging arguments.
 func TestReadToolsPositive(state *testing.T) {
-	session := connect(state, startFakeAPI(state), state.TempDir())
+	session := connect(state, startFakeAPI(state), state.TempDir(), false)
 	status := v1.Status{}
 	text, isError := call(state, session, "status", nil, &status)
 
@@ -382,7 +388,7 @@ func TestReadToolsPositive(state *testing.T) {
 
 // Test if tail_events returns the escaped events of the stream without payloads, stops at max_events and after its seconds, and keeps only the types asked for.
 func TestTailEventsPositive(state *testing.T) {
-	session := connect(state, startFakeAPI(state), state.TempDir())
+	session := connect(state, startFakeAPI(state), state.TempDir(), false)
 	positiveCases := []struct {
 		Arguments map[string]any
 		Types     []v1.EventType
@@ -418,7 +424,7 @@ func TestTailEventsPositive(state *testing.T) {
 // Test if the export tools write a new 0600 file into the output directory with the api's bytes and return its path, size and SHA-256 only, never the content.
 func TestExportToolsPositive(state *testing.T) {
 	directory := state.TempDir()
-	session := connect(state, startFakeAPI(state), directory)
+	session := connect(state, startFakeAPI(state), directory, false)
 	positiveCases := []struct {
 		Name      string
 		Arguments map[string]any
@@ -462,8 +468,8 @@ func TestExportToolsPositive(state *testing.T) {
 func TestReadToolsNegative(state *testing.T) {
 	directory := state.TempDir()
 	target := startFakeAPI(state)
-	session := connect(state, target, directory)
-	missing := connect(state, ui.Target{Network: ui.UnixNetwork, Address: filepath.Join(state.TempDir(), "missing.sock")}, directory)
+	session := connect(state, target, directory, false)
+	missing := connect(state, ui.Target{Network: ui.UnixNetwork, Address: filepath.Join(state.TempDir(), "missing.sock")}, directory, false)
 	negativeCases := []struct {
 		Session   *sdk.ClientSession
 		Name      string
@@ -538,7 +544,7 @@ func TestReadToolsNegative(state *testing.T) {
 		state.Fatalf("Could not make the read-only directory, error: %s", err.Error())
 	}
 
-	readOnlySession := connect(state, target, readOnly)
+	readOnlySession := connect(state, target, readOnly, false)
 	text, isError := call(state, readOnlySession, "export_keylog", nil, nil)
 
 	if !isError || !strings.Contains(text, ErrOutputFile.Error()) || strings.Contains(text, "deadbeef") {

@@ -44,6 +44,64 @@ func Escape(data []byte) (escaped string) {
 	return
 }
 
+// the bytes of the escaped form, the inverse of Escape: \\ \n \r \t and \xNN (either case) are bytes, every other character is its UTF-8 bytes, a real line break too
+// any other backslash is an error that names its byte offset
+func Unescape(escaped string) (data []byte, err error) {
+	data = make([]byte, 0, len(escaped))
+
+	for index := 0; index < len(escaped); index++ {
+		if escaped[index] != '\\' {
+			data = append(data, escaped[index])
+			continue
+		}
+
+		next := byte(0)
+
+		if index+1 < len(escaped) {
+			next = escaped[index+1]
+		}
+
+		switch next {
+		case '\\':
+			data = append(data, '\\')
+		case 'n':
+			data = append(data, '\n')
+		case 'r':
+			data = append(data, '\r')
+		case 't':
+			data = append(data, '\t')
+		case 'x':
+			value, decodeErr := hex.DecodeString(escaped[index+2 : min(index+4, len(escaped))])
+
+			if (decodeErr != nil) || (len(value) != 1) {
+				err = fmt.Errorf("%w at byte %d: \\x needs two hex digits", ErrEscape, index)
+				return
+			}
+
+			data = append(data, value[0])
+			index += 2
+		default:
+			err = fmt.Errorf("%w at byte %d: use \\\\ \\n \\r \\t or \\xNN, a backslash is \\\\", ErrEscape, index)
+			return
+		}
+
+		index++
+	}
+
+	return
+}
+
+// hex digits of a payload, white space between them is ignored
+func unhex(text string) (data []byte, err error) {
+	data, err = hex.DecodeString(strings.Join(strings.Fields(text), ""))
+
+	if err != nil {
+		err = fmt.Errorf("%w: %w", ErrPayloadHex, err)
+	}
+
+	return
+}
+
 // Escape for a string field of the traffic's metadata
 func escapeText(text string) (escaped string) {
 	escaped = Escape([]byte(text))

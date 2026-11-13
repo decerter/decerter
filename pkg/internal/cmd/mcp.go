@@ -13,9 +13,9 @@ import (
 	"github.com/decerter/decerter/pkg/internal/logging"
 )
 
-// serve the MCP read tools on stdio until the client closes stdin or a shutdown signal, a client of the control API at target; the export tools write into outputDir
+// serve the MCP read tools, and the write tools with allowWrite, on stdio until the client closes stdin or a shutdown signal, a client of the control API at target; the export tools write into outputDir
 // an api that can't be reached at start is only logged: the client starts decerter mcp on its own, and every tool call tells why it fails until decerter runs
-func MCP(target ui.Target, outputDir string, logger *logging.Logger) (err error) {
+func MCP(target ui.Target, outputDir string, allowWrite bool, logger *logging.Logger) (err error) {
 	ctx, cancel := shutdownContext()
 	defer cancel()
 
@@ -49,14 +49,14 @@ func MCP(target ui.Target, outputDir string, logger *logging.Logger) (err error)
 		sdkLogger = logger.Slog()
 	}
 
-	server, err := mcp.NewServer(mcp.NewClient(target), output, sdkLogger)
+	server, err := mcp.NewServer(mcp.NewClient(target), output, allowWrite, sdkLogger)
 
 	if err != nil {
 		logger.Error("Could not make the MCP server", "error", err)
 		return
 	}
 
-	logger.Info("MCP server on stdio", "outputDir", outputDir)
+	logger.Info("MCP server on stdio", "outputDir", outputDir, "allowWrite", allowWrite)
 	err = mcp.Serve(ctx, server)
 
 	if err != nil {

@@ -141,3 +141,58 @@ func TestEscapeFlowPositive(state *testing.T) {
 		return
 	}
 }
+
+// Test if mcp.Unescape returns with the expected output: the inverse of mcp.Escape for every byte, \xNN in either case, other characters as their UTF-8 bytes, a real line break included.
+func TestUnescapePositive(state *testing.T) {
+	every := make([]byte, 0, 256)
+
+	for value := range 256 {
+		every = append(every, byte(value))
+	}
+
+	positiveCases := []struct {
+		Escaped  string
+		Expected string
+	}{
+		{Escaped: "", Expected: ""},
+		{Escaped: `GET /test HTTP/1.1\r\nHost: a\r\n\r\n`, Expected: "GET /test HTTP/1.1\r\nHost: a\r\n\r\n"},
+		{Escaped: "GET / HTTP/1.1\r\nHost: a\r\n", Expected: "GET / HTTP/1.1\r\nHost: a\r\n"},
+		{Escaped: `a\\x41\tb`, Expected: "a\\x41\tb"},
+		{Escaped: `\x00\xFF\xc3\xA9\x3c`, Expected: "\x00\xff\xc3\xa9<"},
+		{Escaped: "café", Expected: "caf\xc3\xa9"},
+		{Escaped: Escape(every), Expected: string(every)},
+		{Escaped: Escape([]byte(testResponse)), Expected: testResponse},
+	}
+
+	for _, positive := range positiveCases {
+		data, err := Unescape(positive.Escaped)
+
+		if (err != nil) || (string(data) != positive.Expected) {
+			state.Errorf("Test of mcp.Unescape failed, %q should be %q, data: %q, error: %v", positive.Escaped, positive.Expected, data, err)
+			return
+		}
+	}
+}
+
+// Test if mcp.Unescape returns with the expected errors for a backslash that is no escape of the escaped form.
+func TestUnescapeNegative(state *testing.T) {
+	negativeCases := []struct {
+		Escaped string
+		Text    string
+	}{
+		{Escaped: `GET \q`, Text: "at byte 4"},
+		{Escaped: `trailing\`, Text: "at byte 8"},
+		{Escaped: `\x4`, Text: "two hex digits"},
+		{Escaped: `\xzz`, Text: "two hex digits"},
+		{Escaped: `\u0041`, Text: "at byte 0"},
+	}
+
+	for _, negative := range negativeCases {
+		_, err := Unescape(negative.Escaped)
+
+		if !errors.Is(err, ErrEscape) || !strings.Contains(err.Error(), negative.Text) {
+			state.Errorf("Test of mcp.Unescape failed, %q should be %v with %q, error: %v", negative.Escaped, ErrEscape, negative.Text, err)
+			return
+		}
+	}
+}
