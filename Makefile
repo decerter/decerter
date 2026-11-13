@@ -98,15 +98,15 @@ generate: generate-vmlinux generate-bpf-objects ## Generate vmlinux.h and bpf ob
 ### Static Analysis ###
 .PHONY: fix
 fix: ## Run go fix modernizers
-	go fix -tags=unit,e2e ./...
+	go fix -tags=unit,e2e,e2e_android ./...
 
 .PHONY: vet
 vet: ## Run go vet
-	go vet -tags=unit,e2e ./...
+	go vet -tags=unit,e2e,e2e_android ./...
 
 .PHONY: lint
 lint: ## Run golangci-lint
-	$$(go env GOPATH)/bin/golangci-lint run --build-tags unit,e2e ./...
+	$$(go env GOPATH)/bin/golangci-lint run --build-tags unit,e2e,e2e_android ./...
 
 # the dependencies of both architectures; test-only dependencies are not shipped and not checked
 .PHONY: license-check
@@ -129,6 +129,12 @@ test-unit: ## Run unit tests with the race detector
 .PHONY: test-e2e
 test-e2e: ## Run the e2e tests with sudo, needs root and the local users test and nobody
 	sudo go test -tags=e2e -count=1 ./test/e2e/
+
+# decerter runs on the emulator, never on the host: the tests use a running x86_64 emulator or boot the AVD decerter-a15 (system-images;android-35;google_apis;x86_64,
+# google_apis because its adbd may run as root) from ANDROID_SDK_ROOT or ~/Android/Sdk, and stop it again; javac (a JDK) and the SDK's d8 build the Conscrypt client, tshark reads the live capture
+.PHONY: test-e2e-android
+test-e2e-android: ## Run the Android e2e tests on the emulator with sudo, needs the Android SDK with the emulator and the AVD decerter-a15, a JDK and tshark
+	sudo go test -tags=e2e_android -count=1 ./test/android/
 
 ### Build ###
 .PHONY: build

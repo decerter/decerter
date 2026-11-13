@@ -31,7 +31,7 @@ make help           # every target
 
 Building needs Go 1.26 or newer. The BPF objects are committed; regenerating them (`make generate-bpf-objects`) needs clang-21, llvm-strip-21 and `make generate-vmlinux` (bpftool).
 
-Other targets: `make lint` (golangci-lint), `make test-unit`, `make test-e2e` (root, the local users `test` and `nobody`), `make license-check` (go-licenses on the dependencies plus an SPDX check of every source file), `make install-golangci-lint`, `make install-go-licenses`.
+Other targets: `make lint` (golangci-lint), `make test-unit`, `make test-e2e` (root, the local users `test` and `nobody`), `make test-e2e-android` (root, the Android SDK with the AVD `decerter-a15` or a running x86_64 emulator, a JDK and tshark; decerter runs only on the emulator), `make license-check` (go-licenses on the dependencies plus an SPDX check of every source file), `make install-golangci-lint`, `make install-go-licenses`.
 
 ## Usage
 ```
