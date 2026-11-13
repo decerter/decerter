@@ -79,6 +79,7 @@ int store_secrets(struct pt_regs *ctx)
 
 //Collect the secrets BoringSSL logs: bool bssl::ssl_log_secret(const SSL *ssl, const char *label, Span<const uint8_t> secret), the Span comes in two registers (data, size)
 //BoringSSL calls it for every secret and only then checks for a key log callback, so the entry fires without one, and at entry the secret is complete
+//one program for every BoringSSL library, the attach cookie is the index of the library's offsets in boringssl_layout_map
 SEC("uprobe/ssl_log_secret")
 int log_secret(struct pt_regs *ctx)
 {
@@ -106,6 +107,14 @@ int log_secret(struct pt_regs *ctx)
 		return 0;
 	}
 
+	uint32_t layout_index = bpf_get_attach_cookie(ctx);
+	struct boringssl_layout *layout = bpf_map_lookup_elem(&boringssl_layout_map, &layout_index);
+
+	if (!layout)
+	{
+		return 0;
+	}
+
 	uint32_t key = 0;
 	struct tls_secrets *secrets = bpf_map_lookup_elem(&secrets_scratch_map, &key);
 
@@ -120,12 +129,12 @@ int log_secret(struct pt_regs *ctx)
 	uint64_t secret_address = PT_REGS_PARM3(ctx);
 	uint64_t secret_length = PT_REGS_PARM4(ctx);
 
-	switch (read_boringssl_session(ssl_address, secret_bit, secret_length, secrets))
+	switch (read_boringssl_session(ssl_address, layout, secret_bit, secret_length, secrets))
 	{
 	case OK:
 		break;
 	case LAYOUT:
-		report_layout_error(secrets->tls_version, secret_bit, secret_length);
+		report_layout_error(layout_index, secrets->tls_version, secret_bit, secret_length);
 		return 0;
 	default:
 		return 0;

@@ -104,6 +104,10 @@ func Setup(ctx context.Context, options Options, output io.Writer, logger *slog.
 		report.line("tls", "Conscrypt offsets for Android %s on %s", info.Release, info.ABI)
 	}
 
+	if options.Package != "" {
+		checkFlutter(ctx, adb, options.Package, report, logger)
+	}
+
 	port, err := forwardAPI(ctx, adb, options.Port, report)
 
 	if err != nil {
@@ -412,6 +416,20 @@ func checkPackage(ctx context.Context, adb ADB, name string, report *printer, lo
 	}
 
 	return
+}
+
+// decerter android tls on the device: whether the package is a Flutter app and decerter knows its engine's offsets; a Flutter app it can't hook is a warning,
+// decerter still relays its TLS, only without decryption
+func checkFlutter(ctx context.Context, adb ADB, name string, report *printer, logger *slog.Logger) {
+	output, tlsErr := adb.rootShell(ctx, platform.AndroidBinaryPath+" android tls --package "+shellQuote(name)+" 2>/dev/null")
+
+	for line := range strings.Lines(output) {
+		report.line("flutter", "%s", strings.TrimSpace(line))
+	}
+
+	if tlsErr != nil {
+		logger.Warn("A Flutter app decerter can't hook, its TLS is relayed without decryption: add its Flutter release with make generate-flutter-offsets", "package", name, "error", tlsErr)
+	}
 }
 
 // keep a forward of the device to the api socket on port, 0 keeps any existing one or lets adb pick a free port; other forwards of the device to the socket are removed

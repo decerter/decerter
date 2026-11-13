@@ -29,6 +29,8 @@ const (
 	NetdStateName string = "netd-hooks.json"
 	// the installed apps with their uid, one line each, readable by root (system:package_info 0640)
 	AndroidPackagesList string = "/data/system/packages.list"
+	// where the package manager installs apps, each in <random>/<package>-<random>/ with base.apk and the extracted lib/<isa>/
+	AndroidAppDirectory string = "/data/app"
 )
 
 // root is the filesystem root, / outside of tests

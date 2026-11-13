@@ -49,8 +49,9 @@ API after the identity rule. A socket file gets mode 0660 and the group decerter
 otherwise; an abstract socket (@name, the default on Android) lets root and, on Android, adb's shell user connect.
 A held message that nobody decides goes on unchanged after --hold-timeout.
 
-The secrets come from OpenSSL 3's libssl on Linux (every 3.x release, amd64 and arm64) and Conscrypt's BoringSSL on Android. A process with its
-own TLS library, such as Chrome, Cronet, Flutter or Go programs, is relayed without decryption.`,
+The secrets come from OpenSSL 3's libssl on Linux (every 3.x release, amd64 and arm64), and on Android from Conscrypt's BoringSSL and the
+BoringSSL in libflutter.so of the selected Flutter apps (Flutter 3.24.0 to 3.50.0, by the engine's Dart version). A process with another own
+TLS library, such as Chrome, Cronet or Go programs, or a Flutter app of an unknown Dart version, is relayed without decryption.`,
 		Example: `  # the flows of the local user test (uid 1001), TLS decrypted
   sudo decerter run --uid 1001 --decrypt
   sudo -u test curl -s https://example.com/

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -102,6 +103,41 @@ func SharingPackages(selected Package, packages []Package) (names []string) {
 		}
 	}
 
+	return
+}
+
+// the packages with the uid, a shared uid has several
+func PackagesOfUID(uid uint32, packages []Package) (names []string) {
+	for _, installed := range packages {
+		if installed.UID == uid {
+			names = append(names, installed.Name)
+		}
+	}
+
+	return
+}
+
+// the install directories of a package under appDirectory (/data/app): <random>/<package>-<random> since Android 11, <package>-<random> before
+// during an update the old directory can still be there next to the new one, both are returned, sorted
+func FindInstallDirectories(appDirectory string, name string) (directories []string, err error) {
+	for _, pattern := range []string{filepath.Join(appDirectory, "*", name+"-*"), filepath.Join(appDirectory, name+"-*")} {
+		matches, globErr := filepath.Glob(pattern)
+
+		if err = globErr; err != nil {
+			err = fmt.Errorf("%w: %w", ErrInstallDirectory, err)
+			return
+		}
+
+		for _, match := range matches {
+			info, statErr := os.Stat(match)
+
+			if (statErr == nil) && info.IsDir() {
+				directories = append(directories, match)
+			}
+		}
+	}
+
+	slices.Sort(directories)
 	return
 }
 

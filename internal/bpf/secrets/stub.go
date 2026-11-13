@@ -20,17 +20,18 @@ import (
 )
 
 const (
-	LayoutErrorMap    bpf.BpfMapName     = 0 // value: "layout_error_map"
-	PartialSecretsMap bpf.BpfMapName     = 1 // value: "partial_secrets_map"
-	SecretsEventMap   bpf.BpfMapName     = 2 // value: "secrets_event_map"
-	SecretsMap        bpf.BpfMapName     = 3 // value: "secrets_map"
-	SecretsScratchMap bpf.BpfMapName     = 4 // value: "secrets_scratch_map"
-	SslMap            bpf.BpfMapName     = 5 // value: "ssl_map"
-	TgidMap           bpf.BpfMapName     = 6 // value: "tgid_map"
-	UidMap            bpf.BpfMapName     = 7 // value: "uid_map"
-	LogSecret         bpf.BpfProgramName = 0 // value: "log_secret"
-	StashSsl          bpf.BpfProgramName = 1 // value: "stash_ssl"
-	StoreSecrets      bpf.BpfProgramName = 2 // value: "store_secrets"
+	LayoutErrorMap     bpf.BpfMapName     = 0 // value: "layout_error_map"
+	PartialSecretsMap  bpf.BpfMapName     = 1 // value: "partial_secrets_map"
+	SecretsEventMap    bpf.BpfMapName     = 2 // value: "secrets_event_map"
+	SecretsMap         bpf.BpfMapName     = 3 // value: "secrets_map"
+	SecretsScratchMap  bpf.BpfMapName     = 4 // value: "secrets_scratch_map"
+	SslMap             bpf.BpfMapName     = 5 // value: "ssl_map"
+	TgidMap            bpf.BpfMapName     = 6 // value: "tgid_map"
+	UidMap             bpf.BpfMapName     = 7 // value: "uid_map"
+	BoringsslLayoutMap bpf.BpfMapName     = 8 // value: "boringssl_layout_map"
+	LogSecret          bpf.BpfProgramName = 0 // value: "log_secret"
+	StashSsl           bpf.BpfProgramName = 1 // value: "stash_ssl"
+	StoreSecrets       bpf.BpfProgramName = 2 // value: "store_secrets"
 )
 
 func CheckSupported() (err error) {
@@ -38,7 +39,7 @@ func CheckSupported() (err error) {
 	return
 }
 
-func LoadBpfObjects(opensslOffset openssl.Offset, boringsslOffset boringssl.Offset, ownTgid uint32, sharedUidMap *ebpf.Map, sharedTgidMap *ebpf.Map) (bpfMaps map[bpf.BpfMapName]*ebpf.Map, bpfPrograms map[bpf.BpfProgramName]*ebpf.Program, closeFunction func() error, err error) {
+func LoadBpfObjects(opensslOffset openssl.Offset, ownTgid uint32, sharedUidMap *ebpf.Map, sharedTgidMap *ebpf.Map) (bpfMaps map[bpf.BpfMapName]*ebpf.Map, bpfPrograms map[bpf.BpfProgramName]*ebpf.Program, closeFunction func() error, err error) {
 	err = CheckSupported()
 	return
 }
@@ -65,7 +66,16 @@ func LookupKeyLog(clientRandom [32]byte, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (
 	return
 }
 
-func CheckLayout(bpfMaps map[bpf.BpfMapName]*ebpf.Map) (count uint32, err error) {
+func SetBoringsslLayout(index uint32, offset boringssl.Offset, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (err error) {
+	err = CheckSupported()
+	return
+}
+
+func BoringsslLayouts(bpfMaps map[bpf.BpfMapName]*ebpf.Map) (count uint32) {
+	return
+}
+
+func CheckLayout(index uint32, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (count uint32, err error) {
 	err = CheckSupported()
 	return
 }

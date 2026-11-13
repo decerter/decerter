@@ -53,7 +53,7 @@ type dexResult struct {
 func TestRewritePositive(state *testing.T) {
 	requireDex(state)
 	servers := startHTTPSServers(state, nil)
-	decerter := startDeviceDecerter(state, decerterBinary, "rewrite", apiArguments(), redirectReady)
+	decerter := startDeviceDecerter(state, decerterBinary, "rewrite", apiArguments(appPackage), redirectReady)
 	client := forwardAPI(state)
 	rule := v1.Rule{}
 	status, err := client.call(state.Context(), http.MethodPost, "/rules", v1.RuleRequest{Filter: "tls", Direction: v1.UpDirection, Layer: v1.TLSLayer, Find: v1.Value{Type: v1.TextValueType, Value: "GET / "}, Replace: v1.Value{Type: v1.TextValueType, Value: "GET /test "}}, &rule)
@@ -103,7 +103,7 @@ func TestRewritePositive(state *testing.T) {
 func TestRewriteNegative(state *testing.T) {
 	requireDex(state)
 	servers := startHTTPSServers(state, nil)
-	decerter := startDeviceDecerter(state, decerterBinary, "rewrite-negative", apiArguments(), redirectReady)
+	decerter := startDeviceDecerter(state, decerterBinary, "rewrite-negative", apiArguments(appPackage), redirectReady)
 	client := forwardAPI(state)
 	status, err := client.call(state.Context(), http.MethodPost, "/rules", v1.RuleRequest{Direction: v1.UpDirection, Find: v1.Value{Type: v1.TextValueType, Value: "GET / "}, Replace: v1.Value{Type: v1.TextValueType, Value: "GET /test "}}, nil)
 
@@ -126,7 +126,7 @@ func TestRewriteNegative(state *testing.T) {
 func TestHoldPositive(state *testing.T) {
 	requireDex(state)
 	servers := startHTTPSServers(state, nil)
-	decerter := startDeviceDecerter(state, decerterBinary, "hold", apiArguments(), redirectReady)
+	decerter := startDeviceDecerter(state, decerterBinary, "hold", apiArguments(appPackage), redirectReady)
 	client := forwardAPI(state)
 	status, err := client.call(state.Context(), http.MethodPut, "/intercept", v1.InterceptRequest{Enabled: true, Filter: "tls", Direction: v1.UpDirection}, nil)
 
@@ -172,8 +172,8 @@ func TestHoldPositive(state *testing.T) {
 }
 
 // decerter run with --intercept, --package and the API on its abstract socket, debug logs name the uid of every api client
-func apiArguments() (arguments string) {
-	arguments = "--log-level debug run --intercept --api-socket " + apiSocket + " --package " + appPackage + " --dst-cidr " + hostCIDR
+func apiArguments(packageName string) (arguments string) {
+	arguments = "--log-level debug run --intercept --api-socket " + apiSocket + " --package " + packageName + " --dst-cidr " + hostCIDR
 	return
 }
 
@@ -367,7 +367,7 @@ func TestRunCaptureAPIPositive(state *testing.T) {
 	}
 
 	servers := startHTTPSServers(state, nil)
-	decerter := startDeviceDecerter(state, decerterBinary, "run-capture", apiArguments(), redirectReady)
+	decerter := startDeviceDecerter(state, decerterBinary, "run-capture", apiArguments(appPackage), redirectReady)
 	client := forwardAPI(state)
 	status, err := client.call(state.Context(), http.MethodPost, "/rules", v1.RuleRequest{Filter: "tls", Direction: v1.UpDirection, Layer: v1.TLSLayer, Find: v1.Value{Type: v1.TextValueType, Value: "GET / "}, Replace: v1.Value{Type: v1.TextValueType, Value: "GET /test "}}, nil)
 
@@ -438,7 +438,7 @@ func TestRunCaptureAPINegative(state *testing.T) {
 	}
 
 	servers := startHTTPSServers(state, nil)
-	decerter := startDeviceDecerter(state, decerterBinary, "run-capture-negative", apiArguments(), redirectReady)
+	decerter := startDeviceDecerter(state, decerterBinary, "run-capture-negative", apiArguments(appPackage), redirectReady)
 	client := forwardAPI(state)
 	captures := map[string]v1.CaptureRequest{"all": {Filter: "", Plaintext: false}, "none": {Filter: "proc.comm == \"nothing\"", Plaintext: false}}
 	started := map[string]v1.Capture{}

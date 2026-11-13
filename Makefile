@@ -22,6 +22,15 @@ OPENSSL_CACHE ?=
 ARM64_SYSROOT ?=
 AMD64_SYSROOT ?=
 BORINGSSL_RELEASES ?= 15 16 17
+# Flutter stable releases whose engine's BoringSSL gets offsets: all is every x.y.z tag from FLUTTER_MIN_VERSION on
+FLUTTER_VERSIONS ?= all
+FLUTTER_MIN_VERSION ?= 3.24.0
+# empty: the script's default ~/.cache/decerter-boringssl, one shallow checkout per BoringSSL revision
+BORINGSSL_CACHE ?=
+# the Flutter SDKs the Android e2e tests build their Flutter app with, colon separated
+empty :=
+space := $(empty) $(empty)
+DECERTER_E2E_FLUTTER ?= $(subst $(space),:,$(wildcard $(HOME)/.cache/decerter-flutter/*/flutter))
 # the newest NDK of the SDK, the BoringSSL probe is compiled for x86_64 and aarch64 Android with its clang
 ANDROID_NDK ?= $(lastword $(sort $(wildcard $(HOME)/Android/Sdk/ndk/*)))
 # licenses a dependency may have, each of them can be combined with AGPL-3.0-only; any other one needs a look first
@@ -94,7 +103,13 @@ generate-openssl-offsets: ## Generate OpenSSL struct offsets of amd64 and arm64 
 .PHONY: generate-boringssl-offsets
 generate-boringssl-offsets: ## Generate BoringSSL offsets of Conscrypt for the Android BORINGSSL_RELEASES (default is 15 16 17) with the NDK in ANDROID_NDK (default is the newest in ~/Android/Sdk/ndk)
 	tmp="$$(mktemp)"; \
-	ANDROID_NDK="$(ANDROID_NDK)" ./tools/offsetgen/boringssl.sh $(BORINGSSL_RELEASES) > "$$tmp" && gofmt -w "$$tmp" && mv "$$tmp" internal/tls/boringssl/offsets_gen.go || { rm -f "$$tmp"; exit 1; }
+	ANDROID_NDK="$(ANDROID_NDK)" ./tools/offsetgen/boringssl.sh conscrypt $(BORINGSSL_RELEASES) > "$$tmp" && gofmt -w "$$tmp" && mv "$$tmp" internal/tls/boringssl/offsets_gen.go || { rm -f "$$tmp"; exit 1; }
+
+# no signature is generated: decerter finds ssl_log_secret in a stripped libflutter.so through the call sites of its key log labels, the same way for every engine
+.PHONY: generate-flutter-offsets
+generate-flutter-offsets: ## Generate BoringSSL offsets of the Flutter engine (dart:io's TLS) for FLUTTER_VERSIONS (default is all, every stable release from FLUTTER_MIN_VERSION, default 3.24.0, or releases like 3.35.7), keyed by the engine's Dart version, with the NDK in ANDROID_NDK; BoringSSL checkouts are cached in BORINGSSL_CACHE (default is ~/.cache/decerter-boringssl)
+	tmp="$$(mktemp)"; \
+	ANDROID_NDK="$(ANDROID_NDK)" FLUTTER_MIN_VERSION="$(FLUTTER_MIN_VERSION)" BORINGSSL_CACHE="$(BORINGSSL_CACHE)" ./tools/offsetgen/boringssl.sh flutter $(FLUTTER_VERSIONS) > "$$tmp" && gofmt -w "$$tmp" && mv "$$tmp" internal/tls/boringssl/flutter_offsets_gen.go || { rm -f "$$tmp"; exit 1; }
 
 .PHONY: generate
 generate: generate-vmlinux generate-bpf-objects ## Generate vmlinux.h and bpf object files
@@ -136,9 +151,10 @@ test-e2e: ## Run the e2e tests with sudo, needs root and the local users test an
 
 # decerter runs on the emulator, never on the host: the tests use a running x86_64 emulator, or decerter android setup boots the AVD decerter-a15 (system-images;android-35;google_apis;x86_64,
 # google_apis because its adbd may run as root) from ANDROID_SDK_ROOT or ~/Android/Sdk as the cold setup case, and they stop it again; javac (a JDK) and the SDK's d8 build the Conscrypt client, tshark reads the live capture
+# the Flutter test app is built as your user with each SDK of decerter_E2E_FLUTTER (colon separated), cached in ~/.cache/decerter-flutter/e2e; the first build of an SDK takes minutes
 .PHONY: test-e2e-android
-test-e2e-android: ## Run the Android e2e tests on the emulator with sudo, needs the Android SDK with the emulator and the AVD decerter-a15, a JDK and tshark
-	sudo go test -tags=e2e_android -count=1 ./test/android/
+test-e2e-android: ## Run the Android e2e tests on the emulator with sudo, needs the Android SDK with the emulator and the AVD decerter-a15, a JDK and tshark; the Flutter cases need DECERTER_E2E_FLUTTER (default is every ~/.cache/decerter-flutter/*/flutter)
+	sudo DECERTER_E2E_FLUTTER="$(DECERTER_E2E_FLUTTER)" go test -tags=e2e_android -count=1 -timeout 60m ./test/android/
 
 ### Build ###
 .PHONY: build

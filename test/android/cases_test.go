@@ -227,7 +227,7 @@ func TestCapturePositive(state *testing.T) {
 	}
 
 	servers := startHTTPSServers(state, nil)
-	tsharkOutput := startCapture(state, servers)
+	tsharkOutput := startCapture(state, servers, appPackage)
 
 	for _, server := range servers {
 		err := testDex(state.Context(), appUID, server, "/capture", "/capture")
@@ -677,9 +677,9 @@ type liveCapture struct {
 	errors lockedBuffer
 }
 
-// start adb exec-out with decerter capture on the device and tshark on the host reading its stdout, and wait until decerter captures
+// start adb exec-out with decerter capture --package packageName on the device and tshark on the host reading its stdout, and wait until decerter captures
 // adb exec-out gives decerter a pty for stdout and stderr, so its stderr goes to capture.log on the device
-func startCapture(state *testing.T, servers []httpsServer) (capture *liveCapture) {
+func startCapture(state *testing.T, servers []httpsServer, packageName string) (capture *liveCapture) {
 	reader, writer, pipeErr := os.Pipe()
 
 	if pipeErr != nil {
@@ -688,7 +688,7 @@ func startCapture(state *testing.T, servers []httpsServer) (capture *liveCapture
 
 	capture = &liveCapture{output: newLockedBuffer(), errors: newLockedBuffer()}
 	decerter := deviceDecerter{Binary: decerterBinary, Name: "capture"}
-	command := fmt.Sprintf("cd %s && rm -f capture.log && exec ./%s capture -w - --package %s --dst-cidr %s 2>%s/capture.log", deviceDirectory, decerterBinary, appPackage, hostCIDR, deviceDirectory)
+	command := fmt.Sprintf("cd %s && rm -f capture.log && exec ./%s capture -w - --package %s --dst-cidr %s 2>%s/capture.log", deviceDirectory, decerterBinary, packageName, hostCIDR, deviceDirectory)
 	capture.adb = device.execOut(state.Context(), command)
 	capture.adb.Stdout = writer
 	capture.adb.Stderr = capture.errors

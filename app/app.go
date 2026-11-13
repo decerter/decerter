@@ -33,7 +33,6 @@ import (
 	"github.com/decerter/decerter/internal/platform"
 	"github.com/decerter/decerter/internal/proxy"
 	"github.com/decerter/decerter/internal/route"
-	"github.com/decerter/decerter/internal/tls/boringssl"
 	"github.com/decerter/decerter/internal/tls/openssl"
 	"github.com/cilium/ebpf"
 )
@@ -46,7 +45,7 @@ const (
 	releaseDelay time.Duration = 2 * time.Second
 	// how often released flows are looked for, a flow lives at most releaseDelay + releaseSweep after the close
 	releaseSweep time.Duration = time.Second
-	// how often the BoringSSL uprobe's layout errors are looked at
+	// how often the BoringSSL uprobe's layout errors are looked at, per library
 	layoutCheck time.Duration = time.Second
 	// in the platform's data directory, the lock held while decerter runs; the netd hooks decerter shared are in platform.NetdStateName next to it
 	lockName string = "decerter.lock"
@@ -77,7 +76,8 @@ type App struct {
 	backend             *api.Backend
 	startTime           time.Time
 	libssl              string
-	logSecretAddress    uint64
+	boringsslHooks      []boringsslHook
+	flutterSeen         map[string]bool
 	isCapture           bool
 	capturePath         string
 	plaintext           bool
@@ -129,7 +129,8 @@ func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter,
 		backend:             nil,
 		startTime:           time.Now(),
 		libssl:              libssl,
-		logSecretAddress:    0,
+		boringsslHooks:      nil,
+		flutterSeen:         nil,
 		isCapture:           isCapture,
 		capturePath:         capturePath,
 		plaintext:           plaintext,
@@ -829,9 +830,10 @@ func (app *App) StartFlowTable() {
 }
 
 // resolve libssl and pick the offsets, then load the secrets object; an unknown OpenSSL version fails here, so this runs before anything is attached
-// Linux hooks OpenSSL. Android hooks BoringSSL's ssl_log_secret in Conscrypt's libssl with the offsets of the Android release; with --libssl the library given, as BoringSSL when it has ssl_log_secret and as OpenSSL otherwise
+// Linux hooks OpenSSL. Android hooks BoringSSL's ssl_log_secret in Conscrypt's libssl with the offsets of the Android release, and in the libflutter.so of
+// each selected Flutter app with the offsets of its Dart version; with --libssl the library given, as BoringSSL when it has ssl_log_secret and as OpenSSL otherwise
 // in run and capture mode the redirect object has to be loaded already, the secrets object shares its uid_map and tgid_map; in keylog mode it owns them
-// on an architecture without the secrets object, and on Android when Conscrypt can't be hooked, keylog mode fails, run and capture mode go on without TLS secrets
+// on an architecture without the secrets object, and on Android when neither Conscrypt nor a Flutter app can be hooked, keylog mode fails, run and capture mode go on without TLS secrets
 func (app *App) LoadSecretsBpfObjects() (err error) {
 	supportedErr := secrets.CheckSupported()
 
@@ -841,13 +843,12 @@ func (app *App) LoadSecretsBpfObjects() (err error) {
 	}
 
 	var (
-		opensslOffset   openssl.Offset
-		boringsslOffset boringssl.Offset
-		libsslPath      string
-		library         string
+		opensslOffset openssl.Offset
+		libsslPath    string
+		library       string
 	)
 
-	useBoringssl, boringsslPath, logSecretAddress, boringsslErr := app.findBoringssl()
+	hooks, useBoringssl, seen, boringsslErr := app.findBoringsslHooks()
 
 	if boringsslErr != nil {
 		err = app.withoutSecrets(boringsslErr)
@@ -855,16 +856,14 @@ func (app *App) LoadSecretsBpfObjects() (err error) {
 	}
 
 	if useBoringssl {
-		offset, offsetErr := boringssl.GetOffset(app.platform.Release, runtime.GOARCH)
+		libraries := []string{}
 
-		if offsetErr != nil {
-			err = app.withoutSecrets(offsetErr)
-			return
+		for _, hook := range hooks {
+			libraries = append(libraries, hook.Library)
 		}
 
-		boringsslOffset = offset
-		libsslPath = boringsslPath
-		library = "BoringSSL of Android " + app.platform.Release
+		libsslPath = hooks[0].Path
+		library = strings.Join(libraries, ", ")
 	} else {
 		opensslPath, libcryptoPath, findErr := openssl.FindLibssl(app.libssl)
 
@@ -900,7 +899,7 @@ func (app *App) LoadSecretsBpfObjects() (err error) {
 		sharedTgidMap = app.redirectBpfMaps[redirect.TgidMap]
 	}
 
-	bpfMaps, bpfPrograms, closeFunction, loadErr := secrets.LoadBpfObjects(opensslOffset, boringsslOffset, uint32(os.Getpid()), sharedUidMap, sharedTgidMap)
+	bpfMaps, bpfPrograms, closeFunction, loadErr := secrets.LoadBpfObjects(opensslOffset, uint32(os.Getpid()), sharedUidMap, sharedTgidMap)
 
 	if err = loadErr; err != nil {
 		app.logger.Error("Could not load secrets bpf objects", "error", err)
@@ -908,40 +907,12 @@ func (app *App) LoadSecretsBpfObjects() (err error) {
 	}
 
 	app.libssl = libsslPath
-	app.logSecretAddress = logSecretAddress
+	app.boringsslHooks = hooks
+	app.flutterSeen = seen
 	app.secretsBpfMaps = bpfMaps
 	app.secretsBpfPrograms = bpfPrograms
 	app.closeFunctions = append(app.closeFunctions, closeFunction)
 	app.logger.Info("Loaded secrets uprobe", "libssl", libsslPath, "library", library)
-	return
-}
-
-// only on Android: Conscrypt's libssl, or the --libssl given, is hooked as BoringSSL when it has ssl_log_secret
-// a --libssl without it is an OpenSSL (useBoringssl false, no error), a Conscrypt without it is an error
-func (app *App) findBoringssl() (useBoringssl bool, libsslPath string, logSecretAddress uint64, err error) {
-	if app.platform.Type != platform.AndroidType {
-		return
-	}
-
-	libsslPath, err = boringssl.FindLibssl(app.libssl)
-
-	if err != nil {
-		return
-	}
-
-	address, findErr := boringssl.FindLogSecret(libsslPath)
-
-	if errors.Is(findErr, boringssl.ErrNoLogSecret) && (app.libssl != "") {
-		libsslPath = ""
-		return
-	}
-
-	if err = findErr; err != nil {
-		return
-	}
-
-	useBoringssl = true
-	logSecretAddress = address
 	return
 }
 
@@ -996,10 +967,15 @@ func (app *App) StartKeylog() {
 }
 
 // OpenSSL: attach the entry and return uprobes to every libssl function that carries a complete handshake
-// BoringSSL: attach one entry uprobe to ssl_log_secret, by file offset because the symbol is not exported, and watch for layout errors
+// BoringSSL: attach one entry uprobe to ssl_log_secret of each library, by file offset because the symbol is not exported, and watch for layout errors and new Flutter apps
 // nothing to attach when run mode goes on without the secrets object
 func (app *App) AttachSecrets() (err error) {
 	if app.secretsBpfPrograms == nil {
+		return
+	}
+
+	if app.boringsslHooks != nil {
+		err = app.attachBoringsslHooks()
 		return
 	}
 
@@ -1007,25 +983,6 @@ func (app *App) AttachSecrets() (err error) {
 
 	if err = openErr; err != nil {
 		app.logger.Error("Could not open libssl", "error", err, "libssl", app.libssl)
-		return
-	}
-
-	if app.logSecretAddress != 0 {
-		closeFunction, attachErr := attach.AddUprobeAddress(executable, app.logSecretAddress, app.secretsBpfPrograms[secrets.LogSecret])
-
-		if err = attachErr; err != nil {
-			app.logger.Error("Could not attach secrets uprobe", "error", err, "symbol", "ssl_log_secret")
-			return
-		}
-
-		app.closeFunctions = append(app.closeFunctions, closeFunction)
-		app.logger.Info("Attached secrets uprobe", "libssl", app.libssl, "symbols", []string{"ssl_log_secret"}, "uids", app.secretsUIDs(), "pids", app.secretsTgids())
-
-		// BoringSSL layout checker
-		app.waitGroup.Go(func() {
-			app.watchSecretsLayout()
-		})
-
 		return
 	}
 
@@ -1100,34 +1057,6 @@ func (app *App) secretsTgids() (tgids []uint32) {
 	}
 
 	return
-}
-
-// a Conscrypt APEX updated apart from the release can have another BoringSSL layout, the uprobe then rejects every secret instead of storing garbage
-// this says so once, sessions stay without secrets: the proxy relays them undecrypted and capture mode writes them without keys
-func (app *App) watchSecretsLayout() {
-	ticker := time.NewTicker(layoutCheck)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-app.ctx.Done():
-			app.logger.Debug("Context cancelled")
-			return
-		case <-ticker.C:
-			count, layoutErr := secrets.CheckLayout(app.secretsBpfMaps)
-
-			if count == 0 {
-				if layoutErr != nil {
-					app.logger.Warn("Could not check BoringSSL layout", "error", layoutErr)
-				}
-
-				continue
-			}
-
-			app.logger.Error("Could not read TLS secrets", "error", layoutErr, "libssl", app.libssl, "release", app.platform.Release, "architecture", runtime.GOARCH)
-			return
-		}
-	}
 }
 
 // on Android: create the data directory, take the lock and, when a decerter before was killed while it shared netd's hooks, put them back before anything else

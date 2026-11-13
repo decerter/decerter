@@ -22,21 +22,6 @@ const (
 	debugDataSection string = ".gnu_debugdata"
 )
 
-// Offset holds the per-release, per-architecture BoringSSL offsets the
-// ssl_log_secret uprobe reads. ssl_log_secret gets the SSL * and the secret
-// as arguments, so only the path to the client_random is needed: S3 is the
-// offset of the SSL3_STATE pointer in ssl_st and ClientRandom the offset of
-// client_random in SSL3_STATE. Version is the negotiated protocol version,
-// in ssl_st up to Android 15 and in SSL3_STATE from Android 16 on
-// (VersionInS3); the uprobe checks it against the version the label implies,
-// so a Conscrypt APEX with another layout is reported instead of read.
-type Offset struct {
-	Version      uint64
-	VersionInS3  bool
-	S3           uint64
-	ClientRandom uint64
-}
-
 // override is the --libssl flag, empty means the libssl of the Conscrypt APEX
 func FindLibssl(override string) (libsslPath string, err error) {
 	libsslPath = override

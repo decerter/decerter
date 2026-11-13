@@ -22,6 +22,8 @@ setup runs on the Linux host as your user and leaves decerter on the device, the
 directory is /data/local/tmp/decerter.d), with the control API's abstract socket @decerter-api forwarded to a host port.
 Then decerter runs on the device as root with --package <app>, and decerter ui runs on the host.
 restore runs on the device and puts netd's cgroup hooks back after decerter was killed.
+tls runs on the device and says whether decerter decrypts an app's TLS: Java apps through Conscrypt, Flutter apps through
+the BoringSSL in their libflutter.so when decerter knows the engine's Dart version.
 
 Without setup, the same by hand:
   adb root
@@ -46,7 +48,8 @@ KernelSU) is used through su.
 It pushes the static decerter binary for the device's ABI to /data/local/tmp/decerter: this binary for an x86_64 emulator,
 decerter-arm64 next to it (make build-arm64) for an arm64 device, or the one --binary names. It checks that decerter has
 Conscrypt offsets for the Android release, without them TLS is relayed but not decrypted. --package is looked up on
-the device the way decerter run --package does it. Then it forwards a host port to the control API's abstract socket
+the device the way decerter run --package does it, and decerter android tls on the device says whether it is a Flutter app and
+whether decerter knows the offsets of its Dart version. Then it forwards a host port to the control API's abstract socket
 @decerter-api (adb forward tcp:<port> localabstract:decerter-api), keeping the forward an earlier setup made, and prints two
 commands: decerter run on the device with --package, and decerter ui on the host.
 
@@ -67,6 +70,30 @@ removes the binary, the data directory /data/local/tmp/decerter.d and the forwar
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			quiet(cmd)
 			err = internal.SetupAndroid(setupOptions, setupRemove, &logger)
+			return
+		},
+	}
+	androidTLSCmd = &cobra.Command{
+		Use:   "tls --package <name>",
+		Short: "Say whether decerter decrypts the TLS of an app, a Flutter app needs known offsets",
+		Long: `Runs on the device as root and prints one line per package (and per install directory during an update).
+Java apps get TLS from Conscrypt, whose offsets come with the Android release. A Flutter app links its own BoringSSL
+into libflutter.so (dart:io's HttpClient and SecureSocket use it): decerter reads the Dart version the engine prints,
+picks the BoringSSL offsets of that version from its table and finds ssl_log_secret through its key log labels. The
+library may be extracted (lib/<isa>/libflutter.so of the install directory) or stored uncompressed in the apk.
+A Flutter app with an unknown Dart version, or a library decerter can't read, makes the command fail after printing; decerter
+run relays such an app's TLS without decrypting it. make generate-flutter-offsets FLUTTER_VERSIONS=<release> adds a
+Flutter release to the table. decerter android setup --package runs this for its package.`,
+		Example: `  adb shell /data/local/tmp/decerter android tls --package com.example.app`,
+		Args:    cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) (err error) {
+			if len(packageNames) == 0 {
+				err = ErrNoPackage
+				return
+			}
+
+			quiet(cmd)
+			err = internal.AndroidTLS(packageNames, &logger)
 			return
 		},
 	}
@@ -103,7 +130,9 @@ func init() {
 		androidSetupCmd.MarkFlagsMutuallyExclusive("remove", flag)
 	}
 
+	androidTLSCmd.Flags().Func("package", "check the app with this package `name`, repeatable or comma separated (required)", parsePackageNames)
 	androidCmd.AddCommand(androidSetupCmd)
+	androidCmd.AddCommand(androidTLSCmd)
 	androidCmd.AddCommand(androidRestoreCmd)
 	rootCmd.AddCommand(androidCmd)
 }

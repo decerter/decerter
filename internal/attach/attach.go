@@ -64,8 +64,10 @@ func AddUprobe(executable *link.Executable, symbol string, program *ebpf.Program
 }
 
 // attach program to the entry of a function that has no symbol cilium/ebpf can resolve, address is the file offset of its first instruction
-func AddUprobeAddress(executable *link.Executable, address uint64, program *ebpf.Program) (closeFunction func() error, err error) {
-	uprobeLink, attachErr := executable.Uprobe("", program, &link.UprobeOptions{Address: address})
+// the program reads cookie with bpf_get_attach_cookie, one program serves several libraries that way
+// the executable can be any file the code is mapped from: a library inside an apk is mapped from the apk, address then counts from the apk's start
+func AddUprobeAddress(executable *link.Executable, address uint64, program *ebpf.Program, cookie uint64) (closeFunction func() error, err error) {
+	uprobeLink, attachErr := executable.Uprobe("", program, &link.UprobeOptions{Address: address, Cookie: cookie})
 
 	if err = attachErr; err != nil {
 		err = fmt.Errorf("%w: address 0x%x: %w", ErrAttach, address, attachErr)

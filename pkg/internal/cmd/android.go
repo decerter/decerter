@@ -5,7 +5,9 @@ package cmd
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -34,6 +36,53 @@ func RestoreAndroid(logger *logging.Logger) (err error) {
 	}()
 
 	err = decerter.RestoreNetdHooks()
+	return
+}
+
+// on the device as root: for each package, whether decerter hooks its TLS: a Flutter app with known offsets, one it can't hook, or no Flutter app
+// the lines go to stdout, a Flutter app that can't be hooked fails with ErrFlutterUnknown after all lines are printed
+func AndroidTLS(packageNames []string, logger *logging.Logger) (err error) {
+	currentPlatform := platform.Detect("/")
+
+	if currentPlatform.Type != platform.AndroidType {
+		err = ErrNotAndroid
+		logger.Error("Could not check the apps", "error", err)
+		return
+	}
+
+	packages, err := android.ReadPackages(platform.AndroidPackagesList)
+
+	if err != nil {
+		logger.Error("Could not read the installed packages", "error", err, "fileName", platform.AndroidPackagesList)
+		return
+	}
+
+	resolved, err := android.ResolvePackages(packageNames, packages)
+
+	if err != nil {
+		logger.Error("Could not check the apps", "error", err)
+		return
+	}
+
+	for _, selected := range resolved {
+		lines, isKnown, describeErr := android.DescribeTLS(selected.Name, platform.AndroidAppDirectory, runtime.GOARCH)
+
+		if describeErr != nil {
+			err = errors.Join(err, describeErr)
+			logger.Error("Could not check the app", "error", describeErr, "package", selected.Name)
+			continue
+		}
+
+		for _, line := range lines {
+			_, writeErr := fmt.Fprintln(os.Stdout, line)
+			err = errors.Join(err, writeErr)
+		}
+
+		if !isKnown {
+			err = errors.Join(err, fmt.Errorf("%w: %s", ErrFlutterUnknown, selected.Name))
+		}
+	}
+
 	return
 }
 

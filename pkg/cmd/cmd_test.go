@@ -130,6 +130,8 @@ func TestExecuteNegative(state *testing.T) {
 		{Args: []string{"android", "setup", "--remove", "--package", "com.example.app"}, Text: "if any flags in the group [remove package] are set none of the others can be"},
 		{Args: []string{"android", "setup", "--port", "0"}, Text: `invalid port "0": must be between 1 and 65535`},
 		{Args: []string{"android", "setup", "extra"}, Text: `unknown command "extra" for "decerter android setup"`},
+		{Args: []string{"android", "tls"}, Text: "--package"},
+		{Args: []string{"android", "tls", "--package", "com.example app"}, Text: `invalid package name "com.example app"`},
 	}
 
 	for _, negative := range negativeCases {
@@ -161,6 +163,7 @@ func TestExecutePositive(state *testing.T) {
 		{Args: []string{"run", "--help"}, Text: []string{"--decrypt", "--udp-idle-timeout duration", "--api-socket path", "--hold-timeout duration", "--log-level level"}},
 		{Args: []string{"capture", "--help"}, Text: []string{"-w, --write file", "--snaplen bytes", "--package name"}},
 		{Args: []string{"android", "--help"}, Text: []string{"setup", "restore", "adb forward tcp:8080 localabstract:decerter-api", "/data/local/tmp/decerter.d"}},
+		{Args: []string{"android", "tls", "--help"}, Text: []string{"--package name", "libflutter.so", "make generate-flutter-offsets"}},
 		{Args: []string{"android", "setup", "--help"}, Text: []string{"--serial serial", "--avd avd", "--package name", "--binary path", "--port port", "--remove", "decerter android setup --avd decerter-a15 --package com.example.app"}},
 		{Args: []string{"ui", "--help"}, Text: []string{"--api-socket address", "--open", "adb forward tcp:8080 localabstract:decerter-api"}},
 		{Args: []string{"mcp", "--help"}, Text: []string{"--api-socket address", "--output-dir directory", "--allow-write", "claude mcp add decerter -- decerter mcp --allow-write", "<untrusted-traffic"}},

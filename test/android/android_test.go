@@ -98,7 +98,7 @@ func TestMain(main *testing.M) {
 }
 
 // find the tools, build what goes to the device, connect to the emulator, push and take the baseline
-// a missing SDK, AVD, root or app is errSkip, missing javac or d8 skips only the HTTPS cases, missing tshark only the capture
+// a missing SDK, AVD, root or app is errSkip, missing javac or d8 skips only the HTTPS cases, missing tshark only the capture, no Flutter SDK only the Flutter cases
 func setup() (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout+bootTimeout)
 	defer cancel()
@@ -148,6 +148,13 @@ func setup() (err error) {
 		fmt.Fprintf(os.Stderr, "the HTTPS cases will skip: %s\n", dexSkipReason)
 	}
 
+	// the Flutter cases skip without an SDK, a failed build fails them
+	flutterApps, flutterSkipReason = buildFlutterApps(account, sdk)
+
+	if flutterSkipReason != "" {
+		fmt.Fprintf(os.Stderr, "the Flutter cases will skip: %s\n", flutterSkipReason)
+	}
+
 	tsharkPath, err = exec.LookPath("tshark")
 
 	if err != nil {
@@ -173,7 +180,7 @@ func setup() (err error) {
 		return
 	}
 
-	appUID, err = lookupAppUID(ctx)
+	appUID, err = lookupAppUID(ctx, appPackage)
 
 	if err != nil {
 		err = fmt.Errorf("%w: %w", errSkip, err)
@@ -285,8 +292,8 @@ func buildDex(ctx context.Context, sdk string) (err error) {
 }
 
 // the package's uid from pm, it must hold INTERNET
-func lookupAppUID(ctx context.Context) (uid uint32, err error) {
-	packages, listErr := device.shell(ctx, "pm list packages -U "+appPackage)
+func lookupAppUID(ctx context.Context, packageName string) (uid uint32, err error) {
+	packages, listErr := device.shell(ctx, "pm list packages -U "+packageName)
 
 	if err = listErr; err != nil {
 		return
@@ -295,7 +302,7 @@ func lookupAppUID(ctx context.Context) (uid uint32, err error) {
 	for line := range strings.Lines(packages) {
 		name, uidText, isFound := strings.Cut(strings.TrimSpace(line), " uid:")
 
-		if !isFound || (name != "package:"+appPackage) {
+		if !isFound || (name != "package:"+packageName) {
 			continue
 		}
 
@@ -309,18 +316,18 @@ func lookupAppUID(ctx context.Context) (uid uint32, err error) {
 	}
 
 	if uid == 0 {
-		err = fmt.Errorf("%s is not installed, the clients need an app uid with the INTERNET permission", appPackage)
+		err = fmt.Errorf("%s is not installed, the clients need an app uid with the INTERNET permission", packageName)
 		return
 	}
 
-	permissions, dumpErr := device.shell(ctx, "dumpsys package "+appPackage)
+	permissions, dumpErr := device.shell(ctx, "dumpsys package "+packageName)
 
 	if err = dumpErr; err != nil {
 		return
 	}
 
 	if !strings.Contains(permissions, "android.permission.INTERNET: granted=true") {
-		err = fmt.Errorf("%s (uid %d) has no INTERNET permission", appPackage, uid)
+		err = fmt.Errorf("%s (uid %d) has no INTERNET permission", packageName, uid)
 	}
 
 	return
@@ -371,6 +378,7 @@ func teardown() (err error) {
 	}
 
 	if device.Serial != "" {
+		err = errors.Join(err, uninstallFlutter(ctx))
 		// sync before the emulator is killed, a removal still in the page cache would be lost
 		_, removeErr := device.shell(ctx, "rm -rf "+deviceDirectory+" "+dataDirectory+" "+setupBinary+" && sync")
 		removeErr = errors.Join(removeErr, removeAPIForwards(ctx))

@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+
+# the Flutter test app of the Android e2e tests: flutter create makes the rest of the project for the SDK under test
+name: decerter_flutter
+description: One HTTPS GET with dart:io for the decerter e2e tests.
+publish_to: none
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  uses-material-design: false

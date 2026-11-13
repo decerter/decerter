@@ -39,6 +39,9 @@
 #define SHA256_LENGTH		32
 #define SHA384_LENGTH		48
 
+//BoringSSL libraries the ssl_log_secret uprobe can be attached to at once: Conscrypt's libssl and the statically linked ones (each Flutter app)
+#define BORINGSSL_LAYOUTS	64
+
 //arm64 uprobe context: the arm64 UAPI register layout (arch/arm64/include/uapi/asm/ptrace.h) PT_REGS_* reads, the x86 vmlinux.h has no arm64 types and the uprobe needs no other
 #if defined(__TARGET_ARCH_arm64)
 struct user_pt_regs {
@@ -96,18 +99,6 @@ volatile const uint64_t handshake_secret_offset = 0;
 //Value: offsetof(SSL_CONNECTION, handshake_traffic_hash), the transcript hash the handshake traffic secrets bind to, set from Go before load
 volatile const uint64_t handshake_traffic_hash_offset = 0;
 
-//Value: BoringSSL offsetof(ssl_st, version), or offsetof(SSL3_STATE, version) from Android 16 on, the negotiated version checks the layout, set from Go before load
-volatile const uint64_t boringssl_version_offset = 0;
-
-//Value: BoringSSL 1 if boringssl_version_offset is inside SSL3_STATE, 0 if inside ssl_st, set from Go before load
-volatile const uint32_t boringssl_version_in_s3 = 0;
-
-//Value: BoringSSL offsetof(ssl_st, s3), the SSL3_STATE pointer, set from Go before load
-volatile const uint64_t boringssl_s3_offset = 0;
-
-//Value: BoringSSL offsetof(SSL3_STATE, client_random), set from Go before load
-volatile const uint64_t boringssl_client_random_offset = 0;
-
 //client_random of a TLS session, the key of secrets_map
 struct client_random {
 	uint8_t value[SSL3_RANDOM_SIZE];
@@ -134,7 +125,18 @@ struct tls_secrets {
 	uint8_t server_handshake_traffic_secret[SECRET_SIZE];
 };
 
-//BoringSSL calls that did not fit the offsets, read by Go to report a Conscrypt APEX with another layout
+//BoringSSL offsets of one library the ssl_log_secret uprobe is attached to, Go sets them before it attaches the uprobe with the entry's index as cookie
+//version_offset: offsetof(ssl_st, version), or offsetof(SSL3_STATE, version) when version_in_s3 is 1 (Android 16 on, Flutter); s3_offset: offsetof(ssl_st, s3),
+//the SSL3_STATE pointer; client_random_offset: offsetof(SSL3_STATE, client_random)
+struct boringssl_layout {
+	uint64_t version_offset;
+	uint64_t s3_offset;
+	uint64_t client_random_offset;
+	uint32_t version_in_s3;
+	uint32_t padding;
+};
+
+//BoringSSL calls that did not fit the offsets, read by Go to report a library with another layout (a Conscrypt APEX updated apart from the release, a Flutter engine built differently)
 //count: rejected calls, tls_version: the version read last, secret_bit: its label, secret_length: its secret length
 struct layout_error {
 	uint32_t count;
@@ -173,10 +175,18 @@ struct {
 	__type(value, struct tls_secrets);
 } partial_secrets_map SEC(".maps");
 
-//Key: 0, Value: BoringSSL calls whose version did not fit the label, Go reports a layout that does not match the offsets
+//Key: the attach cookie of the ssl_log_secret uprobe, Value: the BoringSSL offsets of the library it is attached to
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);
-	__uint(max_entries, 1);
+	__uint(max_entries, BORINGSSL_LAYOUTS);
+	__type(key, uint32_t);
+	__type(value, struct boringssl_layout);
+} boringssl_layout_map SEC(".maps");
+
+//Key: the attach cookie of the ssl_log_secret uprobe, Value: its library's calls whose version did not fit the label, Go reports a layout that does not match the offsets
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, BORINGSSL_LAYOUTS);
 	__type(key, uint32_t);
 	__type(value, struct layout_error);
 } layout_error_map SEC(".maps");
@@ -384,11 +394,11 @@ uint32_t label_bit(struct label *label)
 	return 0;
 }
 
-//Read the version and the client_random of a BoringSSL ssl_st and check them against the label, a mismatch means the offsets don't fit this libssl
+//Read the version and the client_random of a BoringSSL ssl_st with the offsets of its library and check them against the label, a mismatch means the offsets don't fit this library
 //TLS 1.3 labels need version 0x0304 and a 32 or 48 byte secret, CLIENT_RANDOM 0x0301 to 0x0303 or DTLS 1.2 and a 48 byte master secret
-uint16_t read_boringssl_session(uint64_t ssl_address, uint32_t secret_bit, uint64_t secret_length, struct tls_secrets *secrets)
+uint16_t read_boringssl_session(uint64_t ssl_address, struct boringssl_layout *layout, uint32_t secret_bit, uint64_t secret_length, struct tls_secrets *secrets)
 {
-	if ((!ssl_address) || (!secrets))
+	if ((!ssl_address) || (!layout) || (!secrets))
 	{
 		return NOK;
 	}
@@ -397,21 +407,21 @@ uint16_t read_boringssl_session(uint64_t ssl_address, uint32_t secret_bit, uint6
 	uint16_t version = 0;
 
 	//ssl_st is mapped while BoringSSL works on it, a failed read means the s3 offset points somewhere else
-	if (bpf_probe_read_user(&s3_address, sizeof(s3_address), (void *)(ssl_address + boringssl_s3_offset)) || (!s3_address))
+	if (bpf_probe_read_user(&s3_address, sizeof(s3_address), (void *)(ssl_address + layout->s3_offset)) || (!s3_address))
 	{
 		return LAYOUT;
 	}
 
-	uint64_t version_address = boringssl_version_in_s3 ? s3_address : ssl_address;
+	uint64_t version_address = layout->version_in_s3 ? s3_address : ssl_address;
 
-	if (bpf_probe_read_user(&version, sizeof(version), (void *)(version_address + boringssl_version_offset)))
+	if (bpf_probe_read_user(&version, sizeof(version), (void *)(version_address + layout->version_offset)))
 	{
 		return LAYOUT;
 	}
 
 	secrets->tls_version = version;
 
-	if (bpf_probe_read_user(&secrets->client_random, sizeof(secrets->client_random), (void *)(s3_address + boringssl_client_random_offset)))
+	if (bpf_probe_read_user(&secrets->client_random, sizeof(secrets->client_random), (void *)(s3_address + layout->client_random_offset)))
 	{
 		return LAYOUT;
 	}
@@ -440,11 +450,10 @@ uint16_t read_boringssl_session(uint64_t ssl_address, uint32_t secret_bit, uint6
 	}
 }
 
-//Count a BoringSSL call that did not fit the offsets and keep what was read, Go reports it once
-uint16_t report_layout_error(uint32_t tls_version, uint32_t secret_bit, uint64_t secret_length)
+//Count a BoringSSL call that did not fit the offsets of its library and keep what was read, Go reports it once per library
+uint16_t report_layout_error(uint32_t layout_index, uint32_t tls_version, uint32_t secret_bit, uint64_t secret_length)
 {
-	uint32_t key = 0;
-	struct layout_error *error = bpf_map_lookup_elem(&layout_error_map, &key);
+	struct layout_error *error = bpf_map_lookup_elem(&layout_error_map, &layout_index);
 
 	if (!error)
 	{

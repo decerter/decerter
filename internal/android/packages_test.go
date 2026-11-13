@@ -5,10 +5,12 @@
 package android
 
 import (
+	"debug/elf"
 	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -215,5 +217,97 @@ func TestSharingPackagesNegative(state *testing.T) {
 	if (len(sharing) != 0) || IsSystemUID(10092) || IsSystemUID(10000) {
 		state.Errorf("Test of android.SharingPackages function failed, the proxy handler should share its uid with nobody, sharing: %q", sharing)
 		return
+	}
+}
+
+// Test if android.PackagesOfUID and android.FindInstallDirectories return with the expected output: the packages of a shared uid, the install
+// directories of Android 11+ (<random>/<package>-<random>, two during an update) and of older releases, nothing for a system app.
+func TestFindInstallDirectoriesPositive(state *testing.T) {
+	if names := PackagesOfUID(1000, installedPackages); !reflect.DeepEqual(names, []string{"com.android.settings", "android"}) {
+		state.Errorf("Test of android.PackagesOfUID function failed, uid 1000 should be settings and android, names: %q", names)
+	}
+
+	appDirectory := state.TempDir()
+	expected := []string{filepath.Join(appDirectory, "~~a==", "io.decerter.app-b=="), filepath.Join(appDirectory, "~~c==", "io.decerter.app-d=="), filepath.Join(appDirectory, "io.decerter.old-1")}
+	others := []string{filepath.Join(appDirectory, "~~e==", "io.decerter.application-f=="), filepath.Join(appDirectory, "~~g==", "io.decerter.app")}
+
+	for _, directory := range append(slices.Clone(expected), others...) {
+		err := os.MkdirAll(directory, 0o700)
+
+		if err != nil {
+			state.Fatalf("Test of android.FindInstallDirectories failed, cannot create %s, error: %s", directory, err.Error())
+		}
+	}
+
+	// a file with the name of an install directory is no install directory
+	err := os.WriteFile(filepath.Join(appDirectory, "io.decerter.app-file"), nil, 0o600)
+
+	if err != nil {
+		state.Fatalf("Test of android.FindInstallDirectories failed, cannot write a file, error: %s", err.Error())
+	}
+
+	positiveCases := []struct {
+		Name     string
+		Expected []string
+	}{
+		{Name: "io.decerter.app", Expected: expected[:2]},
+		{Name: "io.decerter.old", Expected: expected[2:]},
+		{Name: "com.android.settings", Expected: nil},
+	}
+
+	for _, positive := range positiveCases {
+		directories, findErr := FindInstallDirectories(appDirectory, positive.Name)
+
+		if (findErr != nil) || !reflect.DeepEqual(directories, positive.Expected) {
+			state.Errorf("Test of android.FindInstallDirectories function failed, %s should be %q, directories: %q, error: %v", positive.Name, positive.Expected, directories, findErr)
+		}
+	}
+}
+
+// Test if android.PackagesOfUID and android.FindInstallDirectories return with the expected errors: no package for an unused uid, a name that is
+// no glob pattern.
+func TestFindInstallDirectoriesNegative(state *testing.T) {
+	if names := PackagesOfUID(10999, installedPackages); len(names) != 0 {
+		state.Errorf("Test of android.PackagesOfUID function failed, uid 10999 has no package, names: %q", names)
+	}
+
+	_, err := FindInstallDirectories(state.TempDir(), "io.decerter[")
+
+	if !errors.Is(err, ErrInstallDirectory) {
+		state.Errorf("Test of android.FindInstallDirectories function failed, error should be %v, error: %v", ErrInstallDirectory, err)
+	}
+}
+
+// Test if android.DescribeTLS returns with the expected output: a system app, an app without libflutter.so, a Flutter app whose library has no Dart
+// version (not hookable, isKnown false).
+func TestDescribeTLSPositive(state *testing.T) {
+	appDirectory := state.TempDir()
+	flutterLibrary := filepath.Join(appDirectory, "~~a==", "io.decerter.flutter-b==", "lib", "x86_64", "libflutter.so")
+	err := errors.Join(os.MkdirAll(filepath.Join(appDirectory, "~~c==", "io.decerter.java-d=="), 0o700), os.MkdirAll(filepath.Dir(flutterLibrary), 0o700))
+
+	if err == nil {
+		err = writeELF(flutterLibrary, elf.ELFCLASS64, elf.EM_X86_64, false)
+	}
+
+	if err != nil {
+		state.Fatalf("Test of android.DescribeTLS failed, cannot create the apps, error: %s", err.Error())
+	}
+
+	positiveCases := []struct {
+		Name    string
+		Text    string
+		IsKnown bool
+	}{
+		{Name: "com.android.proxyhandler", Text: "a system app; Java TLS goes through Conscrypt", IsKnown: true},
+		{Name: "io.decerter.java", Text: "no libflutter.so, not a Flutter app", IsKnown: true},
+		{Name: "io.decerter.flutter", Text: "its TLS is relayed without decryption", IsKnown: false},
+	}
+
+	for _, positive := range positiveCases {
+		lines, isKnown, describeErr := DescribeTLS(positive.Name, appDirectory, "amd64")
+
+		if (describeErr != nil) || (len(lines) != 1) || !strings.Contains(lines[0], positive.Text) || (isKnown != positive.IsKnown) {
+			state.Errorf("Test of android.DescribeTLS function failed, %s should say %q, lines: %q, isKnown: %v, error: %v", positive.Name, positive.Text, lines, isKnown, describeErr)
+		}
 	}
 }

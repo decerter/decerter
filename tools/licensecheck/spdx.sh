@@ -54,7 +54,7 @@ while IFS= read -r -d '' file; do
 		echo "$file: SPDX-License-Identifier is \"$license\", expected ${allowed//|/ or }" >&2
 		status=1
 	fi
-done < <(git ls-files -z --cached --others --exclude-standard -- '*.go' '*.c' '*.h' '*.cc' '*.java' '*.sh' '*.yaml' '*.yml' 'Makefile' '**/Makefile' 'internal/ui/web/*.html' 'internal/ui/web/*.js' 'internal/ui/web/*.css')
+done < <(git ls-files -z --cached --others --exclude-standard -- '*.go' '*.c' '*.h' '*.cc' '*.java' '*.kt' '*.dart' '*.sh' '*.yaml' '*.yml' 'Makefile' '**/Makefile' 'internal/ui/web/*.html' 'internal/ui/web/*.js' 'internal/ui/web/*.css')
 
 if [ "$status" -eq 0 ]; then
 	echo "SPDX lines are fine in $checked source files"
