@@ -79,6 +79,7 @@ type App struct {
 	startTime           time.Time
 	libssl              string
 	logSecretAddress    uint64
+	isCapture           bool
 	capturePath         string
 	plaintext           bool
 	snaplen             uint32
@@ -93,6 +94,7 @@ type App struct {
 	tcpListener         *net.TCPListener
 	udpConnection       *net.UDPConn
 	captureErr          error
+	captureErrMutex     *sync.Mutex
 	secretsErr          error
 	closeFunctions      [](func() error)
 }
@@ -100,13 +102,13 @@ type App struct {
 // keylog is the keylog command: load and attach only the secrets uprobe and print NSS key log lines, no redirect, proxy or route sync
 // decrypt is the --decrypt option of run mode: the proxy decrypts the TLS flows with the secrets of the uprobe and prints their plaintext
 // rules make the proxy intercept every flow instead of observing it: TLS records are decrypted, run through the rules, printed and sealed again, plain tcp and udp go through them too; empty intercepts nothing
-// apiSocket serves the control API in run mode on this unix socket path, @name is an abstract socket, empty serves none; with rules the API adds its own rules and the hold queue after them, holdTimeout is how long a held message waits for a decision
+// apiSocket serves the control API on this unix socket path, @name is an abstract socket, empty serves none; in run mode with rules the API adds its own rules and the hold queue after them, holdTimeout is how long a held message waits for a decision
 // libssl overrides the resolved libssl path, empty means search the standard directories
-// capturePath is the capture command: nothing is redirected, the packets of the selected flows and the secrets of their TLS sessions are written to this pcapng file, at most snaplen bytes of a packet
+// isCapture is the capture command: nothing is redirected, the packets of the selected flows and the secrets of their TLS sessions are written to the pcapng file at capturePath, empty writes none, and to the captures and streams of the API; at most snaplen bytes of a packet
 // plaintext is the --plaintext option of capture mode: the file gets synthesized packets with the decrypted payload instead of the captured packets and the secrets
 // currentPlatform decides where the netd hook state is kept and whether hooks held exclusively by another program may be shared, only on Android
 // flags is the kernel selection of --uid, --pid, --dst-cidr and --dst-port; scopeFilter the --filter, which narrows it: its kernel terms are added to the maps, the proxy and the capture writer decide the rest per flow; nil is no filter
-func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, decrypt bool, rules []intercept.Rule, apiSocket string, holdTimeout time.Duration, libssl string, capturePath string, plaintext bool, snaplen uint32, currentPlatform platform.Platform, logger *slog.Logger) (app App) {
+func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, decrypt bool, rules []intercept.Rule, apiSocket string, holdTimeout time.Duration, libssl string, isCapture bool, capturePath string, plaintext bool, snaplen uint32, currentPlatform platform.Platform, logger *slog.Logger) (app App) {
 	appCtx, cancel := context.WithCancel(ctx)
 	app = App{
 		ctx:                 appCtx,
@@ -129,6 +131,7 @@ func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter,
 		startTime:           time.Now(),
 		libssl:              libssl,
 		logSecretAddress:    0,
+		isCapture:           isCapture,
 		capturePath:         capturePath,
 		plaintext:           plaintext,
 		snaplen:             snaplen,
@@ -143,6 +146,7 @@ func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter,
 		tcpListener:         nil,
 		udpConnection:       nil,
 		captureErr:          nil,
+		captureErrMutex:     &sync.Mutex{},
 		secretsErr:          nil,
 		closeFunctions:      [](func() error){},
 	}
@@ -151,7 +155,7 @@ func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter,
 
 // in capture mode the redirect object only records the flows
 func (app *App) LoadBpfObjects() (err error) {
-	bpfMaps, bpfPrograms, closeFunction, loadErr := redirect.LoadBpfObjects(app.proxyPort, uint32(os.Getpid()), app.capturePath != "")
+	bpfMaps, bpfPrograms, closeFunction, loadErr := redirect.LoadBpfObjects(app.proxyPort, uint32(os.Getpid()), app.isCapture)
 
 	if err = loadErr; err != nil {
 		app.logger.Error("Could not load redirect bpf objects", "error", err)
@@ -373,7 +377,7 @@ func (app *App) StartProxy() (err error) {
 	var recorder *history.History
 
 	if app.apiSocket != "" {
-		app.backend = app.newBackend(processing)
+		app.backend = app.newBackend(v1.RunMode, processing)
 		recorder = app.backend.History
 
 		if isIntercepting {
@@ -419,7 +423,7 @@ func (app *App) StartProxy() (err error) {
 	return
 }
 
-// the control API socket is created first in run mode, a path that can't be used stops decerter before anything is attached; it is served last, by ServeAPI
+// the control API socket is created first, a path that can't be used stops decerter before anything is attached; it is served last, by ServeAPI
 func (app *App) ListenAPI() (err error) {
 	if app.apiSocket == "" {
 		return
@@ -437,7 +441,8 @@ func (app *App) ListenAPI() (err error) {
 }
 
 // what the API serves of this run: the history and, when the proxy intercepts, its rules and hold queue; the key log is read from secrets_map when it is asked for
-func (app *App) newBackend(processing v1.Processing) (backend *api.Backend) {
+// capture mode adds its captures to it
+func (app *App) newBackend(mode v1.Mode, processing v1.Processing) (backend *api.Backend) {
 	scope := ""
 
 	if app.scopeFilter != nil {
@@ -445,7 +450,7 @@ func (app *App) newBackend(processing v1.Processing) (backend *api.Backend) {
 	}
 
 	info := api.Info{
-		Mode:               "run",
+		Mode:               mode,
 		Processing:         processing,
 		Platform:           string(app.platform.Type),
 		Scope:              scope,
@@ -483,7 +488,7 @@ func (app *App) ServeAPI() {
 // the programs that learn clients, restore addresses and clean up come first, so the first redirected socket already has them
 // in capture mode nothing is redirected, so the programs that learn the udp client and restore the original address have nothing to do and stay detached
 func (app *App) redirectAttachments() (attachments []cgroupAttachment) {
-	if app.capturePath != "" {
+	if app.isCapture {
 		attachments = []cgroupAttachment{
 			{program: redirect.ClientSockops, attachType: ebpf.AttachCGroupSockOps},
 			{program: redirect.ForgetReleasedSocket, attachType: ebpf.AttachCgroupInetSockRelease},
@@ -513,7 +518,7 @@ func (app *App) redirectAttachments() (attachments []cgroupAttachment) {
 
 // only capture mode copies packets
 func (app *App) captureAttachments() (attachments []cgroupAttachment) {
-	if app.capturePath == "" {
+	if !app.isCapture {
 		return
 	}
 
@@ -536,7 +541,7 @@ func (app *App) AttachRedirect() (err error) {
 		app.closeFunctions = append(app.closeFunctions, closeFunction)
 	}
 
-	if app.capturePath != "" {
+	if app.isCapture {
 		app.logger.Info("Recording flows", "cgroup", attach.CgroupRoot, "uids", app.selection.UIDs, "pids", app.selection.Tgids, "destinationCidrs", app.selection.DestinationCIDRs, "destinationPorts", app.selection.DestinationPorts, "comms", app.selection.Comms)
 		return
 	}
@@ -560,13 +565,20 @@ func (app *App) LoadCaptureObjects() (err error) {
 	return
 }
 
-// the capture file is created and the writer started before AttachCapture, so a path that can't be written fails before anything is attached and no packet waits in packet_map for a reader
+// the capture file is created and the hub with its writers started before AttachCapture, so a path that can't be written fails before anything is attached and no packet waits in packet_map for a reader
+// with the API the hub keeps a history of the flows and their latest packets, and the API starts captures and streams behind it
 func (app *App) StartCapture() (err error) {
-	file, openErr := capture.OpenFile(app.capturePath)
+	var file *os.File
 
-	if err = openErr; err != nil {
-		app.logger.Error("Could not open capture file", "error", err, "fileName", app.capturePath)
-		return
+	if app.capturePath != "" {
+		opened, openErr := capture.OpenFile(app.capturePath)
+
+		if err = openErr; err != nil {
+			app.logger.Error("Could not open capture file", "error", err, "fileName", app.capturePath)
+			return
+		}
+
+		file = opened
 	}
 
 	// the one warning about missing secrets in capture mode, with the reason from LoadSecretsBpfObjects
@@ -574,15 +586,71 @@ func (app *App) StartCapture() (err error) {
 	case (app.secretsBpfMaps == nil) && app.plaintext:
 		app.logger.Warn("Capturing without TLS secrets, TLS flows will be written encrypted", "reason", app.secretsErr)
 	case app.secretsBpfMaps == nil:
-		app.logger.Warn("Capturing without TLS secrets, the file will have no keys", "reason", app.secretsErr)
+		app.logger.Warn("Capturing without TLS secrets, the captures will have no keys", "reason", app.secretsErr)
 	default:
 	}
 
+	var recorder *history.History
+
+	if app.apiSocket != "" {
+		app.backend = app.newBackend(v1.CaptureMode, v1.RecordProcessing)
+		recorder = app.backend.History
+	}
+
+	hub, hubErr := capture.NewHub(app.snaplen, app.captureBpfMaps, app.secretsBpfMaps, app.scope, recorder, app.logger)
+
+	if err = hubErr; err != nil {
+		app.logger.Error("Could not start capture", "error", err)
+		err = errors.Join(err, closeCaptureFile(file))
+		return
+	}
+
+	if app.apiSocket != "" {
+		captures, capturesErr := capture.NewCaptures(hub, app.platform.DataDirectory, app.logger)
+
+		if err = capturesErr; err != nil {
+			app.logger.Error("Could not prepare captures", "error", err)
+			err = errors.Join(err, closeCaptureFile(file))
+			return
+		}
+
+		app.backend.Captures = captures
+		app.closeFunctions = append(app.closeFunctions, captures.Close)
+	}
+
+	var fileConsumer *capture.Consumer
 	stream := app.capturePath == capture.StreamPath
 
-	// capture writer, writes the packets that wait and flushes the file when the context is cancelled
+	if file != nil {
+		consumer, addErr := hub.Add(file, capture.ConsumerOptions{Stream: stream, IsCut: false, Scope: nil, Plaintext: app.plaintext, Limit: nil}, app.logger)
+
+		if err = addErr; err != nil {
+			app.logger.Error("Could not write capture file", "error", err, "fileName", app.capturePath)
+			err = errors.Join(err, closeCaptureFile(file))
+			return
+		}
+
+		fileConsumer = consumer
+	}
+
+	// packet_map reader, hands the packets to the writers until the context is cancelled and closes Done after the last one
 	app.waitGroup.Go(func() {
-		writeErr := capture.Write(app.ctx, file, stream, app.snaplen, app.plaintext, app.captureBpfMaps, app.secretsBpfMaps, app.scope, app.logger)
+		runErr := hub.Run(app.ctx)
+
+		if runErr != nil {
+			app.logger.Error("Could not read captured packets", "error", runErr)
+			app.setCaptureErr(runErr)
+			app.cancel()
+		}
+	})
+
+	if file == nil {
+		return
+	}
+
+	// capture writer, writes the packets that wait and flushes the file when the hub is done
+	app.waitGroup.Go(func() {
+		writeErr := hub.Consume(context.Background(), fileConsumer, nil)
 
 		// stdout stays open for the stream reader watcher until decerter exits
 		if !stream {
@@ -601,7 +669,7 @@ func (app *App) StartCapture() (err error) {
 		default:
 			app.logger.Error("Could not write capture file", "error", writeErr, "fileName", app.capturePath)
 			// read by Shutdown after the wait group, nothing is captured without the writer so decerter stops
-			app.captureErr = writeErr
+			app.setCaptureErr(writeErr)
 			app.cancel()
 		}
 	})
@@ -628,6 +696,23 @@ func (app *App) StartCapture() (err error) {
 	return
 }
 
+// a capture error stops decerter, Shutdown returns it
+func (app *App) setCaptureErr(err error) {
+	app.captureErrMutex.Lock()
+	defer app.captureErrMutex.Unlock()
+	app.captureErr = errors.Join(app.captureErr, err)
+}
+
+// stdout is not closed, it is the stream
+func closeCaptureFile(file *os.File) (err error) {
+	if (file == nil) || (file == os.Stdout) {
+		return
+	}
+
+	err = file.Close()
+	return
+}
+
 // both programs see every packet of every socket and copy the ones of recorded sockets, they are attached before AttachRedirect records the first flow
 func (app *App) AttachCapture() (err error) {
 	for _, attachment := range app.captureAttachments() {
@@ -641,7 +726,7 @@ func (app *App) AttachCapture() (err error) {
 		app.closeFunctions = append(app.closeFunctions, closeFunction)
 	}
 
-	app.logger.Info("Capturing packets", "cgroup", attach.CgroupRoot, "fileName", app.capturePath, "snaplen", app.snaplen, "plaintext", app.plaintext)
+	app.logger.Info("Capturing packets", "cgroup", attach.CgroupRoot, "fileName", app.capturePath, "api", app.apiSocket != "", "snaplen", app.snaplen, "plaintext", app.plaintext)
 	return
 }
 
@@ -833,7 +918,7 @@ func (app *App) withoutSecrets(reason error) (err error) {
 
 	app.secretsErr = reason
 
-	if app.capturePath == "" {
+	if !app.isCapture {
 		app.logger.Warn("Could not load secrets uprobe, running without TLS secrets", "error", reason)
 	}
 
@@ -1176,7 +1261,7 @@ func (app *App) ShareNetdHooks() (err error) {
 }
 
 // the one start order of every mode, used by the run, capture and keylog commands and by the e2e tests
-// the mode comes from New: keylog, a capturePath, or run mode otherwise; Shutdown undoes whatever part of it ran, also after an error
+// the mode comes from New: keylog, isCapture, or run mode otherwise; Shutdown undoes whatever part of it ran, also after an error
 func (app *App) Start() (err error) {
 	// on Android a decerter killed before puts netd's hooks back first
 	err = app.PreparePlatform()
@@ -1188,7 +1273,7 @@ func (app *App) Start() (err error) {
 	switch {
 	case app.keylog:
 		err = app.startKeylogMode()
-	case app.capturePath != "":
+	case app.isCapture:
 		err = app.startCaptureMode()
 	default:
 		err = app.startRunMode()
@@ -1218,6 +1303,12 @@ func (app *App) startKeylogMode() (err error) {
 
 // capture mode records the flows and copies their packets, no proxy listener and no route sync
 func (app *App) startCaptureMode() (err error) {
+	err = app.ListenAPI()
+
+	if err != nil {
+		return
+	}
+
 	err = app.LoadBpfObjects()
 
 	if err != nil {
@@ -1276,6 +1367,7 @@ func (app *App) startCaptureMode() (err error) {
 	}
 
 	app.StartFlowTable()
+	app.ServeAPI()
 	return
 }
 
@@ -1346,7 +1438,9 @@ func (app *App) startRunMode() (err error) {
 func (app *App) Shutdown() (err error) {
 	app.cancel()
 	app.waitGroup.Wait()
+	app.captureErrMutex.Lock()
 	err = app.captureErr
+	app.captureErrMutex.Unlock()
 
 	for _, closeFunction := range slices.Backward(app.closeFunctions) {
 		closeErr := closeFunction()

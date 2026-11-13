@@ -240,7 +240,7 @@ func newAPIDecerter(state *testing.T, mode decerterMode, capturePath string, rul
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	decerter = app.New(context.Background(), flags, scopeFilter, proxyPort, udpIdleTimeout, false, false, mode == DecryptDecerterMode, rules, apiSocket, apiHoldTimeout, "", capturePath, mode == PlaintextDecerterMode, capturebpf.MaxSnaplen, platform.Detect("/"), logger)
+	decerter = app.New(context.Background(), flags, scopeFilter, proxyPort, udpIdleTimeout, false, false, mode == DecryptDecerterMode, rules, apiSocket, apiHoldTimeout, "", (mode == CaptureDecerterMode) || (mode == PlaintextDecerterMode), capturePath, mode == PlaintextDecerterMode, capturebpf.MaxSnaplen, platform.Detect("/"), logger)
 	return
 }
 

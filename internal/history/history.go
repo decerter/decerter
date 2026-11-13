@@ -400,6 +400,45 @@ func (history *History) ClientRandoms(scope *filter.Filter) (clientRandoms [][32
 	return
 }
 
+// the flows a filter takes with their messages, oldest first; scope nil takes every flow
+func (history *History) Export(scope *filter.Filter) (flows []ExportFlow) {
+	if history == nil {
+		return
+	}
+
+	history.mutex.RLock()
+	defer history.mutex.RUnlock()
+
+	for _, id := range history.order {
+		record := history.flows[id]
+		values := flowValues(record)
+
+		if (scope != nil) && (scope.Evaluate(values) != filter.TrueResult) {
+			continue
+		}
+
+		exported := ExportFlow{
+			Flow:         flowView(record),
+			Values:       values,
+			ClientRandom: record.clientRandom,
+			Messages:     make([]ExportMessage, 0, len(record.messageIDs)),
+		}
+
+		if exported.ClientRandom == [32]byte{} {
+			exported.ClientRandom = record.session.ClientRandom
+		}
+
+		for _, messageID := range record.messageIDs {
+			message := history.messages[messageID]
+			exported.Messages = append(exported.Messages, ExportMessage{Message: messageView(message), Payload: message.payload})
+		}
+
+		flows = append(flows, exported)
+	}
+
+	return
+}
+
 func (history *History) Status() (status api.HistoryStatus) {
 	history.mutex.RLock()
 	defer history.mutex.RUnlock()

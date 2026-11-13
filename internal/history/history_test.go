@@ -233,3 +233,43 @@ func messageIDs(messages []api.Message) (ids []uint64) {
 
 	return
 }
+
+// Test if history.History.Export returns with the expected output: the flows a filter takes, oldest first, with what went on of each message and the client random of the session.
+func TestExportPositive(state *testing.T) {
+	flows := history.New(history.DefaultLimits(), nil)
+	plainID := flows.OpenFlow(1, testValues(8000, filter.AbsentTLSState), [32]byte{})
+	tlsID := flows.OpenFlow(2, testValues(443, filter.UnknownTLSState).WithClientHello(true, tlsrecord.VersionTLS13, "example.com", nil), [32]byte{7})
+	flows.Record(testMessage(tlsID, 1, tlsrecord.ClientDirection, "GET / HTTP/1.1"), intercept.Result{Plain: []byte("GET /test HTTP/1.1"), Verdict: intercept.ForwardVerdict, Changed: true}, intercept.RulesOrigin)
+	flows.Record(testMessage(tlsID, 2, tlsrecord.ServerDirection, "x"), intercept.Result{Plain: nil, Verdict: intercept.DropVerdict, Changed: true}, intercept.RulesOrigin)
+	flows.Record(testMessage(plainID, 3, tlsrecord.ClientDirection, "ping"), forward("ping"), intercept.RulesOrigin)
+	all := flows.Export(nil)
+
+	if (len(all) != 2) || (all[0].Flow.ID != plainID) || (all[1].Flow.ID != tlsID) || (all[1].ClientRandom != [32]byte{7}) || (all[0].Values.Destination.Port() != 8000) {
+		state.Fatalf("Test of history.History.Export function failed, both flows should be there oldest first, flows: %+v", all)
+	}
+
+	messages := all[1].Messages
+
+	if (len(messages) != 2) || (string(messages[0].Payload) != "GET /test HTTP/1.1") || !messages[0].Message.Edited || (messages[0].Message.OriginalLength != 14) || (messages[1].Message.Verdict != api.DropVerdict) || (len(messages[1].Payload) != 0) {
+		state.Errorf("Test of history.History.Export function failed, the TLS flow should have the edited request as it went on and the drop, messages: %+v", messages)
+		return
+	}
+
+	scope, err := filter.Parse(`tls.sni == "example.com"`)
+
+	if err != nil {
+		state.Fatalf("Test of history.History.Export function failed, cannot parse filter, error: %s", err.Error())
+	}
+
+	if selected := flows.Export(&scope); (len(selected) != 1) || (selected[0].Flow.ID != tlsID) {
+		state.Errorf("Test of history.History.Export function failed, the filter should take the TLS flow, flows: %+v", selected)
+		return
+	}
+
+	var nothing *history.History
+
+	if exported := nothing.Export(nil); exported != nil {
+		state.Errorf("Test of history.History.Export function failed, a nil history should export nothing, flows: %+v", exported)
+		return
+	}
+}

@@ -27,7 +27,7 @@ func Run(selection redirect.Filter, scopeFilter *filter.Filter, proxyPort uint16
 		rules = []intercept.Rule{intercept.IdentityRule{}}
 	}
 
-	decerter := app.New(ctx, selection, scopeFilter, proxyPort, udpIdleTimeout, flowTable, false, decrypt, rules, apiSocket, holdTimeout, libssl, "", false, capturebpf.MaxSnaplen, platform.Detect("/"), logger.Slog())
+	decerter := app.New(ctx, selection, scopeFilter, proxyPort, udpIdleTimeout, flowTable, false, decrypt, rules, apiSocket, holdTimeout, libssl, false, "", false, capturebpf.MaxSnaplen, platform.Detect("/"), logger.Slog())
 	err = serve(ctx, &decerter, logger)
 	return
 }

@@ -3,21 +3,23 @@
 package capture
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/decerter/decerter/internal/bpf"
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
 	"github.com/decerter/decerter/internal/filter"
-	"github.com/decerter/decerter/internal/pcapng"
+	"github.com/decerter/decerter/internal/history"
+	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
 	"golang.org/x/sys/unix"
@@ -90,120 +92,6 @@ func OpenFile(path string) (file *os.File, err error) {
 	return
 }
 
-// read packet_map and write the packets as pcapng to output until the context is cancelled, then write what still waits and flush
-// secretsBpfMaps is nil without the secrets uprobe, the packets are written without keys then
-// a TLS flow is written behind the other flows: its packets wait from the ClientHello on until its secrets are there, so the file is ordered by time inside a flow but not across flows
-// plaintext writes synthesized packets instead: the TCP streams are put in order, the TLS sessions decrypted and the payload written in new packets with the addresses and ports of the flow, no secrets are in the file
-// the snaplen still cuts what the programs copy, a cut TCP packet is a hole in its stream; a synthesized packet is never cut
-// stream writes every block to output at once, for a live reader; a file is written in larger pieces and flushed when the ring is empty
-// scope decides once per flow which flows go into the file, a flow out of scope writes nothing, its earlier packets neither; a filter with a ClientHello field keeps a flow's packets until its first bytes decide it; nil writes every recorded flow
-func Write(ctx context.Context, output io.Writer, stream bool, snaplen uint32, plaintext bool, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, scope *filter.Filter, logger *slog.Logger) (err error) {
-	writerSnaplen := snaplen
-
-	if plaintext {
-		writerSnaplen = max(snaplen, SynthesizedLength)
-	}
-
-	writer, writerErr := pcapng.New(output, writerSnaplen, stream)
-
-	if err = writerErr; err != nil {
-		return
-	}
-
-	// the section and interface blocks are in the file at once, a capture without packets is a valid file too
-	err = writer.Flush()
-
-	if err != nil {
-		return
-	}
-
-	bootOffset, offsetErr := bootTimeOffset()
-
-	if err = offsetErr; err != nil {
-		return
-	}
-
-	reader, readerErr := ringbuf.NewReader(captureBpfMaps[capturebpf.PacketMap])
-
-	if err = readerErr; err != nil {
-		err = fmt.Errorf("%w: %w", ErrRead, err)
-		return
-	}
-
-	defer func() {
-		err = errors.Join(err, reader.Close())
-	}()
-
-	// the cancelled context wakes the reader, it gets the records that are in the ring by then and ErrFlushed after them
-	stop := context.AfterFunc(ctx, func() {
-		flushErr := reader.Flush()
-
-		if flushErr != nil {
-			logger.Error("Could not wake packet_map reader", "error", flushErr)
-		}
-	})
-	defer stop()
-
-	recorder := newRecorder(&writer, plaintext, bootOffset, captureBpfMaps, secretsBpfMaps, scope, time.Now(), logger)
-	var record ringbuf.Record
-	var drainDeadline time.Time
-
-	for {
-		reader.SetDeadline(recorder.nextWake)
-		readErr := reader.ReadInto(&record)
-		now := time.Now()
-
-		switch {
-		case readErr == nil:
-			packet, parseErr := capturebpf.ParsePacket(record.RawSample)
-
-			if parseErr != nil {
-				logger.Warn("Could not parse packet_map record", "error", parseErr)
-				continue
-			}
-
-			err = recorder.handle(packet, now)
-		case errors.Is(readErr, os.ErrDeadlineExceeded):
-			// the ring is empty, so the file is brought up to date
-			err = writer.Flush()
-		case
-			errors.Is(readErr, ringbuf.ErrFlushed),
-			errors.Is(readErr, ringbuf.ErrClosed):
-			logger.Debug("Context cancelled")
-			err = recorder.finish()
-			return
-		default:
-			err = errors.Join(fmt.Errorf("%w: %w", ErrRead, readErr), recorder.finish())
-			return
-		}
-
-		// the output is gone or full, nothing more can be written
-		if err != nil {
-			return
-		}
-
-		if ctx.Err() != nil {
-			if drainDeadline.IsZero() {
-				drainDeadline = now.Add(drainTimeout)
-			}
-
-			if now.After(drainDeadline) {
-				err = recorder.finish()
-				return
-			}
-		}
-
-		// under steady traffic the read never times out, so the clock is checked after every packet
-		if !now.Before(recorder.nextWake) {
-			err = recorder.tick(now)
-
-			if err != nil {
-				return
-			}
-		}
-	}
-}
-
 // the reader of a stream that went away is only seen by the next write, and an idle capture may write nothing for a long time
 // the write end of a pipe polls POLLERR once its last reader is closed, a socket POLLHUP; isGone is false when the context was cancelled first
 func WaitReaderGone(ctx context.Context, output *os.File) (isGone bool, err error) {
@@ -264,4 +152,264 @@ func bootTimeOffset() (offset int64, err error) {
 
 	offset = time.Now().UnixNano() - bootTime.Nano()
 	return
+}
+
+// one reader of packet_map for every writer of the capture: the -w file, the captures and the streams of the API
+// the scope is the --filter, the hub decides it once per flow and every writer gets the packets of the flows in scope, a writer decides its own filter after that
+// sessions are the client randoms of the TLS and DTLS sessions at the start of the flows in scope, by cookie: a writer that joins later writes their DSB before their first packet
+// with a history, every flow is decided with its first bytes, so the history gets the fields of its ClientHello, and ring keeps the latest packets for the pcap export
+// gate belongs to the goroutine of Run, which changes flows only with the mutex held; the rest is guarded by mutex
+type Hub struct {
+	mutex          *sync.Mutex
+	consumers      map[*Consumer]bool
+	sessions       map[uint64][32]byte
+	ring           *packetRing
+	gate           gate
+	flows          map[uint64]*hubFlow
+	history        *history.History
+	snaplen        uint32
+	bootOffset     int64
+	captureBpfMaps map[bpf.BpfMapName]*ebpf.Map
+	secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map
+	dropped        uint64
+	doneChannel    chan struct{}
+	logger         *slog.Logger
+}
+
+// a flow in scope the hub has seen: its id in the history, 0 when it is not there, and the payload bytes and packets of each direction, by tlsrecord.Direction
+type hubFlow struct {
+	historyID uint64
+	traffic   [2]history.Counters
+}
+
+// secretsBpfMaps is nil without the secrets uprobe, the packets are written without keys then
+// recorder is the history of the API, nil without it: then the flows are decided as early as the scope allows and no packet is kept
+func NewHub(snaplen uint32, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, scope *filter.Filter, recorder *history.History, logger *slog.Logger) (hub *Hub, err error) {
+	bootOffset, offsetErr := bootTimeOffset()
+
+	if err = offsetErr; err != nil {
+		return
+	}
+
+	hub = &Hub{
+		mutex:          &sync.Mutex{},
+		consumers:      map[*Consumer]bool{},
+		sessions:       map[uint64][32]byte{},
+		ring:           nil,
+		gate:           newGate(scope, recorder != nil, captureBpfMaps, logger),
+		flows:          map[uint64]*hubFlow{},
+		history:        recorder,
+		snaplen:        snaplen,
+		bootOffset:     bootOffset,
+		captureBpfMaps: captureBpfMaps,
+		secretsBpfMaps: secretsBpfMaps,
+		dropped:        0,
+		doneChannel:    make(chan struct{}),
+		logger:         logger,
+	}
+
+	if recorder != nil {
+		hub.ring = newPacketRing(historyPacketBytes)
+	}
+
+	return
+}
+
+// read packet_map and hand the packets to the writers until the context is cancelled, then hand out what is still in the ring and close Done
+// the writers finish their files when Done is closed
+func (hub *Hub) Run(ctx context.Context) (err error) {
+	defer close(hub.doneChannel)
+	reader, readerErr := ringbuf.NewReader(hub.captureBpfMaps[capturebpf.PacketMap])
+
+	if err = readerErr; err != nil {
+		err = fmt.Errorf("%w: %w", ErrRead, err)
+		return
+	}
+
+	defer func() {
+		err = errors.Join(err, reader.Close())
+	}()
+
+	// the cancelled context wakes the reader, it gets the records that are in the ring by then and ErrFlushed after them
+	stop := context.AfterFunc(ctx, func() {
+		flushErr := reader.Flush()
+
+		if flushErr != nil {
+			hub.logger.Error("Could not wake packet_map reader", "error", flushErr)
+		}
+	})
+	defer stop()
+
+	var record ringbuf.Record
+	var drainDeadline time.Time
+	nextWake := time.Now().Add(idleWake)
+	nextSweep := time.Now().Add(sweepInterval)
+
+	for {
+		reader.SetDeadline(nextWake)
+		readErr := reader.ReadInto(&record)
+		now := time.Now()
+
+		switch {
+		case readErr == nil:
+			packet, parseErr := capturebpf.ParsePacket(record.RawSample)
+
+			if parseErr != nil {
+				hub.logger.Warn("Could not parse packet_map record", "error", parseErr)
+				continue
+			}
+
+			// the record of the reader is used again, every writer and the history get this copy and only read it
+			packet.Data = bytes.Clone(packet.Data)
+			err = hub.gate.handle(packet, now, hub.emit)
+		case errors.Is(readErr, os.ErrDeadlineExceeded):
+		case
+			errors.Is(readErr, ringbuf.ErrFlushed),
+			errors.Is(readErr, ringbuf.ErrClosed):
+			hub.logger.Debug("Context cancelled")
+			err = hub.finish(now)
+			return
+		default:
+			err = errors.Join(fmt.Errorf("%w: %w", ErrRead, readErr), hub.finish(now))
+			return
+		}
+
+		if err != nil {
+			return
+		}
+
+		if ctx.Err() != nil {
+			if drainDeadline.IsZero() {
+				drainDeadline = now.Add(drainTimeout)
+			}
+
+			if now.After(drainDeadline) {
+				err = hub.finish(now)
+				return
+			}
+		}
+
+		// under steady traffic the read never times out, so the clock is checked after every packet
+		if now.Before(nextWake) {
+			continue
+		}
+
+		nextWake = now.Add(idleWake)
+		err = hub.gate.decideLate(now, false, hub.emit)
+
+		if err != nil {
+			return
+		}
+
+		if !now.Before(nextSweep) {
+			nextSweep = now.Add(sweepInterval)
+			hub.countDropped()
+			hub.gate.forgetOutOfScope(now)
+			hub.forgetFlows(func(cookie uint64) (isOpen bool, err error) {
+				isOpen, err = capturebpf.HasFlow(cookie, hub.captureBpfMaps)
+				return
+			})
+		}
+	}
+}
+
+// closed when the hub handed out its last packet, the writers finish then
+func (hub *Hub) Done() (done <-chan struct{}) {
+	done = hub.doneChannel
+	return
+}
+
+// the flows that wait for their scope are decided without the bytes that did not come, the drops are counted a last time
+func (hub *Hub) finish(now time.Time) (err error) {
+	err = hub.gate.decideLate(now, true, hub.emit)
+	hub.countDropped()
+	return
+}
+
+// a packet of a flow in scope: the first one starts the flow in the history and notes the session of its ClientHello, then the ring and every writer get it
+// it never waits for a writer, a writer whose queue is full loses the packet or, a stream, its place
+func (hub *Hub) emit(cookie uint64, packet capturebpf.Packet, decided *gateFlow, now time.Time) (err error) {
+	hub.mutex.Lock()
+	defer hub.mutex.Unlock()
+	tracked, ok := hub.flows[cookie]
+
+	if !ok {
+		tracked = &hubFlow{historyID: 0, traffic: [2]history.Counters{}}
+		hub.flows[cookie] = tracked
+
+		if decided.isTLS && (decided.hello.ClientRandom != [32]byte{}) {
+			hub.sessions[cookie] = decided.hello.ClientRandom
+		}
+
+		// a flow without values was not in flow_map any more, the history can't name it
+		if decided.hasValues {
+			tracked.historyID = hub.history.OpenFlow(cookie, decided.values, decided.hello.ClientRandom)
+		}
+	}
+
+	direction := tlsrecord.ClientDirection
+
+	if packet.IsIngress {
+		direction = tlsrecord.ServerDirection
+	}
+
+	header, isParsed := parsePacket(packet.Data)
+
+	if isParsed && (packet.Length > uint32(header.payloadOffset)) {
+		tracked.traffic[direction].Bytes += int64(packet.Length) - int64(header.payloadOffset)
+	}
+
+	if isParsed && (header.protocol == syscall.IPPROTO_UDP) {
+		tracked.traffic[direction].Datagrams++
+	}
+
+	if hub.ring != nil {
+		hub.ring.add(packet)
+	}
+
+	for current := range hub.consumers {
+		hub.offer(current, packet)
+	}
+
+	return
+}
+
+// a flow whose socket left flow_map is closed: the history gets its counters, the next packet of its cookie starts a new flow
+// hasFlow looks the socket up in flow_map
+func (hub *Hub) forgetFlows(hasFlow func(cookie uint64) (isOpen bool, err error)) {
+	for cookie, tracked := range hub.flows {
+		isOpen, lookupErr := hasFlow(cookie)
+
+		if lookupErr != nil {
+			hub.logger.Debug("Could not look up flow", "error", lookupErr, "cookie", cookie)
+			continue
+		}
+
+		if isOpen {
+			continue
+		}
+
+		hub.history.CloseFlow(tracked.historyID, tracked.traffic[tlsrecord.ClientDirection], tracked.traffic[tlsrecord.ServerDirection])
+		hub.gate.forget(cookie)
+		hub.mutex.Lock()
+		delete(hub.flows, cookie)
+		delete(hub.sessions, cookie)
+		hub.mutex.Unlock()
+	}
+}
+
+// warn when packets were lost since the last look, the reader was slower than the recorded sockets
+func (hub *Hub) countDropped() {
+	dropped, readErr := capturebpf.ReadDropped(hub.captureBpfMaps)
+
+	if readErr != nil {
+		hub.logger.Warn("Could not read dropped packets", "error", readErr)
+		return
+	}
+
+	if dropped > hub.dropped {
+		hub.logger.Warn("Dropped packets, packet_map was full", "dropped", dropped-hub.dropped, "droppedTotal", dropped)
+	}
+
+	hub.dropped = dropped
 }

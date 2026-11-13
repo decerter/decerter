@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: MIT
 #
-# The control API of decerter: decerter run --api-socket <path> serves it on a unix socket. This file is the contract every client
-# (decerter ui, decerter mcp, decerter-pro, scripts) is built against; api/types.go holds the same types in Go. Both are MIT-licensed,
-# the rest of decerter is AGPL-3.0-only. Breaking changes go to /api/v2.
+# The control API of decerter: decerter run --api-socket <path> and decerter capture --api-socket <path> serve it on a unix socket.
+# This file is the contract every client (decerter ui, decerter mcp, decerter-pro, scripts) is built against; api/types.go holds the
+# same types in Go. Both are MIT-licensed, the rest of decerter is AGPL-3.0-only. Breaking changes go to /api/v2.
 openapi: 3.0.3
 info:
   title: decerter control API
@@ -34,6 +34,21 @@ info:
     its own direction of its own flow. Rules run in this order: the rules compiled into decerter (the identity rule of
     `--intercept`), then the API rules in the order they were added, then the hold queue, so a held message shows what
     goes on the wire.
+
+    Capture mode (`decerter capture --api-socket`, status `mode` is `capture`) redirects nothing and records the packets
+    of the flows in scope. Its history has the flows (with the fields of their ClientHello) but no messages, and it
+    keeps the latest 64 MiB of their packets for exportPcap. Captures with their own filter and format are started,
+    stopped, listed and downloaded over the API: at most 16 are kept, 4 run at once and all files together hold
+    1 GiB; the oldest stopped capture is removed to make room, and a running capture that would go over the size stops
+    with a reason. The files are in the captures directory of decerter's data directory (`/run/decerter/captures` on Linux,
+    `/data/local/tmp/decerter.d/captures` on Android) with mode 0600 for root and are removed when decerter stops.
+    streamCapture serves the live pcapng stream for Wireshark. On `decerter run` the capture operations answer 409
+    (listCaptures an empty list): its proxy terminates the flows, there is nothing on the wire to record yet.
+
+    pcapng responses use `application/x-pcapng`: pcapng has no registered media type, `application/vnd.tcpdump.pcap`
+    is the classic pcap format. A capture with secrets (format `dsb`) holds the key log lines of its TLS and DTLS
+    sessions in Decryption Secrets Blocks, so Wireshark and tshark decrypt it without a key log file; a `plaintext`
+    capture holds synthesized packets with the decrypted payload and no secrets. Both are as secret as the traffic.
 servers:
   - url: http://decerter/api/v1
 paths:
@@ -350,6 +365,170 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "409":
           $ref: "#/components/responses/Conflict"
+  /flows/pcap:
+    get:
+      operationId: exportPcap
+      summary: The flows of the history as pcapng
+      description: |
+        The flows of the history the filter takes, oldest first. On `decerter run` only `format=plaintext` (the default):
+        synthesized packets with the real addresses and ports, a handshake when the flow opened, the payload of every
+        message as it went on the wire (an edit included), seq/ack moving with the payload, and a FIN from both sides
+        when it closed; the first packet of a flow has a comment with its id, process and TLS session, a dropped or
+        changed message is named in a comment (the original is at getMessage), and bytes the history did not keep are a
+        gap in the sequence numbers. On `decerter capture` the packets decerter still keeps of the flows (the latest 64 MiB):
+        `format=dsb` as they were captured with a DSB in front of each TLS and DTLS session whose secrets are still
+        there, `format=plaintext` synthesized and decrypted like a plaintext capture.
+      parameters:
+        - $ref: "#/components/parameters/Filter"
+        - name: format
+          in: query
+          schema:
+            $ref: "#/components/schemas/CaptureFormat"
+      responses:
+        "200":
+          description: A pcapng file
+          headers:
+            Content-Disposition:
+              description: attachment; filename="decerter-flows.pcapng"
+              schema:
+                type: string
+          content:
+            application/x-pcapng:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /captures:
+    get:
+      operationId: listCaptures
+      summary: The captures of the API, oldest first
+      responses:
+        "200":
+          description: The captures, empty on decerter run
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CaptureList"
+    post:
+      operationId: startCapture
+      summary: Start a capture into a file, decerter capture only
+      description: |
+        The capture gets the packets of the flows in scope the filter takes: a filter is decided once per flow, within
+        the kernel selection and the `--filter` of decerter (a filter that takes none of those flows just gives an empty
+        file). A flow that is open already starts with the packets decerter kept of it (the latest 64 MiB of all flows), so
+        its TLS session is whole and decryptable; a session whose start is no longer kept still gets its DSB, and is
+        written as captured with `plaintext`. Without a body every flow in scope is captured with its secrets.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CaptureRequest"
+            example:
+              filter: tcp.dstport == 443
+              plaintext: false
+      responses:
+        "201":
+          description: The running capture
+          headers:
+            Location:
+              description: The path of the capture
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Capture"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /captures/{id}/stop:
+    post:
+      operationId: stopCapture
+      summary: Stop a capture and finish its file
+      description: The flows that still wait for their secrets are written without them. Stopping a stopped capture changes nothing.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: The stopped capture
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Capture"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /captures/{id}/pcap:
+    get:
+      operationId: downloadCapture
+      summary: The file of a stopped capture
+      description: Range requests work. A running capture answers 409, stop it first.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: A pcapng file
+          headers:
+            Content-Disposition:
+              description: attachment; filename="decerter-capture-<id>.pcapng"
+              schema:
+                type: string
+          content:
+            application/x-pcapng:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /captures/stream:
+    get:
+      operationId: streamCapture
+      summary: The live pcapng stream for Wireshark, decerter capture only
+      description: |
+        An endless pcapng stream of the flows in scope the filter takes: a section and an interface block at once, then
+        the packets, every block flushed when it is written. Flows that are open already come first with the packets
+        decerter kept of them, as startCapture describes, then the stream is live. With secrets a DSB comes before the first
+        packet of each TLS and DTLS session, so Wireshark decrypts them; `plaintext=true` writes synthesized decrypted
+        packets. The stream ends when the client goes away or decerter stops; a client that reads so slowly that 32 MiB or
+        16384 packets wait for it is cut off (the stream ends after a whole block), it never slows the capture or other
+        clients down.
+
+            curl -N --unix-socket /run/decerter/api.sock http://decerter/api/v1/captures/stream | tshark -l -i - -Y http
+
+        This is the one operation without an MCP tool: an endless binary stream does not fit a tool call.
+      x-decerter-mcp-tool: false
+      parameters:
+        - $ref: "#/components/parameters/Filter"
+        - name: plaintext
+          in: query
+          description: Synthesized decrypted packets instead of the packets and their secrets.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: The pcapng stream
+          content:
+            application/x-pcapng:
+              schema:
+                type: string
+                format: binary
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
 components:
   parameters:
     ID:
@@ -386,7 +565,9 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     Conflict:
-      description: Not possible in this mode, holding and rules need --intercept, the key log needs TLS secrets
+      description: |
+        Not possible in this mode or state: holding and rules need decerter run --intercept, the key log needs TLS secrets,
+        captures, the stream and format=dsb need decerter capture, a running capture can't be downloaded, too many captures
       content:
         application/json:
           schema:
@@ -400,8 +581,8 @@ components:
           type: string
     Processing:
       type: string
-      description: relay (no payloads), decrypt (--decrypt) or intercept (--intercept)
-      enum: [relay, decrypt, intercept]
+      description: relay (no payloads), decrypt (--decrypt) or intercept (--intercept) on decerter run, record on decerter capture
+      enum: [relay, decrypt, intercept, record]
     Direction:
       type: string
       description: up is client to server, down server to client
@@ -427,11 +608,12 @@ components:
           type: string
     Status:
       type: object
-      required: [mode, processing, version, platform, scope, tls_secrets, started, intercept, rules, history]
+      required: [mode, processing, version, platform, scope, tls_secrets, started, intercept, rules, history, captures]
       properties:
         mode:
           type: string
-          enum: [run]
+          description: run proxies the flows, capture records their packets
+          enum: [run, capture]
         processing:
           $ref: "#/components/schemas/Processing"
         version:
@@ -454,6 +636,93 @@ components:
           type: integer
         history:
           $ref: "#/components/schemas/HistoryStatus"
+        captures:
+          $ref: "#/components/schemas/CaptureStatus"
+    CaptureStatus:
+      type: object
+      required: [available, running, stored, size, limits]
+      properties:
+        available:
+          type: boolean
+          description: false on decerter run
+        running:
+          type: integer
+        stored:
+          type: integer
+          description: Captures kept, the running ones included
+        size:
+          type: integer
+          format: int64
+          description: Bytes of all their files
+        limits:
+          $ref: "#/components/schemas/CaptureLimits"
+    CaptureLimits:
+      type: object
+      required: [captures, running, size]
+      properties:
+        captures:
+          type: integer
+          description: Captures kept, the oldest stopped one is removed to make room
+        running:
+          type: integer
+          description: Captures running at once
+        size:
+          type: integer
+          format: int64
+          description: Bytes all files may hold
+    CaptureFormat:
+      type: string
+      description: dsb is the packets as captured with a Decryption Secrets Block per TLS session, plaintext synthesized decrypted packets
+      enum: [dsb, plaintext]
+    CaptureRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        filter:
+          type: string
+          description: Capture only the flows this filter takes, empty is every flow in scope
+        plaintext:
+          type: boolean
+          description: Synthesized decrypted packets instead of the packets and their secrets
+    Capture:
+      type: object
+      required: [id, filter, format, state, started, size, dropped_packets]
+      properties:
+        id:
+          type: integer
+          format: uint64
+        filter:
+          type: string
+        format:
+          $ref: "#/components/schemas/CaptureFormat"
+        state:
+          type: string
+          enum: [running, stopped]
+        started:
+          type: string
+          format: date-time
+        stopped:
+          type: string
+          format: date-time
+        size:
+          type: integer
+          format: int64
+          description: Bytes of its file so far
+        dropped_packets:
+          type: integer
+          format: uint64
+          description: Packets it lost because its writer fell 32 MiB or 16384 packets behind
+        reason:
+          type: string
+          description: Why it stopped when nobody stopped it, the size limit, an error or decerter stopping
+    CaptureList:
+      type: object
+      required: [captures]
+      properties:
+        captures:
+          type: array
+          items:
+            $ref: "#/components/schemas/Capture"
     HistoryStatus:
       type: object
       required: [flows, open_flows, messages, payload_bytes, evicted_flows, limits]
@@ -568,11 +837,11 @@ components:
         bytes:
           type: integer
           format: int64
-          description: What the proxy sent on, set when the flow closes
+          description: What the proxy sent on (decerter capture, the payload bytes of the captured packets), set when the flow closes
         datagrams:
           type: integer
           format: int64
-          description: UDP only, set when the flow closes
+          description: UDP only (decerter capture, the captured datagrams), set when the flow closes
         messages:
           type: integer
           description: Messages in the history

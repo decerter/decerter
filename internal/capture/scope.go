@@ -4,15 +4,18 @@ package capture
 
 import (
 	"bytes"
+	"log/slog"
 	"net/netip"
 	"slices"
 	"syscall"
 	"time"
 
+	"github.com/decerter/decerter/internal/bpf"
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/tlsrecord"
+	"github.com/cilium/ebpf"
 )
 
 // the decision of the scope filter about a flow
@@ -28,31 +31,110 @@ const (
 )
 
 // what a flow keeps while its scope waits for its first bytes
-// values are the fields known from the start, packets the packets so far with their bytes copied
-// hello is the client's TCP stream from its first payload byte on, next the sequence number of the byte behind it; isTLS is true once it starts with a ClientHello
+// packets are the packets so far with their bytes copied
+// hello is the client's TCP stream from its first payload byte on, next the sequence number of the byte behind it
 type opening struct {
-	values  filter.Values
 	packets []capturebpf.Packet
 	bytes   int
 	start   time.Time
 	hello   []byte
 	next    uint32
-	isTLS   bool
+}
+
+// what the gate knows of one flow: values are the fields its scope was decided with, hasValues is false when nothing was looked up (no scope) or flow_map had no entry
+// hello is the ClientHello at the start of the flow when its opening was read, isTLS true when the flow began with one
+type gateFlow struct {
+	scope      scopeState
+	values     filter.Values
+	hasValues  bool
+	hello      tlsrecord.Hello
+	isTLS      bool
+	opening    *opening
+	lastPacket time.Time
+}
+
+// decides once per flow whether its packets go on, a flow out of scope gives nothing, its earlier packets neither
+// scope nil takes every flow; isReadingOpenings decides every flow with its first bytes even without a scope, so the values have the fields of its ClientHello
+// lookup reads a flow from flow_map; pending are the cookies of the flows that wait for their first bytes, in the order they came
+// the gate of a capture writer and the one of the capture hub are separate, each is used by one goroutine only
+type gate struct {
+	scope             *filter.Filter
+	isReadingOpenings bool
+	captureBpfMaps    map[bpf.BpfMapName]*ebpf.Map
+	lookup            func(cookie uint64) (flow redirect.Flow, err error)
+	flows             map[uint64]*gateFlow
+	pending           []uint64
+	logger            *slog.Logger
+}
+
+// gets the packets of the flows in scope in their order, decided is the flow as the gate decided it
+type emitFunction func(cookie uint64, packet capturebpf.Packet, decided *gateFlow, now time.Time) (err error)
+
+// captureBpfMaps has the flow_map of the recorded sockets, nil only where nothing is looked up
+func newGate(scope *filter.Filter, isReadingOpenings bool, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, logger *slog.Logger) (newGate gate) {
+	newGate = gate{
+		scope:             scope,
+		isReadingOpenings: isReadingOpenings,
+		captureBpfMaps:    captureBpfMaps,
+		lookup:            nil,
+		flows:             map[uint64]*gateFlow{},
+		pending:           nil,
+		logger:            logger,
+	}
+	newGate.lookup = func(cookie uint64) (flow redirect.Flow, err error) {
+		flow, err = lookupFlow(cookie, captureBpfMaps)
+		return
+	}
+	return
+}
+
+// hand the packet on when its flow is in scope, keep it while the flow waits for its first bytes
+func (gate *gate) handle(packet capturebpf.Packet, now time.Time, emit emitFunction) (err error) {
+	current, ok := gate.flows[packet.Cookie]
+
+	if !ok {
+		current = gate.start(packet, now)
+	}
+
+	current.lastPacket = now
+
+	switch current.scope {
+	case outScopeState:
+	case pendingScopeState:
+		err = gate.wait(packet.Cookie, current, packet, now, emit)
+	default:
+		err = emit(packet.Cookie, packet, current, now)
+	}
+
+	return
 }
 
 // decide a new flow with what flow_map and its first packet tell, a flow the filter can't decide without its ClientHello waits for it
-// a flow that is gone from flow_map can't be decided and is left out
-func (recorder *recorder) startScope(cookie uint64, newFlow *flow, packet capturebpf.Packet, now time.Time) {
-	if recorder.scope == nil {
-		newFlow.scope = inScopeState
+// a flow that is gone from flow_map can't be decided and is left out by a scope; without a scope its packets go on without values
+func (gate *gate) start(packet capturebpf.Packet, now time.Time) (newFlow *gateFlow) {
+	newFlow = &gateFlow{
+		scope:      inScopeState,
+		values:     filter.Values{},
+		hasValues:  false,
+		hello:      tlsrecord.Hello{},
+		isTLS:      false,
+		opening:    nil,
+		lastPacket: now,
+	}
+	gate.flows[packet.Cookie] = newFlow
+
+	if (gate.scope == nil) && !gate.isReadingOpenings {
 		return
 	}
 
-	kernelFlow, lookupErr := redirect.FlowByCookie(cookie, recorder.captureBpfMaps[capturebpf.FlowMap])
+	kernelFlow, lookupErr := gate.lookup(packet.Cookie)
 
 	if lookupErr != nil {
-		recorder.logger.Debug("Could not find flow to decide its scope, it is not written", "error", lookupErr, "cookie", cookie)
-		newFlow.scope = outScopeState
+		if gate.scope != nil {
+			gate.logger.Debug("Could not find flow to decide its scope, it is not written", "error", lookupErr, "cookie", packet.Cookie)
+			newFlow.scope = outScopeState
+		}
+
 		return
 	}
 
@@ -64,7 +146,7 @@ func (recorder *recorder) startScope(cookie uint64, newFlow *flow, packet captur
 		local = header.destination
 	}
 
-	values := filter.Values{
+	newFlow.values = filter.Values{
 		PID:         kernelFlow.Tgid,
 		UID:         kernelFlow.UID,
 		GID:         kernelFlow.GID,
@@ -79,32 +161,50 @@ func (recorder *recorder) startScope(cookie uint64, newFlow *flow, packet captur
 		ServerName:  "",
 		Protocols:   nil,
 	}
+	newFlow.hasValues = true
 
-	// the process can be gone by now, the fields are empty then
-	if recorder.scope.Uses(filter.CmdlineField) {
-		values.Cmdline, _ = filter.ReadCmdline(kernelFlow.Tgid)
+	// the process can be gone by now, the fields are empty then; the history shows them too
+	if gate.isReadingOpenings || gate.scope.Uses(filter.CmdlineField) {
+		newFlow.values.Cmdline, _ = filter.ReadCmdline(kernelFlow.Tgid)
 	}
 
-	if recorder.scope.Uses(filter.ExeField) {
-		values.Exe, _ = filter.ReadExe(kernelFlow.Tgid)
+	if gate.isReadingOpenings || gate.scope.Uses(filter.ExeField) {
+		newFlow.values.Exe, _ = filter.ReadExe(kernelFlow.Tgid)
 	}
 
-	switch recorder.scope.Evaluate(values) {
-	case filter.TrueResult:
-		newFlow.scope = inScopeState
-	case filter.FalseResult:
+	result := filter.UnknownResult
+
+	if gate.scope != nil {
+		result = gate.scope.Evaluate(newFlow.values)
+	}
+
+	switch {
+	case result == filter.FalseResult:
 		newFlow.scope = outScopeState
+	case (result == filter.TrueResult) && !gate.isReadingOpenings:
+		newFlow.scope = inScopeState
 	default:
 		newFlow.scope = pendingScopeState
-		newFlow.opening = &opening{values: values, packets: nil, bytes: 0, start: now, hello: nil, next: 0, isTLS: false}
-		recorder.pending = append(recorder.pending, cookie)
+		newFlow.opening = &opening{packets: nil, bytes: 0, start: now, hello: nil, next: 0}
+		gate.pending = append(gate.pending, packet.Cookie)
 	}
+
+	return
+}
+
+func lookupFlow(cookie uint64, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map) (flow redirect.Flow, err error) {
+	if captureBpfMaps == nil {
+		err = ErrNoFlowMap
+		return
+	}
+
+	flow, err = redirect.FlowByCookie(cookie, captureBpfMaps[capturebpf.FlowMap])
+	return
 }
 
 // keep the packet of a flow that waits for its scope and decide it when its first bytes are there:
 // a whole ClientHello, first client bytes that are no ClientHello, the server speaking first, the end of the flow, or more bytes than a flow may keep
-func (recorder *recorder) wait(cookie uint64, pendingFlow *flow, packet capturebpf.Packet, now time.Time) (err error) {
-	pendingFlow.lastPacket = now
+func (gate *gate) wait(cookie uint64, pendingFlow *gateFlow, packet capturebpf.Packet, now time.Time, emit emitFunction) (err error) {
 	state := pendingFlow.opening
 	packet.Data = bytes.Clone(packet.Data)
 	state.packets = append(state.packets, packet)
@@ -130,11 +230,11 @@ func (recorder *recorder) wait(cookie uint64, pendingFlow *flow, packet captureb
 		isDecided = true
 	case header.protocol == syscall.IPPROTO_UDP:
 		// a DTLS session starts with a ClientHello datagram, one fragmented over more datagrams is decided without its fields
-		state.isTLS = tlsrecord.IsDTLSClientHello(payload)
+		pendingFlow.isTLS = tlsrecord.IsDTLSClientHello(payload)
 		hello, _, _ = tlsrecord.ReadDTLSClientHello(payload)
 		isDecided = true
 	default:
-		hello, isDecided = state.readHello(header.sequence, payload)
+		hello, isDecided = pendingFlow.readHello(header.sequence, payload)
 	}
 
 	// the end of the flow, a cut segment or too much waiting: decided with what is there
@@ -144,12 +244,14 @@ func (recorder *recorder) wait(cookie uint64, pendingFlow *flow, packet captureb
 		return
 	}
 
-	err = recorder.decide(cookie, pendingFlow, hello, now)
+	err = gate.decide(cookie, pendingFlow, hello, now, emit)
 	return
 }
 
 // the client's segments in the order of their sequence numbers from the first one on, a segment sent again or out of order is not read
-func (state *opening) readHello(sequence uint32, payload []byte) (hello tlsrecord.Hello, isDecided bool) {
+func (pendingFlow *gateFlow) readHello(sequence uint32, payload []byte) (hello tlsrecord.Hello, isDecided bool) {
+	state := pendingFlow.opening
+
 	if len(state.hello) == 0 {
 		state.next = sequence
 	}
@@ -171,7 +273,7 @@ func (state *opening) readHello(sequence uint32, payload []byte) (hello tlsrecor
 		return
 	}
 
-	state.isTLS = true
+	pendingFlow.isTLS = true
 	parsed, isComplete, helloErr := tlsrecord.ReadClientHello(state.hello)
 
 	// a ClientHello that can't be read is TLS without its fields
@@ -183,25 +285,26 @@ func (state *opening) readHello(sequence uint32, payload []byte) (hello tlsrecor
 	return
 }
 
-// decide the flow with the ClientHello it had, write its packets when it is in scope and drop them when not
-func (recorder *recorder) decide(cookie uint64, pendingFlow *flow, hello tlsrecord.Hello, now time.Time) (err error) {
+// decide the flow with the ClientHello it had, hand its packets on when it is in scope and drop them when not
+func (gate *gate) decide(cookie uint64, pendingFlow *gateFlow, hello tlsrecord.Hello, now time.Time, emit emitFunction) (err error) {
 	state := pendingFlow.opening
 	pendingFlow.opening = nil
-	recorder.pending = slices.DeleteFunc(recorder.pending, func(pendingCookie uint64) bool {
+	gate.pending = slices.DeleteFunc(gate.pending, func(pendingCookie uint64) bool {
 		return pendingCookie == cookie
 	})
-	values := state.values.WithClientHello(state.isTLS, hello.Version, hello.ServerName, hello.Protocols)
+	pendingFlow.hello = hello
+	pendingFlow.values = pendingFlow.values.WithClientHello(pendingFlow.isTLS, hello.Version, hello.ServerName, hello.Protocols)
 
-	if recorder.scope.Evaluate(values) != filter.TrueResult {
+	if (gate.scope != nil) && (gate.scope.Evaluate(pendingFlow.values) != filter.TrueResult) {
 		pendingFlow.scope = outScopeState
-		recorder.logger.Debug("Flow is out of scope, it is not written", "cookie", cookie, "packets", len(state.packets))
+		gate.logger.Debug("Flow is out of scope, it is not written", "cookie", cookie, "packets", len(state.packets))
 		return
 	}
 
 	pendingFlow.scope = inScopeState
 
 	for _, packet := range state.packets {
-		err = recorder.record(cookie, pendingFlow, packet, now)
+		err = emit(cookie, packet, pendingFlow, now)
 
 		if err != nil {
 			return
@@ -212,15 +315,15 @@ func (recorder *recorder) decide(cookie uint64, pendingFlow *flow, hello tlsreco
 }
 
 // decide the flows that waited holdTimeout for their first bytes, or every waiting flow when the capture stops
-func (recorder *recorder) decideLate(now time.Time, isStopping bool) (err error) {
-	for _, cookie := range slices.Clone(recorder.pending) {
-		pendingFlow := recorder.flows[cookie]
+func (gate *gate) decideLate(now time.Time, isStopping bool, emit emitFunction) (err error) {
+	for _, cookie := range slices.Clone(gate.pending) {
+		pendingFlow := gate.flows[cookie]
 
 		if !isStopping && (now.Sub(pendingFlow.opening.start) < holdTimeout) {
 			continue
 		}
 
-		err = recorder.decide(cookie, pendingFlow, tlsrecord.Hello{}, now)
+		err = gate.decide(cookie, pendingFlow, tlsrecord.Hello{}, now, emit)
 
 		if err != nil {
 			return
@@ -228,4 +331,36 @@ func (recorder *recorder) decideLate(now time.Time, isStopping bool) (err error)
 	}
 
 	return
+}
+
+// the flow starts as a new one with its next packet, its owner forgot it; a flow that waits for its first bytes stays
+func (gate *gate) forget(cookie uint64) {
+	current, ok := gate.flows[cookie]
+
+	if ok && (current.scope != pendingScopeState) {
+		delete(gate.flows, cookie)
+	}
+}
+
+// a flow out of scope is kept while its socket is in flow_map, so it is not decided again in the middle of its stream, without its first bytes
+func (gate *gate) forgetOutOfScope(now time.Time) {
+	for cookie, current := range gate.flows {
+		if (current.scope != outScopeState) || (now.Sub(current.lastPacket) < flowIdleTimeout) {
+			continue
+		}
+
+		if gate.captureBpfMaps != nil {
+			isOpen, lookupErr := capturebpf.HasFlow(cookie, gate.captureBpfMaps)
+
+			if lookupErr != nil {
+				gate.logger.Debug("Could not look up flow", "error", lookupErr, "cookie", cookie)
+			}
+
+			if isOpen {
+				continue
+			}
+		}
+
+		delete(gate.flows, cookie)
+	}
 }

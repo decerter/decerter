@@ -30,12 +30,13 @@ import (
 func NewBackend(info Info, limits history.Limits, keyLog func(clientRandom [32]byte) (keyLog string, found bool, err error)) (backend *Backend) {
 	bus := NewBus()
 	backend = &Backend{
-		Info:    info,
-		History: history.New(limits, bus.Publish),
-		Holds:   nil,
-		Rules:   nil,
-		Bus:     bus,
-		KeyLog:  keyLog,
+		Info:     info,
+		History:  history.New(limits, bus.Publish),
+		Holds:    nil,
+		Rules:    nil,
+		Bus:      bus,
+		KeyLog:   keyLog,
+		Captures: nil,
 	}
 
 	if info.IsInterceptCapable {
@@ -66,6 +67,12 @@ func routes() (operations []route) {
 		{method: http.MethodPost, path: "/rules", operationID: "addRule", handle: addRule},
 		{method: http.MethodDelete, path: "/rules/{id}", operationID: "deleteRule", handle: deleteRule},
 		{method: http.MethodGet, path: "/keylog", operationID: "exportKeylog", handle: exportKeylog},
+		{method: http.MethodGet, path: "/flows/pcap", operationID: "exportPcap", handle: exportPcap},
+		{method: http.MethodGet, path: "/captures", operationID: "listCaptures", handle: listCaptures},
+		{method: http.MethodPost, path: "/captures", operationID: "startCapture", handle: startCapture},
+		{method: http.MethodPost, path: "/captures/{id}/stop", operationID: "stopCapture", handle: stopCapture},
+		{method: http.MethodGet, path: "/captures/{id}/pcap", operationID: "downloadCapture", handle: downloadCapture},
+		{method: http.MethodGet, path: "/captures/stream", operationID: "streamCapture", handle: streamCapture},
 	}
 	return
 }

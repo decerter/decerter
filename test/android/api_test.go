@@ -14,6 +14,10 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -262,4 +266,193 @@ func (client apiClient) waitHeld(ctx context.Context) (held v1.Hold, err error) 
 		case <-time.After(holdPoll):
 		}
 	}
+}
+
+// Test if decerter capture --api-socket works through adb forward: a capture started, stopped and downloaded over the API holds the decrypted requests of the app's TLS 1.3 and TLS 1.2 calls for tshark on the host, and so does the live stream read through the forward.
+func TestCaptureAPIPositive(state *testing.T) {
+	requireDex(state)
+
+	if tsharkSkipReason != "" {
+		state.Skip(tsharkSkipReason)
+	}
+
+	servers := startHTTPSServers(state, nil)
+	decerter := startDeviceDecerter(state, decerterBinary, "capture-api", "--log-level debug capture --api-socket "+apiSocket+" --uid "+strconv.FormatUint(uint64(appUID), 10)+" --dst-cidr "+hostCIDR, captureReady)
+	client := forwardAPI(state)
+	started := v1.Capture{}
+	status, err := client.call(state.Context(), http.MethodPost, "/captures", v1.CaptureRequest{Filter: "tls", Plaintext: false}, &started)
+
+	if (err != nil) || (status != http.StatusCreated) {
+		state.Fatalf("Test of the capture api failed, cannot start a capture over adb forward, status: %d, error: %v", status, err)
+	}
+
+	stream := client.startStream(state, servers)
+
+	for _, server := range servers {
+		err = testDex(state.Context(), appUID, server, "/capture-api", "/capture-api")
+
+		if err != nil {
+			state.Errorf("Test of the capture api failed, error: %s", err.Error())
+		}
+	}
+
+	hasRequests := func(output string) (isFound bool) {
+		isFound = true
+
+		for _, server := range servers {
+			isFound = isFound && slices.Contains(strings.Split(output, "\n"), server.Port+"\tGET\t/capture-api")
+		}
+
+		return
+	}
+	output, err := stream.wait(state.Context(), hasRequests)
+
+	if err != nil {
+		state.Errorf("Test of the capture api failed, tshark should find GET /capture-api to ports %s and %s in the stream, output:\n%s\nerrors:\n%s", servers[0].Port, servers[1].Port, output, stream.errors.String())
+	}
+
+	status, err = client.call(state.Context(), http.MethodPost, fmt.Sprintf("/captures/%d/stop", started.ID), nil, nil)
+
+	if (err != nil) || (status != http.StatusOK) {
+		state.Fatalf("Test of the capture api failed, cannot stop the capture, status: %d, error: %v", status, err)
+	}
+
+	capturePath := filepath.Join(state.TempDir(), "capture.pcapng")
+	err = client.download(state.Context(), fmt.Sprintf("/captures/%d/pcap", started.ID), capturePath)
+
+	if err != nil {
+		state.Fatalf("Test of the capture api failed, cannot download the capture, error: %s", err.Error())
+	}
+
+	arguments := []string{"-n", "-r", capturePath}
+
+	for _, server := range servers {
+		arguments = append(arguments, "-d", "tcp.port=="+server.Port+",tls")
+	}
+
+	arguments = append(arguments, "-Y", "http.request", "-T", "fields", "-E", "separator=/t", "-e", "tcp.dstport", "-e", "http.request.method", "-e", "http.request.uri")
+	fileOutput, err := exec.CommandContext(state.Context(), tsharkPath, arguments...).Output()
+
+	if (err != nil) || !hasRequests(string(fileOutput)) {
+		state.Errorf("Test of the capture api failed, tshark should find GET /capture-api to ports %s and %s in the downloaded file, output:\n%s\nerror: %v", servers[0].Port, servers[1].Port, fileOutput, err)
+	}
+
+	stream.stop()
+	checkAPIClient(state, decerter)
+	stopDeviceDecerter(state, decerter, true)
+}
+
+// tshark on the host reading GET /api/v1/captures/stream through adb forward
+type apiStream struct {
+	cancel context.CancelFunc
+	tshark *exec.Cmd
+	output lockedBuffer
+	errors lockedBuffer
+}
+
+func (client apiClient) startStream(state *testing.T, servers []httpsServer) (stream *apiStream) {
+	ctx, cancel := context.WithCancel(state.Context())
+	stream = &apiStream{cancel: cancel, tshark: nil, output: newLockedBuffer(), errors: newLockedBuffer()}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+net.JoinHostPort("127.0.0.1", client.port)+v1.BasePath+"/captures/stream", http.NoBody)
+
+	if err != nil {
+		cancel()
+		state.Fatalf("Could not make the stream request, error: %s", err.Error())
+	}
+
+	// no timeout, the stream ends with the context
+	response, err := (&http.Client{}).Do(request)
+
+	if err != nil {
+		cancel()
+		state.Fatalf("Could not open the capture stream, error: %s", err.Error())
+	}
+
+	// tshark reads the body until the request is cancelled
+	state.Cleanup(func() {
+		if closeErr := response.Body.Close(); (closeErr != nil) && !errors.Is(closeErr, context.Canceled) {
+			state.Errorf("Could not close the capture stream, error: %s", closeErr.Error())
+		}
+	})
+
+	if (response.StatusCode != http.StatusOK) || (response.Header.Get("Content-Type") != "application/x-pcapng") {
+		cancel()
+		state.Fatalf("Could not open the capture stream, status: %d, type: %s", response.StatusCode, response.Header.Get("Content-Type"))
+	}
+
+	arguments := []string{"-l", "-n", "-i", "-"}
+
+	for _, server := range servers {
+		arguments = append(arguments, "-d", "tcp.port=="+server.Port+",tls")
+	}
+
+	arguments = append(arguments, "-Y", "http.request", "-T", "fields", "-E", "separator=/t", "-e", "tcp.dstport", "-e", "http.request.method", "-e", "http.request.uri")
+	stream.tshark = exec.CommandContext(state.Context(), tsharkPath, arguments...)
+	stream.tshark.Stdin = response.Body
+	stream.tshark.Stdout = stream.output
+	stream.tshark.Stderr = stream.errors
+	stream.tshark.WaitDelay = time.Second
+	err = stream.tshark.Start()
+
+	if err != nil {
+		cancel()
+		state.Fatalf("Could not start tshark, error: %s", err.Error())
+	}
+
+	state.Cleanup(stream.stop)
+	return
+}
+
+// the cancelled request ends tshark's input, tshark ends with it; a second call does nothing
+func (stream *apiStream) stop() {
+	stream.cancel()
+
+	if stream.tshark.ProcessState == nil {
+		_ = stream.tshark.Wait()
+	}
+}
+
+// wait until tshark's output passes check
+func (stream *apiStream) wait(ctx context.Context, check func(output string) (isFound bool)) (output string, err error) {
+	outputCtx, cancel := context.WithTimeout(ctx, outputTimeout)
+	defer cancel()
+	err = poll(outputCtx, func() (isDone bool, pollErr error) {
+		output = stream.output.String()
+		isDone = check(output)
+		return
+	})
+	return
+}
+
+// save the body of a GET to filePath, an error unless it is a 200 pcapng
+func (client apiClient) download(ctx context.Context, path string, filePath string) (err error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+net.JoinHostPort("127.0.0.1", client.port)+v1.BasePath+path, http.NoBody)
+
+	if err != nil {
+		return
+	}
+
+	response, err := client.client.Do(request)
+
+	if err != nil {
+		return
+	}
+
+	defer func() {
+		err = errors.Join(err, response.Body.Close())
+	}()
+
+	body, err := io.ReadAll(response.Body)
+
+	if err != nil {
+		return
+	}
+
+	if (response.StatusCode != http.StatusOK) || (response.Header.Get("Content-Type") != "application/x-pcapng") {
+		err = fmt.Errorf("GET %s answered %d: %s", path, response.StatusCode, body)
+		return
+	}
+
+	err = os.WriteFile(filePath, body, 0o600)
+	return
 }

@@ -98,3 +98,17 @@ func DefaultLimits() (limits Limits) {
 	}
 	return
 }
+
+// a flow of the history for the pcap export: Values are its fields with the session the record layer read, ClientRandom the one of its session, zero without one
+type ExportFlow struct {
+	Flow         api.Flow
+	Values       filter.Values
+	ClientRandom [32]byte
+	Messages     []ExportMessage
+}
+
+// a message and what the history kept of the payload that went on, shared with the history and never changed
+type ExportMessage struct {
+	Message api.Message
+	Payload []byte
+}

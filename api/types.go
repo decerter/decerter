@@ -26,6 +26,33 @@ const (
 	DecryptProcessing Processing = "decrypt"
 	// every message goes through the rules and can be held (decerter run --intercept)
 	InterceptProcessing Processing = "intercept"
+	// nothing is redirected, the packets of the flows in scope are recorded (decerter capture)
+	RecordProcessing Processing = "record"
+)
+
+// what decerter does: run redirects the flows through the proxy, capture records their packets
+type Mode string
+
+const (
+	RunMode     Mode = "run"
+	CaptureMode Mode = "capture"
+)
+
+// how the packets of a capture or a pcap export are written
+type CaptureFormat string
+
+const (
+	// the packets as they were captured, each TLS and DTLS session behind a Decryption Secrets Block with its key log lines
+	DSBCaptureFormat CaptureFormat = "dsb"
+	// synthesized packets with the decrypted payload, no secrets
+	PlaintextCaptureFormat CaptureFormat = "plaintext"
+)
+
+type CaptureState string
+
+const (
+	RunningCaptureState CaptureState = "running"
+	StoppedCaptureState CaptureState = "stopped"
 )
 
 // the direction of a message, or the directions a rule or the hold queue takes (both only there)
@@ -109,7 +136,7 @@ const (
 
 // GET /api/v1/status
 type Status struct {
-	Mode       string         `json:"mode"`
+	Mode       Mode           `json:"mode"`
 	Processing Processing     `json:"processing"`
 	Version    string         `json:"version"`
 	Platform   string         `json:"platform"`
@@ -119,6 +146,23 @@ type Status struct {
 	Intercept  InterceptState `json:"intercept"`
 	Rules      int            `json:"rules"`
 	History    HistoryStatus  `json:"history"`
+	Captures   CaptureStatus  `json:"captures"`
+}
+
+// the captures of the API: Available is false on decerter run, Stored counts the kept files, running ones included, and Size their bytes
+type CaptureStatus struct {
+	Available bool          `json:"available"`
+	Running   int           `json:"running"`
+	Stored    int           `json:"stored"`
+	Size      int64         `json:"size"`
+	Limits    CaptureLimits `json:"limits"`
+}
+
+// how many captures are kept and may run at once, and the bytes all their files may hold; the oldest stopped capture is removed to make room
+type CaptureLimits struct {
+	Captures int   `json:"captures"`
+	Running  int   `json:"running"`
+	Size     int64 `json:"size"`
 }
 
 // what the flow history holds now and its bounds; the oldest flows go first when a bound is reached
@@ -317,6 +361,31 @@ type Event struct {
 	Rule      *Rule           `json:"rule,omitzero"`
 	Intercept *InterceptState `json:"intercept,omitzero"`
 	Reason    string          `json:"reason,omitzero"`
+}
+
+// POST /api/v1/captures: Filter empty captures every flow in scope, Plaintext writes synthesized decrypted packets instead of the packets and their secrets
+type CaptureRequest struct {
+	Filter    string `json:"filter,omitzero"`
+	Plaintext bool   `json:"plaintext,omitzero"`
+}
+
+// a capture of the API; Size is the bytes of its file so far, DroppedPackets the packets it lost because it fell behind
+// Reason says why a capture stopped that nobody stopped: the size limit, an error, decerter stopping
+type Capture struct {
+	ID             uint64        `json:"id"`
+	Filter         string        `json:"filter"`
+	Format         CaptureFormat `json:"format"`
+	State          CaptureState  `json:"state"`
+	Started        time.Time     `json:"started"`
+	Stopped        time.Time     `json:"stopped,omitzero"`
+	Size           int64         `json:"size"`
+	DroppedPackets uint64        `json:"dropped_packets"`
+	Reason         string        `json:"reason,omitzero"`
+}
+
+// GET /api/v1/captures, oldest first
+type CaptureList struct {
+	Captures []Capture `json:"captures"`
 }
 
 // the body of every error response

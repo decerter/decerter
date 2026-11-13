@@ -117,6 +117,7 @@ func TestTypesPositive(state *testing.T) {
 		"Traffic": v1.Traffic{}, "Flow": v1.Flow{}, "FlowList": v1.FlowList{}, "Message": v1.Message{}, "MessageList": v1.MessageList{},
 		"Payload": v1.Payload{}, "MessageDetail": v1.MessageDetail{}, "Hold": v1.Hold{}, "HoldList": v1.HoldList{}, "EditRequest": v1.EditRequest{},
 		"RuleRequest": v1.RuleRequest{}, "Rule": v1.Rule{}, "RuleList": v1.RuleList{}, "Event": v1.Event{},
+		"CaptureStatus": v1.CaptureStatus{}, "CaptureLimits": v1.CaptureLimits{}, "CaptureRequest": v1.CaptureRequest{}, "Capture": v1.Capture{}, "CaptureList": v1.CaptureList{},
 	}
 
 	for name, value := range types {
@@ -200,6 +201,16 @@ func TestHandlerPositive(state *testing.T) {
 		{Method: http.MethodPost, Path: fmt.Sprintf("/holds/%d/drop", test.heldID), Status: http.StatusNotFound},
 		{Method: http.MethodPost, Path: fmt.Sprintf("/holds/%d/drop", test.dropID), Status: http.StatusNoContent},
 		{Method: http.MethodPost, Path: fmt.Sprintf("/holds/%d/forward", test.dropID), Status: http.StatusNotFound},
+		// run mode exports its history as synthesized packets, captures need decerter capture
+		{Method: http.MethodGet, Path: "/flows/pcap", Status: http.StatusOK},
+		{Method: http.MethodGet, Path: "/flows/pcap?format=plaintext&filter=tls", Status: http.StatusOK},
+		{Method: http.MethodGet, Path: "/flows/pcap?format=dsb", Status: http.StatusConflict},
+		{Method: http.MethodGet, Path: "/flows/pcap?format=pcap", Status: http.StatusBadRequest, IsInvalid: true},
+		{Method: http.MethodGet, Path: "/captures", Status: http.StatusOK},
+		{Method: http.MethodPost, Path: "/captures", Body: `{"plaintext": true}`, Status: http.StatusConflict},
+		{Method: http.MethodPost, Path: "/captures/1/stop", Status: http.StatusConflict},
+		{Method: http.MethodGet, Path: "/captures/1/pcap", Status: http.StatusConflict},
+		{Method: http.MethodGet, Path: "/captures/stream", Status: http.StatusConflict},
 	}
 	succeeded := map[string]bool{}
 
@@ -216,8 +227,10 @@ func TestHandlerPositive(state *testing.T) {
 		}
 	}
 
-	// the event stream is checked by its own test
-	succeeded["streamEvents"] = true
+	// the event stream and the capture operations are checked by their own tests
+	for _, operationID := range []string{"streamEvents", "startCapture", "stopCapture", "downloadCapture", "streamCapture"} {
+		succeeded[operationID] = true
+	}
 
 	for _, operation := range routes() {
 		if !succeeded[operation.operationID] {

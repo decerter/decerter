@@ -34,6 +34,11 @@ func getStatus(backend *Backend, writer http.ResponseWriter, request *http.Reque
 		Intercept:  interceptView(backend),
 		Rules:      0,
 		History:    backend.History.Status(),
+		Captures:   v1.CaptureStatus{Available: false, Running: 0, Stored: 0, Size: 0, Limits: v1.CaptureLimits{Captures: 0, Running: 0, Size: 0}},
+	}
+
+	if backend.Captures != nil {
+		status.Captures = backend.Captures.Status()
 	}
 
 	if backend.Rules != nil {

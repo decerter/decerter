@@ -82,7 +82,7 @@ func TestExecuteNegative(state *testing.T) {
 		{Args: []string{"run", "--uid", "1001", "--decrypt", "--intercept"}, Text: "if any flags in the group [decrypt intercept] are set none of the others can be"},
 		// a flag from the environment counts for the groups too
 		{Args: []string{"run", "--uid", "1001", "--intercept"}, Environment: map[string]string{"DECERTER_DECRYPT": "true"}, Text: "if any flags in the group [decrypt intercept] are set none of the others can be"},
-		{Args: []string{"capture", "--uid", "1001"}, Text: `required flag(s) "write" not set`},
+		{Args: []string{"capture", "--uid", "1001"}, Text: `at least one of the flags in the group [write api-socket] is required`},
 		{Args: []string{"run", "--uid", "1001", "extra"}, Text: `unknown command "extra" for "decerter run"`},
 		{Args: []string{"android", "restore", "extra"}, Text: `unknown command "extra" for "decerter android restore"`},
 		{Args: []string{"keylog", "--uid", "1001", "--dst-port", "443"}, Text: "unknown flag: --dst-port"},

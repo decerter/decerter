@@ -7,7 +7,7 @@ Requires Linux ≥ 6.6.
 
 ## Current features
 - `decerter run`: redirect the TCP and UDP flows of the selected processes through decerter's proxy. `--decrypt` prints the plaintext of TLS and DTLS 1.2 records; `--intercept` holds every record, decrypts it, runs it through the intercept rules and encrypts it again with the same session keys (the command line has the identity rule, which prints every message; more rules come from the control API).
-- Control API (`decerter run --api-socket`): HTTP on a unix socket under `/api/v1`, described by [api/openapi.yaml](api/openapi.yaml): flow history with a filter, message payloads, a live event stream, holding messages to edit, forward or drop them, match-and-replace rules, and a key log export.
+- Control API (`decerter run --api-socket`, `decerter capture --api-socket`): HTTP on a unix socket under `/api/v1`, described by [api/openapi.yaml](api/openapi.yaml): flow history with a filter, message payloads, a live event stream, holding messages to edit, forward or drop them, match-and-replace rules, a key log export and a pcapng export of the history; in capture mode also captures started, stopped and downloaded over the API and the live pcapng stream for Wireshark.
 - `decerter ui`: a minimal web page on `127.0.0.1` for the control API, run as your user: the live flow list with a filter, messages as text or hex, intercept on and off, and editing, forwarding or dropping held messages.
 - `decerter capture -w <file>|-`: write the selected flows to pcapng without redirecting anything, with a Decryption Secrets Block per TLS session, so Wireshark and tshark decrypt the file by themselves; `--plaintext` writes synthesized decrypted packets for tcpdump and other tools; `-w -` streams live into Wireshark or tshark.
 - `decerter keylog`: print the TLS secrets of the selected processes in NSS key log format (`SSLKEYLOGFILE`).
@@ -15,7 +15,7 @@ Requires Linux ≥ 6.6.
 - TLS secrets from OpenSSL 3 (Linux, amd64) and from Conscrypt's BoringSSL (Android 15 and later); TLS 1.2, TLS 1.3 and DTLS 1.2.
 - Android: rooted devices with a GKI kernel from android15-6.6 on; decerter shares netd's cgroup hooks while it runs and `decerter android restore` puts them back after a crash.
 
-Planned, not built yet: the capture endpoints of the API and an MCP server (`decerter mcp`).
+Planned, not built yet: an MCP server (`decerter mcp`).
 
 ## Requirements
 - Linux 6.6 or newer with BTF (`/sys/kernel/btf/vmlinux`) and cgroup v2 mounted at `/sys/fs/cgroup`.
@@ -111,6 +111,7 @@ api -X POST -d '{"direction": "up", "find": {"type": "regex", "value": "GET /(\\
 api -X DELETE http://decerter/api/v1/rules/1
 
 api 'http://decerter/api/v1/keylog?filter=tls' > keys.log                     # NSS key log of the TLS sessions in the history
+api -o flows.pcapng 'http://decerter/api/v1/flows/pcap?format=plaintext'      # the history as synthesized packets, edits as they went on
 ```
 
 `--api-socket` takes a socket path or `@name` for an abstract socket (Android: `@decerter-api`). A socket file gets mode 0660 and the group `decerter` when that group exists (decerter doesn't create it: `groupadd decerter`), and mode 0600 for root alone otherwise; decerter refuses a path that exists and is no socket, replaces a socket a killed decerter left, and removes its socket on exit. An abstract socket has no mode, so decerter checks the peer with `SO_PEERCRED`: root, on Android also adb's shell user (uid 2000), on Linux peers whose primary group is `decerter`. On Android, `adb forward tcp:8080 localabstract:decerter-api` makes the API reachable as `http://127.0.0.1:8080/api/v1/…` on the host; adbd connects as root after `adb root` and as shell otherwise.
@@ -147,6 +148,28 @@ sudo ./decerter capture --uid 1001 -w - | wireshark -k -i -
 sudo ./decerter capture --uid 1001 -w - | tshark -l -i - -Y 'http or http2'
 ```
 
+#### capture API
+```sh
+sudo ./decerter capture --uid 1001 --api-socket /run/decerter/api.sock        # -w can be given too, it is one more writer
+api() { sudo curl -s --unix-socket /run/decerter/api.sock "$@"; }
+
+api -X POST -d '{"filter": "tcp.dstport == 443"}' http://decerter/api/v1/captures    # {"plaintext": true} for decrypted packets
+api http://decerter/api/v1/captures                                                 # id, filter, format, state, size
+api -X POST http://decerter/api/v1/captures/1/stop
+api -o capture.pcapng http://decerter/api/v1/captures/1/pcap                        # a running capture answers 409
+tshark -r capture.pcapng -Y http
+
+# the live stream, the same as -w - for as long as the client reads; ?filter= and ?plaintext=true work here too
+api -N http://decerter/api/v1/captures/stream | sudo tshark -l -i - -Y 'http or http2'
+
+# the packets decerter still keeps of the flows of the history (the latest 64 MiB), as captured with DSBs or decrypted
+api -o flows.pcapng 'http://decerter/api/v1/flows/pcap?format=dsb&filter=tls'
+```
+
+One packet_map reader feeds every writer: the `-w` file, each capture and each stream gets its own pcapng with its own section, filter and format. The `--filter` of the command is decided once per flow; a capture's filter narrows it further (a filter that matches nothing in the kernel selection gives an empty capture, not an error). A writer that joins while flows are open first gets the packets decerter kept of them, so their TLS sessions are whole, with the DSB in front. Every writer has a queue of 16384 packets or 32 MiB: a file that falls behind loses packets and counts them (`dropped_packets`), a stream is cut off at a block boundary, and neither slows the capture or the other writers down.
+
+The capture files are in the data directory, `/run/decerter/captures` on Linux and `/data/local/tmp/decerter.d/captures` on Android, owned by root with mode 0600; the API user downloads them through the socket. At most 16 captures are kept, 4 run at once and all files together hold 1 GiB: a new capture or a growing file removes the oldest stopped capture, and a running capture that would go past the limit stops with a `reason`. The files are removed when decerter stops (they hold secrets and the next decerter can't serve them); a decerter killed with `kill -9` leaves them, and the next `decerter capture --api-socket` removes them at start. `decerter run` answers `409` to the capture operations and the stream: its proxy terminates the flows, so there is nothing on the wire to record (yet); its `GET /flows/pcap?format=plaintext` builds packets from the proxy's messages instead, and `format=dsb` needs capture mode. pcapng answers use `application/x-pcapng`, the media type Wireshark and shared-mime-info use: pcapng has no registered one, and `application/vnd.tcpdump.pcap` is the old pcap format.
+
 tshark was tested with the live stream, the Wireshark GUI was not. The file holds secrets (or, with `--plaintext`, the plaintext): it is created with mode 0600 and, under sudo, owned by the user who ran sudo. With `-w -` stdout must not be an interactive terminal, and decerter stops when the reader goes away. For tshark: it reads `-i -` through dumpcap, so your user needs dumpcap's rights (on Debian the `wireshark` group); `-l` prints each packet at once when tshark's own output goes to a pipe; curl speaks HTTP/2 by default, hence `http or http2`. `--snaplen` limits the bytes copied per packet (default and maximum 262144).
 
 ### keylog
@@ -178,6 +201,10 @@ adb shell /data/local/tmp/decerter run --uid 10092 --intercept --api-socket @dec
 adb forward tcp:8080 localabstract:decerter-api
 ./decerter ui --api-socket 127.0.0.1:8080
 
+# capture mode with the API: captures and the live stream through the same forward
+adb shell /data/local/tmp/decerter capture --uid 10092 --api-socket @decerter-api
+curl -N http://127.0.0.1:8080/api/v1/captures/stream | tshark -l -i - -Y 'http or http2'
+
 # after decerter was killed with SIGKILL: put netd's hooks back
 adb shell /data/local/tmp/decerter android restore
 ```
@@ -195,7 +222,7 @@ TLS secrets on Android come from Conscrypt's BoringSSL (`/apex/com.android.consc
 - Capture: a TLS flow is held until its secrets arrive (at most 10 s and 1 MiB per flow, 64 MiB in total; past that it is written without keys), so the file is in time order within a flow but not across flows. Packets between two selected local sockets appear twice. With `--plaintext` a gap (a truncated or lost packet) leaves the rest of that flow encrypted, and UDP GSO super-datagrams are not split.
 - `--filter`: no slices, arithmetic, functions or bitwise operators.
 - `decerter ui`: cookies are not kept apart by port, so the token cookie also goes to any other web server on `127.0.0.1` the browser visits, and such a page counts as the same site; the `Origin` and `Sec-Fetch-Site` checks keep it from changing anything, but don't open pages of other local servers you don't trust while the UI runs. `--open` puts the URL with the token on xdg-open's command line while it runs. The held list shows the deadline with the browser's clock.
-- Control API: the event stream has no replay; a client 256 events behind gets an `overflow` event and the stream ends. The history and the rules live only as long as decerter runs. `capture` has no API yet.
+- Control API: the event stream has no replay; a client 256 events behind gets an `overflow` event and the stream ends. The history and the rules live only as long as decerter runs. Captures can't be started on `decerter run`, and there is no endpoint to delete a capture (the oldest stopped one makes room). A writer that joins capture mode late can only decrypt a session whose start is still among the packets decerter keeps.
 
 ## License
 - The core (Go userspace, tools, tests) is licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`).

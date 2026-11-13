@@ -10,6 +10,7 @@ import (
 	"time"
 
 	v1 "github.com/decerter/decerter/api"
+	"github.com/decerter/decerter/internal/capture"
 	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/intercept"
 )
@@ -34,6 +35,8 @@ const (
 	eventBuffer       int           = 256
 	eventWriteTimeout time.Duration = 10 * time.Second
 	eventKeepalive    time.Duration = 15 * time.Second
+	// one write of a block of the capture stream may take this long, a reader that stops reading ends the stream
+	captureWriteTimeout time.Duration = 10 * time.Second
 	// the answer of a live socket at the path, and the time the server has to finish its requests on shutdown
 	socketProbeTimeout time.Duration = time.Second
 	shutdownTimeout    time.Duration = 2 * time.Second
@@ -42,7 +45,7 @@ const (
 
 // what does not change while decerter runs
 type Info struct {
-	Mode               string
+	Mode               v1.Mode
 	Processing         v1.Processing
 	Platform           string
 	Scope              string
@@ -54,13 +57,15 @@ type Info struct {
 
 // what the server serves: the history of the run, the hold queue and the rules; Holds and Rules are nil without --intercept
 // KeyLog looks up the NSS key log lines of a session, nil without the secrets uprobe; Bus carries the events of everything
+// Captures are the captures, the stream and the packets of decerter capture, nil on decerter run
 type Backend struct {
-	Info    Info
-	History *history.History
-	Holds   *intercept.HoldQueue
-	Rules   *intercept.RuleSet
-	Bus     *Bus
-	KeyLog  func(clientRandom [32]byte) (keyLog string, found bool, err error)
+	Info     Info
+	History  *history.History
+	Holds    *intercept.HoldQueue
+	Rules    *intercept.RuleSet
+	Bus      *Bus
+	KeyLog   func(clientRandom [32]byte) (keyLog string, found bool, err error)
+	Captures *capture.Captures
 }
 
 // the events of the server to every stream: a stream whose buffer is full is dropped instead of waiting for it
