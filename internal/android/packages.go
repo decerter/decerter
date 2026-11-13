@@ -32,8 +32,8 @@ func ReadPackages(path string) (packages []Package, err error) {
 	return
 }
 
-// one package a line: name, uid, debuggable, data directory, seinfo, gids, …; only the first two are used
-// a line without a uid is an error, the file is written by the package manager and has none
+// one package a line: name, uid, debuggable, data directory, seinfo, gids, profileable, versionCode, …; the name, the uid and the versionCode are used
+// a line without a uid is an error, the file is written by the package manager and has none; a line without a versionCode (older Android) gets 0
 func ParsePackages(reader io.Reader) (packages []Package, err error) {
 	scanner := bufio.NewScanner(reader)
 	lineNumber := 0
@@ -58,7 +58,18 @@ func ParsePackages(reader io.Reader) (packages []Package, err error) {
 			return
 		}
 
-		packages = append(packages, Package{Name: fields[0], UID: uint32(uid)})
+		versionCode := int64(0)
+
+		if len(fields) > versionCodeField {
+			versionCode, err = strconv.ParseInt(fields[versionCodeField], 10, 64)
+
+			if err != nil {
+				err = fmt.Errorf("%w: line %d: invalid versionCode %q: %w", ErrPackagesList, lineNumber, fields[versionCodeField], err)
+				return
+			}
+		}
+
+		packages = append(packages, Package{Name: fields[0], UID: uint32(uid), VersionCode: versionCode})
 	}
 
 	err = scanner.Err()
@@ -110,6 +121,27 @@ func SharingPackages(selected Package, packages []Package) (names []string) {
 func PackagesOfUID(uid uint32, packages []Package) (names []string) {
 	for _, installed := range packages {
 		if installed.UID == uid {
+			names = append(names, installed.Name)
+		}
+	}
+
+	return
+}
+
+// the Trichrome library packages of a Chrome or WebView built on Trichrome: a static shared library is installed as <name>_<versionCode>, and
+// Trichrome's versionCode is the one of the Chrome that uses it, so the library of the package is the trichromelibrary package with its versionCode
+// (com.google.android.trichromelibrary_636771938 for Chrome 636771938, beta, dev and canary have their own); none for another package
+func TrichromeLibraries(selected Package, packages []Package) (names []string) {
+	if selected.VersionCode == 0 {
+		return
+	}
+
+	suffix := "_" + strconv.FormatInt(selected.VersionCode, 10)
+
+	for _, installed := range packages {
+		prefix, isLibrary := strings.CutSuffix(installed.Name, suffix)
+
+		if isLibrary && strings.Contains(prefix, trichromeLibraryName) && (installed.Name != selected.Name) {
 			names = append(names, installed.Name)
 		}
 	}

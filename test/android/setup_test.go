@@ -83,7 +83,7 @@ func TestSetupPositive(state *testing.T) {
 		"tls      Conscrypt offsets for Android 15 on x86_64",
 		fmt.Sprintf("package  %s, uid %d", appPackage, appUID),
 		// the test app is no Flutter app: a system app or one without libflutter.so
-		"flutter  " + appPackage + ": ",
+		"app      " + appPackage + ": ",
 		"api      adb forward tcp:",
 	}
 

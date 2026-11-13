@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -20,13 +21,15 @@ import (
 )
 
 const (
-	// how often the install directories of the selected apps are looked at for a Flutter app installed or updated while decerter runs
-	flutterRescan time.Duration = 2 * time.Second
+	// how often the install directories and processes of the selected apps are looked at for a Flutter or Chromium library installed, updated or
+	// mapped while decerter runs
+	appRescan time.Duration = 2 * time.Second
 )
 
-// only on Android: BoringSSL's ssl_log_secret in Conscrypt's libssl (or the --libssl given) and in the libflutter.so of each selected Flutter app
+// only on Android: BoringSSL's ssl_log_secret in Conscrypt's libssl (or the --libssl given), in the libflutter.so of each selected Flutter app and in
+// the Chromium libraries (Chrome, Trichrome, Cronet) of the selected apps and their processes
 // a --libssl without ssl_log_secret is an OpenSSL (useBoringssl false, no error); with nothing to hook the error says why Conscrypt could not be
-// hooked, with a Flutter app to hook a Conscrypt error is a warning; seen holds every Flutter library looked at, for the rescan
+// hooked, with an app library to hook a Conscrypt error is a warning; seen holds every library looked at, for the rescan
 func (app *App) findBoringsslHooks() (hooks []boringsslHook, useBoringssl bool, seen map[string]bool, err error) {
 	seen = map[string]bool{}
 
@@ -46,7 +49,7 @@ func (app *App) findBoringsslHooks() (hooks []boringsslHook, useBoringssl bool, 
 		hooks = append(hooks, conscrypt)
 	}
 
-	hooks = append(hooks, app.findFlutterHooks(app.selectedPackages(), seen)...)
+	hooks = append(hooks, app.findAppHooks(seen)...)
 
 	if len(hooks) == 0 {
 		err = conscryptErr
@@ -95,22 +98,17 @@ func (app *App) findConscrypt() (hook boringsslHook, isOpenssl bool, err error) 
 	return
 }
 
-// the installed packages of the selected uids and of the uids of the selected pids, from packages.list; a package list that can't be read is logged
-func (app *App) selectedPackages() (names []string) {
+// the installed packages of the selected uids and of the uids of the selected pids, and every installed package, from packages.list; a package list
+// that can't be read is logged
+func (app *App) selectedPackages() (selected []android.Package, packages []android.Package) {
 	uids := slices.Clone(app.secretsUIDs())
 
 	// a pid selects the app its process belongs to
 	for _, tgid := range app.secretsTgids() {
-		info, statErr := os.Stat("/proc/" + strconv.FormatUint(uint64(tgid), 10))
+		uid, found := processUID(int(tgid))
 
-		if statErr != nil {
-			continue
-		}
-
-		status, isStatus := info.Sys().(*syscall.Stat_t)
-
-		if isStatus && !slices.Contains(uids, status.Uid) {
-			uids = append(uids, status.Uid)
+		if found && !slices.Contains(uids, uid) {
+			uids = append(uids, uid)
 		}
 	}
 
@@ -121,21 +119,52 @@ func (app *App) selectedPackages() (names []string) {
 	packages, readErr := android.ReadPackages(platform.AndroidPackagesList)
 
 	if readErr != nil {
-		app.logger.Warn("Could not read the installed packages, no Flutter app is hooked", "error", readErr, "fileName", platform.AndroidPackagesList)
+		app.logger.Warn("Could not read the installed packages, no Flutter or Chromium app is hooked", "error", readErr, "fileName", platform.AndroidPackagesList)
 		return
 	}
 
-	for _, uid := range uids {
-		names = append(names, android.PackagesOfUID(uid, packages)...)
+	for _, installed := range packages {
+		if slices.Contains(uids, installed.UID) {
+			selected = append(selected, installed)
+		}
 	}
 
 	return
 }
 
+// the owner of /proc/<pid>, the uid of the process
+func processUID(pid int) (uid uint32, found bool) {
+	info, statErr := os.Stat("/proc/" + strconv.Itoa(pid))
+
+	if statErr != nil {
+		return
+	}
+
+	status, isStatus := info.Sys().(*syscall.Stat_t)
+
+	if isStatus {
+		uid = status.Uid
+		found = true
+	}
+
+	return
+}
+
+// the BoringSSL libraries of the selected apps not in seen yet: libflutter.so and the Chromium libraries of their install directories, and the
+// Chromium libraries their running processes map (Cronet of Play services in its module directory, a library the install directories don't show)
+func (app *App) findAppHooks(seen map[string]bool) (hooks []boringsslHook) {
+	selected, packages := app.selectedPackages()
+	hooks = append(hooks, app.findFlutterHooks(selected, seen)...)
+	hooks = append(hooks, app.findChromiumHooks(selected, packages, seen)...)
+	hooks = append(hooks, app.findMappedChromiumHooks(seen)...)
+	return
+}
+
 // the libflutter.so of every package with known offsets, from its install directory under /data/app; seen holds every library looked at by its
 // path and offset, a library in it is skipped, so the rescan only reads new ones; an app whose library can't be hooked is logged, its TLS is relayed
-func (app *App) findFlutterHooks(names []string, seen map[string]bool) (hooks []boringsslHook) {
-	for _, name := range names {
+func (app *App) findFlutterHooks(selected []android.Package, seen map[string]bool) (hooks []boringsslHook) {
+	for _, current := range selected {
+		name := current.Name
 		directories, findErr := android.FindInstallDirectories(platform.AndroidAppDirectory, name)
 
 		if findErr != nil {
@@ -189,6 +218,151 @@ func (app *App) findFlutterHooks(names []string, seen map[string]bool) (hooks []
 	return
 }
 
+// the Chromium libraries of every package and of the Trichrome library it uses, from their install directories under /data/app, like
+// findFlutterHooks; a library with an unknown version or without the labels is logged, its TLS is relayed
+func (app *App) findChromiumHooks(selected []android.Package, packages []android.Package, seen map[string]bool) (hooks []boringsslHook) {
+	for _, current := range selected {
+		owners := append([]string{current.Name}, android.TrichromeLibraries(current, packages)...)
+
+		for _, owner := range owners {
+			directories, findErr := android.FindInstallDirectories(platform.AndroidAppDirectory, owner)
+
+			if findErr != nil {
+				app.logger.Warn("Could not look for the app's install directory", "error", findErr, "package", owner)
+				continue
+			}
+
+			for _, directory := range directories {
+				if seen["chromium:"+directory] {
+					continue
+				}
+
+				seen["chromium:"+directory] = true
+				libraries, libraryErr := boringssl.FindChromiumLibraries(directory, runtime.GOARCH)
+
+				if libraryErr != nil {
+					app.logger.Error("Could not hook Chromium's BoringSSL of the app, its TLS is relayed without secrets", "error", libraryErr, "package", current.Name, "directory", directory)
+					continue
+				}
+
+				for _, file := range libraries {
+					hook, isHook := app.inspectChromium(file, current.Name, seen)
+
+					if isHook {
+						hooks = append(hooks, hook)
+					}
+				}
+			}
+		}
+	}
+
+	return
+}
+
+// the Chromium libraries mapped executable by the processes of the selected uids and pids: a library file of its own, or a stored entry of an apk
+// (a mapping of an apk at a file offset inside the entry); a mapping looked at is kept in seen, so the rescan reads only new ones
+func (app *App) findMappedChromiumHooks(seen map[string]bool) (hooks []boringsslHook) {
+	uids := app.secretsUIDs()
+	tgids := app.secretsTgids()
+	entries, readErr := os.ReadDir("/proc")
+
+	if readErr != nil {
+		app.logger.Warn("Could not list the processes, no Chromium library they map is hooked", "error", readErr)
+		return
+	}
+
+	for _, entry := range entries {
+		pid, parseErr := strconv.Atoi(entry.Name())
+
+		if parseErr != nil {
+			continue
+		}
+
+		uid, found := processUID(pid)
+
+		if !found || (!slices.Contains(uids, uid) && !slices.Contains(tgids, uint32(pid))) {
+			continue
+		}
+
+		maps, mapsErr := os.ReadFile("/proc/" + entry.Name() + "/maps")
+
+		if mapsErr != nil {
+			continue
+		}
+
+		process := processName(pid)
+
+		for _, mapping := range boringssl.ExecutableMappings(string(maps)) {
+			key := "mapped:" + mapping.Path + "@" + strconv.FormatUint(mapping.Offset, 10)
+
+			if seen[key] {
+				continue
+			}
+
+			seen[key] = true
+			file, isChromium, mappingErr := boringssl.ChromiumMapping(mapping)
+
+			if mappingErr != nil {
+				app.logger.Warn("Could not read a library the process maps", "error", mappingErr, "process", process, "pid", pid, "fileName", mapping.Path)
+				continue
+			}
+
+			if !isChromium {
+				continue
+			}
+
+			hook, isHook := app.inspectChromium(file, process, seen)
+
+			if isHook {
+				hooks = append(hooks, hook)
+			}
+		}
+	}
+
+	return
+}
+
+// the package name of a process: its cmdline up to the first NUL, without the :name of a service process
+func processName(pid int) (name string) {
+	cmdline, readErr := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+
+	if readErr != nil {
+		return
+	}
+
+	name, _, _ = strings.Cut(string(cmdline), "\x00")
+	name, _, _ = strings.Cut(name, ":")
+	return
+}
+
+// a hook for one Chromium library not in seen yet, by its path and offset; a library that can't be hooked is logged with the nearest known version
+func (app *App) inspectChromium(file boringssl.LibraryFile, owner string, seen map[string]bool) (hook boringsslHook, isHook bool) {
+	key := file.Path + "@" + strconv.FormatUint(file.Offset, 10)
+
+	if seen[key] {
+		return
+	}
+
+	seen[key] = true
+	library, inspectErr := boringssl.InspectChromium(file, runtime.GOARCH)
+
+	if inspectErr != nil {
+		app.logger.Error("Could not hook Chromium's BoringSSL of the app, its TLS is relayed without secrets", "error", inspectErr, "package", owner, "library", libraryName(file), "product", library.Product, "version", library.Version)
+		return
+	}
+
+	app.logger.Info("Found Chromium library", "package", owner, "library", libraryName(file), "product", library.Product, "version", library.Version, "boringssl", library.Revision, "logSecret", fmt.Sprintf("0x%x", library.LogSecret), "labels", library.Labels)
+	hook = boringsslHook{
+		Path:    file.Path,
+		Address: library.LogSecret,
+		Offset:  library.Offset,
+		Library: fmt.Sprintf("%s %s (BoringSSL %s)", library.Product, library.Version, shortRevision(library.Revision)),
+		Package: owner,
+	}
+	isHook = true
+	return
+}
+
 // attach the ssl_log_secret uprobe to a hook's library with its offsets at index of boringssl_layout_map, the index is the attach cookie
 func (app *App) attachBoringssl(index uint32, hook boringsslHook) (closeFunction func() error, err error) {
 	err = secrets.SetBoringsslLayout(index, hook.Offset, app.secretsBpfMaps)
@@ -213,8 +387,8 @@ func (app *App) attachBoringssl(index uint32, hook boringsslHook) (closeFunction
 	return
 }
 
-// attach every BoringSSL hook, then watch them: a library with another layout than its offsets is reported once, a selected Flutter app installed or
-// updated while decerter runs is hooked; Conscrypt that can't be attached fails, a Flutter app is logged and relayed without secrets
+// attach every BoringSSL hook, then watch them: a library with another layout than its offsets is reported once, a selected Flutter or Chromium app
+// installed, updated or started while decerter runs is hooked; Conscrypt that can't be attached fails, an app library is logged and relayed without secrets
 func (app *App) attachBoringsslHooks() (err error) {
 	attached := []boringsslHook{}
 	// closed together, each close waits in the kernel
@@ -226,7 +400,7 @@ func (app *App) attachBoringsslHooks() (err error) {
 
 	for _, hook := range app.boringsslHooks {
 		if uint32(len(attached)) >= secrets.BoringsslLayouts(app.secretsBpfMaps) {
-			app.logger.Error("Could not hook the Flutter app, too many BoringSSL libraries", "package", hook.Package, "limit", secrets.BoringsslLayouts(app.secretsBpfMaps))
+			app.logger.Error("Could not hook the app, too many BoringSSL libraries", "package", hook.Package, "library", hook.Library, "limit", secrets.BoringsslLayouts(app.secretsBpfMaps))
 			continue
 		}
 
@@ -239,7 +413,7 @@ func (app *App) attachBoringsslHooks() (err error) {
 				return
 			}
 
-			app.logger.Error("Could not hook the Flutter app, its TLS is relayed without secrets", "error", attachErr, "package", hook.Package, "libssl", hook.Path)
+			app.logger.Error("Could not hook the app, its TLS is relayed without secrets", "error", attachErr, "package", hook.Package, "library", hook.Library, "libssl", hook.Path)
 			continue
 		}
 
@@ -247,7 +421,7 @@ func (app *App) attachBoringsslHooks() (err error) {
 		attached = append(attached, hook)
 	}
 
-	// BoringSSL layout checker and Flutter rescan, it owns the hooks from here on
+	// BoringSSL layout checker and app rescan, it owns the hooks from here on
 	app.waitGroup.Go(func() {
 		app.watchBoringssl(attached, app.flutterSeen)
 	})
@@ -255,13 +429,14 @@ func (app *App) attachBoringsslHooks() (err error) {
 	return
 }
 
-// a library with another layout than its offsets (a Conscrypt APEX updated apart from the release, a Flutter engine built differently) makes the
-// uprobe reject every secret instead of storing garbage: this says so once per library, its sessions stay without secrets
-// on Android it also looks for selected Flutter apps installed or updated while decerter runs and hooks them; their links are closed when it stops
+// a library with another layout than its offsets (a Conscrypt APEX updated apart from the release, a Flutter engine or Chromium built differently)
+// makes the uprobe reject every secret instead of storing garbage: this says so once per library, its sessions stay without secrets
+// on Android it also looks for selected Flutter and Chromium apps installed, updated or started while decerter runs and hooks them; their links are closed
+// when it stops
 func (app *App) watchBoringssl(hooks []boringsslHook, seen map[string]bool) {
 	layoutTicker := time.NewTicker(layoutCheck)
 	defer layoutTicker.Stop()
-	rescanTicker := time.NewTicker(flutterRescan)
+	rescanTicker := time.NewTicker(appRescan)
 	defer rescanTicker.Stop()
 	reported := map[int]bool{}
 	linkCloseFunctions := [](func() error){}
@@ -303,18 +478,18 @@ func (app *App) watchBoringssl(hooks []boringsslHook, seen map[string]bool) {
 				continue
 			}
 
-			for _, hook := range app.findFlutterHooks(app.selectedPackages(), seen) {
-				app.logger.Info("Found a selected Flutter app installed or updated while decerter runs", "package", hook.Package, "libssl", hook.Path)
+			for _, hook := range app.findAppHooks(seen) {
+				app.logger.Info("Found a library of a selected app installed, updated or started while decerter runs", "package", hook.Package, "library", hook.Library, "libssl", hook.Path)
 
 				if uint32(len(hooks)) >= secrets.BoringsslLayouts(app.secretsBpfMaps) {
-					app.logger.Error("Could not hook the Flutter app, too many BoringSSL libraries", "package", hook.Package, "limit", secrets.BoringsslLayouts(app.secretsBpfMaps))
+					app.logger.Error("Could not hook the app, too many BoringSSL libraries", "package", hook.Package, "library", hook.Library, "limit", secrets.BoringsslLayouts(app.secretsBpfMaps))
 					continue
 				}
 
 				closeFunction, attachErr := app.attachBoringssl(uint32(len(hooks)), hook)
 
 				if attachErr != nil {
-					app.logger.Error("Could not hook the Flutter app, its TLS is relayed without secrets", "error", attachErr, "package", hook.Package, "libssl", hook.Path)
+					app.logger.Error("Could not hook the app, its TLS is relayed without secrets", "error", attachErr, "package", hook.Package, "library", hook.Library, "libssl", hook.Path)
 					continue
 				}
 

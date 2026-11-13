@@ -49,9 +49,11 @@ API after the identity rule. A socket file gets mode 0660 and the group decerter
 otherwise; an abstract socket (@name, the default on Android) lets root and, on Android, adb's shell user connect.
 A held message that nobody decides goes on unchanged after --hold-timeout.
 
-The secrets come from OpenSSL 3's libssl on Linux (every 3.x release, amd64 and arm64), and on Android from Conscrypt's BoringSSL and the
-BoringSSL in libflutter.so of the selected Flutter apps (Flutter 3.24.0 to 3.50.0, by the engine's Dart version). A process with another own
-TLS library, such as Chrome, Cronet or Go programs, or a Flutter app of an unknown Dart version, is relayed without decryption.`,
+The secrets come from OpenSSL 3's libssl on Linux (every 3.x release, amd64 and arm64), and on Android from Conscrypt's BoringSSL, the
+BoringSSL in libflutter.so of the selected Flutter apps (Flutter 3.24.0 to 3.50.0, by the engine's Dart version) and the BoringSSL of
+Chrome, Cronet and WebView (Chrome 124 to 160, by the Chrome version; Trichrome's library and the Chromium libraries the app's processes
+map are found too). A process with another own TLS library, such as Go programs, or a Flutter or Chromium app of an unknown version, is
+relayed without decryption. QUIC is relayed without decryption too; --block-quic makes it fail so the apps use TLS over TCP.`,
 		Example: `  # the flows of the local user test (uid 1001), TLS decrypted
   sudo decerter run --uid 1001 --decrypt
   sudo -u test curl -s https://example.com/
@@ -69,7 +71,7 @@ TLS library, such as Chrome, Cronet or Go programs, or a Flutter app of an unkno
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			quiet(cmd)
-			err = internal.Run(selection, packageNames, scopeFilter, proxyPort, udpIdleTimeout, flowTable, decrypt, interceptFlows, apiSocket, holdTimeout, libssl, &logger)
+			err = internal.Run(selection, packageNames, scopeFilter, proxyPort, udpIdleTimeout, blockQuic, flowTable, decrypt, interceptFlows, apiSocket, holdTimeout, libssl, &logger)
 			return
 		},
 	}
@@ -86,6 +88,7 @@ func init() {
 	runCmd.Flags().Func("udp-idle-timeout", "a UDP session ends after this `duration` without a datagram in either direction (default is 30s)", parseIdleTimeout)
 	runCmd.Flags().StringVar(&apiSocket, "api-socket", "", "serve the control API on the unix socket at this `path`, @name is an abstract socket; the usual one is /run/decerter/api.sock on Linux and @decerter-api on Android (default is none)")
 	runCmd.Flags().Func("hold-timeout", "a message held over the control API goes on unchanged when nobody forwards or drops it within this `duration`, at most 1h (default is 60s)", parseHoldTimeout)
+	addBlockQuicFlag(runCmd.Flags())
 	addLibsslFlag(runCmd.Flags())
 	addFlowTableFlag(runCmd.Flags())
 	runCmd.MarkFlagsMutuallyExclusive("decrypt", "intercept")

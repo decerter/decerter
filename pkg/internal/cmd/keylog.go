@@ -23,7 +23,7 @@ func Keylog(selection redirect.Filter, packageNames []string, libssl string, log
 
 	ctx, cancel := shutdownContext()
 	defer cancel()
-	decerter := app.New(ctx, selection, nil, 0, time.Duration(0), false, true, false, nil, "", time.Duration(0), libssl, false, "", false, capturebpf.MaxSnaplen, currentPlatform, logger.Slog())
+	decerter := app.New(ctx, selection, nil, 0, time.Duration(0), false, false, true, false, nil, "", time.Duration(0), libssl, false, "", false, capturebpf.MaxSnaplen, currentPlatform, logger.Slog())
 	err = serve(ctx, &decerter, logger)
 	return
 }

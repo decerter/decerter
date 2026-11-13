@@ -98,7 +98,8 @@ func TestMain(main *testing.M) {
 }
 
 // find the tools, build what goes to the device, connect to the emulator, push and take the baseline
-// a missing SDK, AVD, root or app is errSkip, missing javac or d8 skips only the HTTPS cases, missing tshark only the capture, no Flutter SDK only the Flutter cases
+// a missing SDK, AVD, root or app is errSkip, missing javac or d8 skips only the HTTPS cases, missing tshark only the capture, no Flutter SDK only the Flutter cases,
+// no ChromePublic apk only the ChromePublic cases
 func setup() (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), buildTimeout+bootTimeout)
 	defer cancel()
@@ -153,6 +154,13 @@ func setup() (err error) {
 
 	if flutterSkipReason != "" {
 		fmt.Fprintf(os.Stderr, "the Flutter cases will skip: %s\n", flutterSkipReason)
+	}
+
+	// the ChromePublic cases skip without an apk, a failed doctored copy fails the negative one
+	chromiumAPK, chromiumDoctored, chromiumSkipReason, chromiumErr = prepareChromium(ctx, account, sdk)
+
+	if chromiumSkipReason != "" {
+		fmt.Fprintf(os.Stderr, "the ChromePublic cases will skip: %s\n", chromiumSkipReason)
 	}
 
 	tsharkPath, err = exec.LookPath("tshark")
@@ -378,9 +386,9 @@ func teardown() (err error) {
 	}
 
 	if device.Serial != "" {
-		err = errors.Join(err, uninstallFlutter(ctx))
+		err = errors.Join(err, uninstallFlutter(ctx), uninstallChromium(ctx))
 		// sync before the emulator is killed, a removal still in the page cache would be lost
-		_, removeErr := device.shell(ctx, "rm -rf "+deviceDirectory+" "+dataDirectory+" "+setupBinary+" && sync")
+		_, removeErr := device.shell(ctx, "rm -rf "+deviceDirectory+" "+dataDirectory+" "+setupBinary+" "+chromeCommandLine+" && sync")
 		removeErr = errors.Join(removeErr, removeAPIForwards(ctx))
 		left, listErr := device.shell(ctx, "ls -A /data/local/tmp")
 		err = errors.Join(err, removeErr, listErr)

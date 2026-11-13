@@ -44,8 +44,8 @@ var (
 	knownOffset = boringssl.Offset{Version: 0xd0, VersionInS3: true, S3: 0x30, ClientRandom: 0x30}
 )
 
-// what a test library has: the labels its call sites load, how many of them call a decoy instead, a version string, the first label stored as the
-// tail of a longer string, and tail calls (jmp, b) instead of calls
+// what a test library has: the labels its call sites load, how many of them call a decoy instead, a Dart version string, the first label stored as
+// the tail of a longer string, tail calls (jmp, b) instead of calls, and more NUL terminated strings (a Chromium version)
 type staticLibrary struct {
 	Machine     elf.Machine
 	Labels      []string
@@ -54,6 +54,7 @@ type staticLibrary struct {
 	MergedLabel bool
 	TailCalls   bool
 	TwoTargets  bool
+	Strings     []string
 }
 
 // the library and the file offset of its ssl_log_secret
@@ -75,6 +76,10 @@ func (library staticLibrary) build() (file []byte, logSecret uint64) {
 		rodata = append(append(rodata, fmt.Sprintf(versionFormat, library.Version)...), 0)
 		// the engine revision of Flutter 3.35.7, the table knows it
 		rodata = append(append(rodata, "035316565ad77281a75305515e4682e6c4c6f7ca"...), 0)
+	}
+
+	for _, text := range library.Strings {
+		rodata = append(append(rodata, text...), 0)
 	}
 
 	segment := append(rodata, make([]byte, rodataSize-len(rodata))...)
@@ -249,11 +254,11 @@ func writeAPK(path string, entries []apkEntry) (err error) {
 // into a longer string, decoys reached from fewer labels.
 func TestFindLogSecretByLabelsPositive(state *testing.T) {
 	positiveCases := []staticLibrary{
-		{Machine: elf.EM_X86_64, Labels: allLabels, DecoyLabels: 0, Version: "", MergedLabel: false, TailCalls: false, TwoTargets: false},
-		{Machine: elf.EM_X86_64, Labels: allLabels, DecoyLabels: 2, Version: "", MergedLabel: true, TailCalls: true, TwoTargets: false},
-		{Machine: elf.EM_X86_64, Labels: allLabels[:3], DecoyLabels: 0, Version: "", MergedLabel: false, TailCalls: false, TwoTargets: false},
-		{Machine: elf.EM_AARCH64, Labels: allLabels, DecoyLabels: 0, Version: "", MergedLabel: false, TailCalls: false, TwoTargets: false},
-		{Machine: elf.EM_AARCH64, Labels: allLabels, DecoyLabels: 3, Version: "", MergedLabel: true, TailCalls: true, TwoTargets: false},
+		{Machine: elf.EM_X86_64, Labels: allLabels, DecoyLabels: 0, Version: "", MergedLabel: false, TailCalls: false, TwoTargets: false, Strings: nil},
+		{Machine: elf.EM_X86_64, Labels: allLabels, DecoyLabels: 2, Version: "", MergedLabel: true, TailCalls: true, TwoTargets: false, Strings: nil},
+		{Machine: elf.EM_X86_64, Labels: allLabels[:3], DecoyLabels: 0, Version: "", MergedLabel: false, TailCalls: false, TwoTargets: false, Strings: nil},
+		{Machine: elf.EM_AARCH64, Labels: allLabels, DecoyLabels: 0, Version: "", MergedLabel: false, TailCalls: false, TwoTargets: false, Strings: nil},
+		{Machine: elf.EM_AARCH64, Labels: allLabels, DecoyLabels: 3, Version: "", MergedLabel: true, TailCalls: true, TwoTargets: false, Strings: nil},
 	}
 
 	for index, positive := range positiveCases {
@@ -279,10 +284,10 @@ func TestFindLogSecretByLabelsNegative(state *testing.T) {
 		Library staticLibrary
 		Err     error
 	}{
-		{Library: staticLibrary{Machine: elf.EM_X86_64, Labels: nil, DecoyLabels: 0, Version: "", MergedLabel: false, TailCalls: false, TwoTargets: false}, Err: boringssl.ErrNoLabels},
-		{Library: staticLibrary{Machine: elf.EM_X86_64, Labels: allLabels[:2], DecoyLabels: 0, Version: "", MergedLabel: false, TailCalls: false, TwoTargets: false}, Err: boringssl.ErrNoLabelCalls},
-		{Library: staticLibrary{Machine: elf.EM_AARCH64, Labels: allLabels[:6], DecoyLabels: 0, Version: "", MergedLabel: false, TailCalls: false, TwoTargets: true}, Err: boringssl.ErrAmbiguousLabelCalls},
-		{Library: staticLibrary{Machine: elf.EM_386, Labels: allLabels, DecoyLabels: 0, Version: "", MergedLabel: false, TailCalls: false, TwoTargets: false}, Err: boringssl.ErrUnsupportedMachine},
+		{Library: staticLibrary{Machine: elf.EM_X86_64, Labels: nil, DecoyLabels: 0, Version: "", MergedLabel: false, TailCalls: false, TwoTargets: false, Strings: nil}, Err: boringssl.ErrNoLabels},
+		{Library: staticLibrary{Machine: elf.EM_X86_64, Labels: allLabels[:2], DecoyLabels: 0, Version: "", MergedLabel: false, TailCalls: false, TwoTargets: false, Strings: nil}, Err: boringssl.ErrNoLabelCalls},
+		{Library: staticLibrary{Machine: elf.EM_AARCH64, Labels: allLabels[:6], DecoyLabels: 0, Version: "", MergedLabel: false, TailCalls: false, TwoTargets: true, Strings: nil}, Err: boringssl.ErrAmbiguousLabelCalls},
+		{Library: staticLibrary{Machine: elf.EM_386, Labels: allLabels, DecoyLabels: 0, Version: "", MergedLabel: false, TailCalls: false, TwoTargets: false, Strings: nil}, Err: boringssl.ErrUnsupportedMachine},
 	}
 
 	for index, negative := range negativeCases {
@@ -424,7 +429,7 @@ func TestInspectFlutterPositive(state *testing.T) {
 	for _, machine := range []elf.Machine{elf.EM_X86_64, elf.EM_AARCH64} {
 		architecture := map[elf.Machine]string{elf.EM_X86_64: "amd64", elf.EM_AARCH64: "arm64"}[machine]
 		entry := map[elf.Machine]string{elf.EM_X86_64: x86Entry, elf.EM_AARCH64: arm64Entry}[machine]
-		data, logSecret := staticLibrary{Machine: machine, Labels: allLabels, DecoyLabels: 1, Version: knownDart, MergedLabel: false, TailCalls: false, TwoTargets: false}.build()
+		data, logSecret := staticLibrary{Machine: machine, Labels: allLabels, DecoyLabels: 1, Version: knownDart, MergedLabel: false, TailCalls: false, TwoTargets: false, Strings: nil}.build()
 		directory := state.TempDir()
 		err := writeAPK(filepath.Join(directory, "base.apk"), []apkEntry{{Name: "classes.dex", Data: []byte("dex"), Stored: false, Unaligned: false}, {Name: entry, Data: data, Stored: true, Unaligned: false}})
 
@@ -465,9 +470,9 @@ func TestInspectFlutterNegative(state *testing.T) {
 		Err          error
 		Text         string
 	}{
-		{Library: staticLibrary{Machine: elf.EM_X86_64, Labels: allLabels, DecoyLabels: 0, Version: unknownDart, MergedLabel: false, TailCalls: false, TwoTargets: false}, Architecture: "amd64", Err: boringssl.ErrUnknownDartVersion, Text: "make generate-flutter-offsets"},
-		{Library: staticLibrary{Machine: elf.EM_X86_64, Labels: allLabels, DecoyLabels: 0, Version: "", MergedLabel: false, TailCalls: false, TwoTargets: false}, Architecture: "amd64", Err: boringssl.ErrNoDartVersion, Text: ""},
-		{Library: staticLibrary{Machine: elf.EM_AARCH64, Labels: allLabels, DecoyLabels: 0, Version: knownDart, MergedLabel: false, TailCalls: false, TwoTargets: false}, Architecture: "amd64", Err: boringssl.ErrWrongMachine, Text: "amd64"},
+		{Library: staticLibrary{Machine: elf.EM_X86_64, Labels: allLabels, DecoyLabels: 0, Version: unknownDart, MergedLabel: false, TailCalls: false, TwoTargets: false, Strings: nil}, Architecture: "amd64", Err: boringssl.ErrUnknownDartVersion, Text: "make generate-flutter-offsets"},
+		{Library: staticLibrary{Machine: elf.EM_X86_64, Labels: allLabels, DecoyLabels: 0, Version: "", MergedLabel: false, TailCalls: false, TwoTargets: false, Strings: nil}, Architecture: "amd64", Err: boringssl.ErrNoDartVersion, Text: ""},
+		{Library: staticLibrary{Machine: elf.EM_AARCH64, Labels: allLabels, DecoyLabels: 0, Version: knownDart, MergedLabel: false, TailCalls: false, TwoTargets: false, Strings: nil}, Architecture: "amd64", Err: boringssl.ErrWrongMachine, Text: "amd64"},
 	}
 
 	for index, negative := range negativeCases {

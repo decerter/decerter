@@ -30,10 +30,12 @@ type receivedRequest struct {
 	Version uint16
 }
 
-// an HTTPS server with eproxy's RSA certificate that answers every request with its path; MaxVersion pins TLS 1.2 or allows 1.3
+// an HTTPS server with eproxy's RSA certificate that answers every request with its path; MaxVersion pins TLS 1.2 or allows 1.3,
+// a non-empty AltSvc is sent as the Alt-Svc header of every answer
 type httpsServer struct {
 	Port       string
 	MaxVersion uint16
+	AltSvc     string
 	requests   chan receivedRequest
 }
 
@@ -78,7 +80,13 @@ func startHTTPSServers(state *testing.T, keyLog io.Writer) (servers []httpsServe
 }
 
 func startHTTPSServer(state *testing.T, pair tls.Certificate, maxVersion uint16, keyLog io.Writer) (server httpsServer) {
-	listener, listenErr := net.Listen("tcp", listenAddress)
+	server = startHTTPSServerAt(state, pair, maxVersion, keyLog, listenAddress, "")
+	return
+}
+
+// startHTTPSServer on address with an Alt-Svc header, empty is none
+func startHTTPSServerAt(state *testing.T, pair tls.Certificate, maxVersion uint16, keyLog io.Writer, address string, altSvc string) (server httpsServer) {
+	listener, listenErr := net.Listen("tcp", address)
 
 	if listenErr != nil {
 		state.Fatalf("Could not listen for the https server, error: %s", listenErr.Error())
@@ -90,7 +98,7 @@ func startHTTPSServer(state *testing.T, pair tls.Certificate, maxVersion uint16,
 		state.Fatalf("Could not read the port of the https server, error: %s", splitErr.Error())
 	}
 
-	server = httpsServer{Port: port, MaxVersion: maxVersion, requests: make(chan receivedRequest, 16)}
+	server = httpsServer{Port: port, MaxVersion: maxVersion, AltSvc: altSvc, requests: make(chan receivedRequest, 16)}
 	protocols := &http.Protocols{}
 	protocols.SetHTTP1(true)
 	httpServer := &http.Server{
@@ -138,6 +146,10 @@ func (server httpsServer) handle(writer http.ResponseWriter, request *http.Reque
 	select {
 	case server.requests <- received:
 	default:
+	}
+
+	if server.AltSvc != "" {
+		writer.Header().Set("Alt-Svc", server.AltSvc)
 	}
 
 	_, err := writer.Write([]byte(request.URL.Path))

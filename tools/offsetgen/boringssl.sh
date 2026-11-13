@@ -3,6 +3,7 @@
 
 # usage: ANDROID_NDK=<ndk dir> tools/offsetgen/boringssl.sh conscrypt 15 [16 ...] > internal/tls/boringssl/offsets_gen.go
 #        ANDROID_NDK=<ndk dir> tools/offsetgen/boringssl.sh flutter all|3.35.7 [3.50.0 ...] > internal/tls/boringssl/flutter_offsets_gen.go
+#        ANDROID_NDK=<ndk dir> tools/offsetgen/boringssl.sh chrome [branches] [126.0.6452.4 160.0.8161.0@<commit> ...] > internal/tls/boringssl/chromium_offsets_gen.go
 #
 # Both modes compile tools/offsetgen/boringssl_offset.cc against the internal
 # headers of one BoringSSL revision with the NDK's clang for x86_64 and
@@ -26,6 +27,20 @@
 # fails the run. Revisions are fetched shallow into BORINGSSL_CACHE (default
 # ~/.cache/decerter-boringssl) once; the table groups the revisions with equal
 # offsets.
+#
+# chrome: Chrome, WebView and Cronet build BoringSSL from chromium/src's DEPS
+# variable boringssl_revision. "branches" is, for every milestone from
+# CHROME_MIN_MILESTONE (default 124) on, the release branch MAJOR.0.BUILD with
+# the most version tags of chromium/src (the one stable, beta and the Play
+# builds come from), with all its tags; a version given on its own (a Cronet
+# built from a trunk build, for example) adds just that version. The DEPS of
+# the first and the last tag of a branch are read through gitiles; when they
+# differ the tags in between are bisected, so a BoringSSL roll on the branch
+# gives two ranges of patch numbers. A build of a commit without a tag of its
+# own (a chromium-browser-snapshots build) is given as version@commit. decerter reads the version from the library
+# (Chrome/<version> of the user agent, or the libcronet.<version>.so name) and
+# picks the offsets by branch and patch number. DEPS answers are cached in
+# CHROMIUM_CACHE (default ~/.cache/decerter-chromium/deps).
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -36,6 +51,9 @@ flutter_repo="${FLUTTER_REPO:-https://github.com/flutter/flutter}"
 raw="${GITHUB_RAW:-https://raw.githubusercontent.com}"
 cache="${BORINGSSL_CACHE:-${XDG_CACHE_HOME:-${HOME}/.cache}/decerter-boringssl}"
 minimum="${FLUTTER_MIN_VERSION:-3.24.0}"
+chromium_repo="${CHROMIUM_REPO:-https://chromium.googlesource.com/chromium/src}"
+chromium_cache="${CHROMIUM_CACHE:-${XDG_CACHE_HOME:-${HOME}/.cache}/decerter-chromium/deps}"
+chrome_minimum="${CHROME_MIN_MILESTONE:-124}"
 ndk="${ANDROID_NDK:?set ANDROID_NDK to an Android NDK directory}"
 # the API level only picks the bionic headers, the structs the probe reads have no libc types
 api="${ANDROID_API:-35}"
@@ -258,7 +276,208 @@ flutter() {
 	printf '}\n'
 }
 
-mode="${1:?usage: boringssl.sh conscrypt <release>... | flutter all|<version>...}"
+# the boringssl_revision of a chromium/src tag, or of a commit for version@commit, from its DEPS through gitiles (base64 with format=TEXT),
+# cached per version
+chromium_boringssl() {
+	local version="$1" file="${chromium_cache}/$1" reference="refs/tags/$1" revision
+
+	if [[ -n "${commits[$1]:-}" ]]
+	then
+		reference="${commits[$1]}"
+		file="${chromium_cache}/$1@${commits[$1]}"
+	fi
+
+	if [[ ! -s "${file}" ]]
+	then
+		mkdir -p "${chromium_cache}"
+		revision="$(curl -sSfL "${chromium_repo}/+/${reference}/DEPS?format=TEXT" | base64 -d | deps_variable boringssl_revision)"
+
+		if [[ ! "${revision}" =~ ^[0-9a-f]{40}$ ]]
+		then
+			echo "boringssl.sh: Chromium ${version}: no boringssl_revision in the DEPS of ${reference}" >&2
+			return 1
+		fi
+
+		echo "${revision}" > "${file}"
+	fi
+
+	cat "${file}"
+}
+
+# the patch number ranges of one branch with the same BoringSSL as "first last revision" lines, from the sorted patch numbers in patches;
+# the ends are read, a range whose ends differ is split in the middle until each range has one revision at both ends
+chromium_ranges() {
+	local branch="$1" low="$2" high="$3" low_revision high_revision middle
+
+	low_revision="$(chromium_boringssl "${branch}.${patches[${low}]}")"
+	high_revision="$(chromium_boringssl "${branch}.${patches[${high}]}")"
+
+	if [[ "${low_revision}" == "${high_revision}" ]]
+	then
+		echo "${patches[${low}]} ${patches[${high}]} ${low_revision}"
+		return
+	fi
+
+	if ((high == low + 1))
+	then
+		echo "${patches[${low}]} ${patches[${low}]} ${low_revision}"
+		echo "${patches[${high}]} ${patches[${high}]} ${high_revision}"
+		return
+	fi
+
+	middle=$(((low + high) / 2))
+	chromium_ranges "${branch}" "${low}" "${middle}"
+	chromium_ranges "${branch}" "${middle}" "${high}"
+}
+
+# adjacent ranges with the same revision as one, the bisection gives the middle tag to both halves
+merge_ranges() {
+	awk '
+		{
+			if ((count > 0) && (revision[count] == $3)) { last[count] = $2; next }
+			count++; first[count] = $1; last[count] = $2; revision[count] = $3
+		}
+		END { for (index_ = 1; index_ <= count; index_++) { print first[index_], last[index_], revision[index_] } }'
+}
+
+chrome() {
+	local arguments=("$@") tags argument branch major version line revisions=() revision key group first last count=0 branches=()
+	local -a patches
+
+	declare -A branch_ranges=() offsets=() groups=() covered=()
+	# version@commit: a build of a commit between two tags, a snapshot
+	declare -A commits=()
+	tags="$(git ls-remote --tags --refs "${chromium_repo}" 'refs/tags/[0-9]*.0.*' | sed -n -E 's#.*refs/tags/([0-9]+\.0\.[0-9]+\.[0-9]+)$#\1#p' | sort -t . -k1,1n -k3,3n -k4,4n)"
+
+	for argument in "${arguments[@]}"
+	do
+		if [[ "${argument}" == "branches" ]]
+		then
+			# the branch of each milestone: the MAJOR.0.BUILD with the most tags
+			while read -r branch
+			do
+				branches+=("${branch}")
+			done < <(awk -F . -v minimum="${chrome_minimum}" '
+				($1 + 0) >= (minimum + 0) { count[$1 "." $2 "." $3]++ }
+				END {
+					for (branch in count) {
+						split(branch, part, ".")
+						if (count[branch] > best_count[part[1]]) { best_count[part[1]] = count[branch]; best[part[1]] = branch }
+					}
+					for (major in best) { if (best_count[major] > 1) { print best[major] } }
+				}' <<< "${tags}" | sort -t . -k1,1n)
+
+			continue
+		fi
+
+		if [[ "${argument}" =~ ^([0-9]+\.0\.[0-9]+\.[0-9]+)@([0-9a-f]{40})$ ]]
+		then
+			commits["${BASH_REMATCH[1]}"]="${BASH_REMATCH[2]}"
+			branches+=("${BASH_REMATCH[1]}")
+			continue
+		fi
+
+		if [[ ! "${argument}" =~ ^[0-9]+\.0\.[0-9]+\.[0-9]+$ ]] || ! grep -q -x -F "${argument}" <<< "${tags}"
+		then
+			echo "boringssl.sh: ${argument} is no Chromium version tag of ${chromium_repo}" >&2
+			return 1
+		fi
+
+		branches+=("${argument}")
+	done
+
+	for argument in "${branches[@]}"
+	do
+		if [[ "${argument}" =~ ^[0-9]+\.0\.[0-9]+$ ]]
+		then
+			branch="${argument}"
+			mapfile -t patches < <(grep -F "${branch}." <<< "${tags}" | awk -F . -v branch="${branch}" '($1 "." $2 "." $3) == branch { print $4 }' | sort -n)
+		else
+			branch="${argument%.*}"
+			patches=("${argument##*.}")
+		fi
+
+		if [[ -n "${covered[${argument}]:-}" ]] || [[ -n "${covered[${branch}]:-}" ]]
+		then
+			continue
+		fi
+
+		covered["${argument}"]=1
+
+		if [[ "${argument}" == "${branch}" ]]
+		then
+			covered["${branch}"]=1
+		fi
+
+		while read -r first last revision
+		do
+			branch_ranges["${branch}"]="${branch_ranges[${branch}]:-}${first} ${last} ${revision};"
+			count=$((count + 1))
+			echo "boringssl.sh: Chromium ${branch}.${first} to ${branch}.${last}: BoringSSL ${revision}" >&2
+
+			if [[ -n "${offsets[${revision}]:-}" ]]
+			then
+				continue
+			fi
+
+			fetch_revision "${revision}"
+			offsets["${revision}"]="$(probe_offsets "${cache}/${revision}" "${revision}" | tr '\n' ';')"
+			revisions+=("${revision}")
+			groups["${offsets[${revision}]}"]="${groups[${offsets[${revision}]}]:-}${groups[${offsets[${revision}]}]:+ }${revision}"
+		done < <(chromium_ranges "${branch}" 0 $((${#patches[@]} - 1)) | merge_ranges)
+	done
+
+	printf '// SPDX-License-Identifier: AGPL-3.0-only\n\n'
+	printf '// Code generated by tools/offsetgen; DO NOT EDIT.\n\n'
+	printf 'package boringssl\n\n'
+	printf '// %d Chromium branches from milestone %s, %d ranges, %d BoringSSL revisions, %d offset sets\n' "${#branch_ranges[@]}" "${chrome_minimum}" "${count}" "${#revisions[@]}" "${#groups[@]}"
+	printf 'var chromiumBranches = map[string][]chromiumRange{\n'
+
+	for branch in $(printf '%s\n' "${!branch_ranges[@]}" | sort -t . -k1,1n -k3,3n)
+	do
+		printf '\t"%s": {\n' "${branch}"
+
+		while read -r -d ';' first last revision
+		do
+			printf '\t\t{First: %d, Last: %d, Revision: "%s"},\n' "${first}" "${last}" "${revision}"
+		done <<< "${branch_ranges[${branch}]}"
+
+		printf '\t},\n'
+	done
+
+	printf '}\n\n'
+	printf '// the BoringSSL revisions with equal offsets, in the order of their first branch\n'
+	printf 'var chromiumRevisionOffsets = []revisionOffset{\n'
+
+	for revision in "${revisions[@]}"
+	do
+		key="${offsets[${revision}]}"
+		group="${groups[${key}]:-}"
+
+		# a group is printed at its first revision
+		if [[ -z "${group}" ]]
+		then
+			continue
+		fi
+
+		unset "groups[${key}]"
+		printf '\t{\n'
+		printf '\t\tRevisions: []string{"%s"},\n' "$(sed 's/ /", "/g' <<< "${group}")"
+		printf '\t\tOffsets: map[string]Offset{\n'
+
+		while read -r -d ';' line
+		do
+			printf '\t\t\t"%s": %s,\n' "${line%% *}" "$(offset_literal "${line}")"
+		done <<< "${key}"
+
+		printf '\t\t},\n'
+		printf '\t},\n'
+	done
+
+	printf '}\n'
+}
+
+mode="${1:?usage: boringssl.sh conscrypt <release>... | flutter all|<version>... | chrome [branches] [<version>|<version>@<commit>...]}"
 shift
 
 case "${mode}" in
@@ -268,8 +487,11 @@ conscrypt)
 flutter)
 	flutter "$@"
 	;;
+chrome)
+	chrome "$@"
+	;;
 *)
-	echo "boringssl.sh: unknown mode ${mode}, use conscrypt or flutter" >&2
+	echo "boringssl.sh: unknown mode ${mode}, use conscrypt, flutter or chrome" >&2
 	exit 1
 	;;
 esac

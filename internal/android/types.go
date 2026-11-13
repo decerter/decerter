@@ -23,6 +23,10 @@ const (
 	minimumKernelMinor   int = 6
 	// apps get uids from here on, a uid below it is a system uid shared by many processes
 	firstApplicationUID uint32 = 10000
+	// the field of packages.list with the versionCode, counted from 0
+	versionCodeField int = 7
+	// the package name of Trichrome's static shared library contains this, Chrome and WebView link their native code from it
+	trichromeLibraryName string = "trichromelibrary"
 	// how many installed packages an unknown name lists
 	suggestionCount int = 5
 	// adb forward to the abstract socket of the control API, the name without the @
@@ -39,10 +43,11 @@ const (
 	binaryVersion string        = "--version"
 )
 
-// one line of /data/system/packages.list: the package name and the uid of its app in user 0
+// one line of /data/system/packages.list: the package name, the uid of its app in user 0 and its versionCode, 0 when the line has none
 type Package struct {
-	Name string
-	UID  uint32
+	Name        string
+	UID         uint32
+	VersionCode int64
 }
 
 // one line of adb devices: State is device when adb can use it, otherwise offline, unauthorized, no permissions (…)

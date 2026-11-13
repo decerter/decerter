@@ -15,8 +15,8 @@ import (
 )
 
 // redirect the selected flows through the proxy until stopped, packageNames add the uids of these Android apps to the selection; decrypt prints the plaintext of TLS and DTLS records, interceptFlows runs every message through the identity rule and prints it
-// apiSocket serves the control API on this socket, empty serves none; holdTimeout is how long a message held over the API waits for a decision
-func Run(selection redirect.Filter, packageNames []string, scopeFilter *filter.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, decrypt bool, interceptFlows bool, apiSocket string, holdTimeout time.Duration, libssl string, logger *logging.Logger) (err error) {
+// apiSocket serves the control API on this socket, empty serves none; holdTimeout is how long a message held over the API waits for a decision; blockQuic makes UDP to port 443 of the selected processes fail
+func Run(selection redirect.Filter, packageNames []string, scopeFilter *filter.Filter, proxyPort uint16, udpIdleTimeout time.Duration, blockQuic bool, flowTable bool, decrypt bool, interceptFlows bool, apiSocket string, holdTimeout time.Duration, libssl string, logger *logging.Logger) (err error) {
 	currentPlatform := platform.Detect("/")
 	selection, err = selectPackages(selection, packageNames, currentPlatform, platform.AndroidPackagesList, logger)
 
@@ -34,7 +34,7 @@ func Run(selection redirect.Filter, packageNames []string, scopeFilter *filter.F
 		rules = []intercept.Rule{intercept.IdentityRule{}}
 	}
 
-	decerter := app.New(ctx, selection, scopeFilter, proxyPort, udpIdleTimeout, flowTable, false, decrypt, rules, apiSocket, holdTimeout, libssl, false, "", false, capturebpf.MaxSnaplen, currentPlatform, logger.Slog())
+	decerter := app.New(ctx, selection, scopeFilter, proxyPort, udpIdleTimeout, blockQuic, flowTable, false, decrypt, rules, apiSocket, holdTimeout, libssl, false, "", false, capturebpf.MaxSnaplen, currentPlatform, logger.Slog())
 	err = serve(ctx, &decerter, logger)
 	return
 }

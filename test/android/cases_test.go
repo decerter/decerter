@@ -680,6 +680,12 @@ type liveCapture struct {
 // start adb exec-out with decerter capture --package packageName on the device and tshark on the host reading its stdout, and wait until decerter captures
 // adb exec-out gives decerter a pty for stdout and stderr, so its stderr goes to capture.log on the device
 func startCapture(state *testing.T, servers []httpsServer, packageName string) (capture *liveCapture) {
+	capture = startCaptureWith(state, servers, "--package "+packageName)
+	return
+}
+
+// startCapture with the selection and options of arguments
+func startCaptureWith(state *testing.T, servers []httpsServer, arguments string) (capture *liveCapture) {
 	reader, writer, pipeErr := os.Pipe()
 
 	if pipeErr != nil {
@@ -688,18 +694,18 @@ func startCapture(state *testing.T, servers []httpsServer, packageName string) (
 
 	capture = &liveCapture{output: newLockedBuffer(), errors: newLockedBuffer()}
 	decerter := deviceDecerter{Binary: decerterBinary, Name: "capture"}
-	command := fmt.Sprintf("cd %s && rm -f capture.log && exec ./%s capture -w - --package %s --dst-cidr %s 2>%s/capture.log", deviceDirectory, decerterBinary, packageName, hostCIDR, deviceDirectory)
+	command := fmt.Sprintf("cd %s && rm -f capture.log && exec ./%s capture -w - %s --dst-cidr %s 2>%s/capture.log", deviceDirectory, decerterBinary, arguments, hostCIDR, deviceDirectory)
 	capture.adb = device.execOut(state.Context(), command)
 	capture.adb.Stdout = writer
 	capture.adb.Stderr = capture.errors
-	arguments := []string{"-l", "-n", "-i", "-"}
+	tsharkArguments := []string{"-l", "-n", "-i", "-"}
 
 	for _, server := range servers {
-		arguments = append(arguments, "-d", "tcp.port=="+server.Port+",tls")
+		tsharkArguments = append(tsharkArguments, "-d", "tcp.port=="+server.Port+",tls")
 	}
 
-	arguments = append(arguments, "-Y", "http.request", "-T", "fields", "-E", "separator=/t", "-e", "tcp.dstport", "-e", "http.request.method", "-e", "http.request.uri")
-	capture.tshark = exec.CommandContext(state.Context(), tsharkPath, arguments...)
+	tsharkArguments = append(tsharkArguments, "-Y", "http.request", "-T", "fields", "-E", "separator=/t", "-e", "tcp.dstport", "-e", "http.request.method", "-e", "http.request.uri")
+	capture.tshark = exec.CommandContext(state.Context(), tsharkPath, tsharkArguments...)
 	capture.tshark.Stdin = reader
 	capture.tshark.Stdout = capture.output
 	capture.tshark.Stderr = capture.errors

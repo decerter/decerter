@@ -38,6 +38,31 @@ type FlutterLibrary struct {
 	Labels      int
 }
 
+// a Chromium library decerter can hook (Chrome, Trichrome, WebView or Cronet): where it is, what it is by its name, its version, the BoringSSL revision and
+// offsets of the version's branch, and the file offset of ssl_log_secret in File.Path with the number of key log labels that led to it
+type ChromiumLibrary struct {
+	File      LibraryFile
+	Product   string
+	Version   string
+	Revision  string
+	Offset    Offset
+	LogSecret uint64
+	Labels    int
+}
+
+// an executable mapping of a process: the mapped file and the file offset the mapping starts at
+type Mapping struct {
+	Path   string
+	Offset uint64
+}
+
+// patch numbers First to Last of a Chromium branch (MAJOR.0.BUILD) whose DEPS pin the same BoringSSL revision
+type chromiumRange struct {
+	First    int
+	Last     int
+	Revision string
+}
+
 // one Dart version of the generated table: the BoringSSL revision the Flutter engine builds with it, the Flutter releases
 // and engine revisions that were generated with it
 type dartRelease struct {

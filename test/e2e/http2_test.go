@@ -173,7 +173,7 @@ func (server testServer) answerGRPC(writer http.ResponseWriter, request *http.Re
 	writer.Header().Set("Grpc-Status", "0")
 }
 
-// the test binary as the test user's Go HTTP/2 client of one URL: large prints the protocol, length and SHA-256 of the body, grpc makes the unary call and prints the answer and grpc-status
+// the test binary as the test user's Go HTTP/2 client of one URL, or its udp client of one host:port: large prints the protocol, length and SHA-256 of the body, grpc makes the unary call and prints the answer and grpc-status
 // 64 KiB windows and 16 KiB frames make a large body many DATA frames and WINDOW_UPDATEs, a 64 KiB HPACK table makes the server's table grow
 func runClient(mode string, arguments []string) (code int) {
 	if len(arguments) != 1 {
@@ -183,6 +183,13 @@ func runClient(mode string, arguments []string) (code int) {
 	}
 
 	target := arguments[0]
+
+	// the udp mode sends datagrams, not http
+	if mode == "udp" {
+		fmt.Print(sendUDP(target))
+		return
+	}
+
 	protocols := &http.Protocols{}
 
 	if strings.HasPrefix(target, "https:") {

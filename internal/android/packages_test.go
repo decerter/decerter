@@ -20,7 +20,8 @@ const (
 	packagesList string = `com.google.android.networkstack.tethering 1073 0 /data/user_de/0/com.google.android.networkstack.tethering network_stack:privapp:targetSdkVersion=35:partition=system 3002,3003,3007,3006,3005,3004 0 35 1 @system
 com.android.proxyhandler 10092 0 /data/user_de/0/com.android.proxyhandler platform:privapp:targetSdkVersion=35:partition=system 3003 0 35 1 @system
 
-com.android.chrome 10120 0 /data/user/0/com.android.chrome default:targetSdkVersion=34:partition=product 3003 0 1 1 @system
+com.android.chrome 10120 0 /data/user/0/com.android.chrome default:targetSdkVersion=34:partition=product 3002,3003 0 636771938 1 @system
+com.google.android.trichromelibrary_636771938 10160 0 /data/user/0/com.google.android.trichromelibrary_636771938 default:targetSdkVersion=34:partition=product none 0 636771938 1 @system
 com.google.android.youtube 10167 0 /data/user/0/com.google.android.youtube default:targetSdkVersion=34:partition=product 3003 0 1545868784 1 @system
 com.android.settings 1000 0 /data/user_de/0/com.android.settings platform:system_app:targetSdkVersion=35:partition=system 1065,3002,1023,3003,3001,1007,1077,2002 0 35 1 @system
 android 1000 0 /data/system platform:system_app:targetSdkVersion=35 none 0 35 1 @system
@@ -29,12 +30,13 @@ android 1000 0 /data/system platform:system_app:targetSdkVersion=35 none 0 35 1 
 
 var (
 	installedPackages = []Package{
-		{Name: "com.google.android.networkstack.tethering", UID: 1073},
-		{Name: "com.android.proxyhandler", UID: 10092},
-		{Name: "com.android.chrome", UID: 10120},
-		{Name: "com.google.android.youtube", UID: 10167},
-		{Name: "com.android.settings", UID: 1000},
-		{Name: "android", UID: 1000},
+		{Name: "com.google.android.networkstack.tethering", UID: 1073, VersionCode: 35},
+		{Name: "com.android.proxyhandler", UID: 10092, VersionCode: 35},
+		{Name: "com.android.chrome", UID: 10120, VersionCode: 636771938},
+		{Name: "com.google.android.trichromelibrary_636771938", UID: 10160, VersionCode: 636771938},
+		{Name: "com.google.android.youtube", UID: 10167, VersionCode: 1545868784},
+		{Name: "com.android.settings", UID: 1000, VersionCode: 35},
+		{Name: "android", UID: 1000, VersionCode: 35},
 	}
 )
 
@@ -44,6 +46,14 @@ func TestParsePackagesPositive(state *testing.T) {
 
 	if (err != nil) || !reflect.DeepEqual(packages, installedPackages) {
 		state.Errorf("Test of android.ParsePackages function failed, packages should be %+v, packages: %+v, error: %v", installedPackages, packages, err)
+		return
+	}
+
+	// a line of an older release without the versionCode field
+	packages, err = ParsePackages(strings.NewReader("com.example.old 10300 0 /data/user/0/com.example.old default 3003\n"))
+
+	if (err != nil) || !reflect.DeepEqual(packages, []Package{{Name: "com.example.old", UID: 10300, VersionCode: 0}}) {
+		state.Errorf("Test of android.ParsePackages function failed, a line without versionCode should get 0, packages: %+v, error: %v", packages, err)
 		return
 	}
 
@@ -57,7 +67,7 @@ func TestParsePackagesPositive(state *testing.T) {
 
 	packages, err = ReadPackages(path)
 
-	if (err != nil) || !reflect.DeepEqual(packages, []Package{{Name: "com.example.app", UID: 10200}}) {
+	if (err != nil) || !reflect.DeepEqual(packages, []Package{{Name: "com.example.app", UID: 10200, VersionCode: 1}}) {
 		state.Errorf("Test of android.ReadPackages function failed, packages: %+v, error: %v", packages, err)
 		return
 	}
@@ -73,6 +83,7 @@ func TestParsePackagesNegative(state *testing.T) {
 		"com.example.app 4294967296 0 /data/user/0/com.example.app\n",
 		"com.example.app -1 0 /data/user/0/com.example.app\n",
 		packagesList + "com.example.broken\n",
+		"com.example.app 10200 0 /data/user/0/com.example.app default 3003 0 one 1 @null\n",
 	}
 
 	for _, negative := range negativeCases {
@@ -95,7 +106,7 @@ func TestParsePackagesNegative(state *testing.T) {
 // Test if android.ResolvePackages returns with the expected output: each name's package, in the order of the names.
 func TestResolvePackagesPositive(state *testing.T) {
 	resolved, err := ResolvePackages([]string{"com.android.chrome", "com.android.proxyhandler"}, installedPackages)
-	expected := []Package{{Name: "com.android.chrome", UID: 10120}, {Name: "com.android.proxyhandler", UID: 10092}}
+	expected := []Package{{Name: "com.android.chrome", UID: 10120, VersionCode: 636771938}, {Name: "com.android.proxyhandler", UID: 10092, VersionCode: 35}}
 
 	if (err != nil) || !reflect.DeepEqual(resolved, expected) {
 		state.Errorf("Test of android.ResolvePackages function failed, resolved should be %+v, resolved: %+v, error: %v", expected, resolved, err)
@@ -143,7 +154,7 @@ func TestSuggestPackagesPositive(state *testing.T) {
 		{Name: "ANDROID", Count: 3, Expected: []string{"android", "com.android.chrome", "com.android.settings"}},
 		// a typo has no substring match, the edit distance decides
 		{Name: "com.androd.chrome", Count: 2, Expected: []string{"com.android.chrome", "com.android.settings"}},
-		{Name: "no.such.app", Count: 10, Expected: []string{"android", "com.android.chrome", "com.android.settings", "com.android.proxyhandler", "com.google.android.youtube", "com.google.android.networkstack.tethering"}},
+		{Name: "no.such.app", Count: 10, Expected: []string{"android", "com.android.chrome", "com.android.settings", "com.android.proxyhandler", "com.google.android.youtube", "com.google.android.networkstack.tethering", "com.google.android.trichromelibrary_636771938"}},
 	}
 
 	for _, positive := range positiveCases {
@@ -196,6 +207,42 @@ func TestEditDistancePositive(state *testing.T) {
 		if (distance != positive.Expected) || (reverse != positive.Expected) {
 			state.Errorf("Test of android.editDistance function failed, %q and %q should be %d apart, distance: %d and %d", positive.First, positive.Second, positive.Expected, distance, reverse)
 			return
+		}
+	}
+}
+
+// Test if android.TrichromeLibraries returns with the expected output: Chrome's Trichrome library by Chrome's versionCode, a beta's own library.
+func TestTrichromeLibrariesPositive(state *testing.T) {
+	packages := append(slices.Clone(installedPackages), Package{Name: "com.chrome.beta", UID: 10170, VersionCode: 700000000}, Package{Name: "com.google.android.trichromelibrary.beta_700000000", UID: 10171, VersionCode: 700000000})
+	positiveCases := []struct {
+		Selected Package
+		Expected []string
+	}{
+		{Selected: packages[2], Expected: []string{"com.google.android.trichromelibrary_636771938"}},
+		{Selected: Package{Name: "com.chrome.beta", UID: 10170, VersionCode: 700000000}, Expected: []string{"com.google.android.trichromelibrary.beta_700000000"}},
+	}
+
+	for _, positive := range positiveCases {
+		if names := TrichromeLibraries(positive.Selected, packages); !slices.Equal(names, positive.Expected) {
+			state.Errorf("Test of android.TrichromeLibraries function failed, %s should use %q, names: %q", positive.Selected.Name, positive.Expected, names)
+		}
+	}
+}
+
+// Test if android.TrichromeLibraries returns with the expected output for packages without one: another versionCode, no versionCode, the library
+// itself, a static library of another name.
+func TestTrichromeLibrariesNegative(state *testing.T) {
+	packages := append(slices.Clone(installedPackages), Package{Name: "com.example.staticlib_35", UID: 10180, VersionCode: 35})
+	negativeCases := []Package{
+		packages[1],
+		{Name: "com.android.chrome", UID: 10120, VersionCode: 636771939},
+		{Name: "com.android.chrome", UID: 10120, VersionCode: 0},
+		packages[3],
+	}
+
+	for _, negative := range negativeCases {
+		if names := TrichromeLibraries(negative, packages); len(names) != 0 {
+			state.Errorf("Test of android.TrichromeLibraries function failed, %s (%d) should use none, names: %q", negative.Name, negative.VersionCode, names)
 		}
 	}
 }
@@ -279,14 +326,15 @@ func TestFindInstallDirectoriesNegative(state *testing.T) {
 }
 
 // Test if android.DescribeTLS returns with the expected output: a system app, an app without libflutter.so, a Flutter app whose library has no Dart
-// version (not hookable, isKnown false).
+// version (not hookable, isKnown false), Chrome whose Trichrome library has no Chromium version (one line for the library, isKnown false).
 func TestDescribeTLSPositive(state *testing.T) {
 	appDirectory := state.TempDir()
 	flutterLibrary := filepath.Join(appDirectory, "~~a==", "io.decerter.flutter-b==", "lib", "x86_64", "libflutter.so")
-	err := errors.Join(os.MkdirAll(filepath.Join(appDirectory, "~~c==", "io.decerter.java-d=="), 0o700), os.MkdirAll(filepath.Dir(flutterLibrary), 0o700))
+	trichromeLibrary := filepath.Join(appDirectory, "~~e==", "com.google.android.trichromelibrary_636771938-f==", "lib", "x86_64", "libmonochrome_64.so")
+	err := errors.Join(os.MkdirAll(filepath.Join(appDirectory, "~~c==", "io.decerter.java-d=="), 0o700), os.MkdirAll(filepath.Dir(flutterLibrary), 0o700), os.MkdirAll(filepath.Join(appDirectory, "~~g==", "com.android.chrome-h=="), 0o700), os.MkdirAll(filepath.Dir(trichromeLibrary), 0o700))
 
 	if err == nil {
-		err = writeELF(flutterLibrary, elf.ELFCLASS64, elf.EM_X86_64, false)
+		err = errors.Join(writeELF(flutterLibrary, elf.ELFCLASS64, elf.EM_X86_64, false), writeELF(trichromeLibrary, elf.ELFCLASS64, elf.EM_X86_64, false))
 	}
 
 	if err != nil {
@@ -299,12 +347,20 @@ func TestDescribeTLSPositive(state *testing.T) {
 		IsKnown bool
 	}{
 		{Name: "com.android.proxyhandler", Text: "a system app; Java TLS goes through Conscrypt", IsKnown: true},
-		{Name: "io.decerter.java", Text: "no libflutter.so, not a Flutter app", IsKnown: true},
+		{Name: "io.decerter.java", Text: "no libflutter.so and no Chromium library, not a Flutter or Chromium app", IsKnown: true},
 		{Name: "io.decerter.flutter", Text: "its TLS is relayed without decryption", IsKnown: false},
+		{Name: "com.android.chrome", Text: `Chrome "" of com.google.android.trichromelibrary_636771938 in ` + trichromeLibrary + `, its TLS is relayed without decryption: no Chromium version string`, IsKnown: false},
 	}
 
 	for _, positive := range positiveCases {
-		lines, isKnown, describeErr := DescribeTLS(positive.Name, appDirectory, "amd64")
+		selected := Package{Name: positive.Name, UID: 10200, VersionCode: 0}
+
+		if positive.Name == "com.android.chrome" {
+			selected = installedPackages[2]
+		}
+
+		// Chrome's own directory has no library, only the line of its Trichrome library is printed
+		lines, isKnown, describeErr := DescribeTLS(selected, installedPackages, appDirectory, "amd64")
 
 		if (describeErr != nil) || (len(lines) != 1) || !strings.Contains(lines[0], positive.Text) || (isKnown != positive.IsKnown) {
 			state.Errorf("Test of android.DescribeTLS function failed, %s should say %q, lines: %q, isKnown: %v, error: %v", positive.Name, positive.Text, lines, isKnown, describeErr)

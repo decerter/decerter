@@ -87,6 +87,7 @@ const (
 	bpfProgRestoreGetpeername6  = "restore_getpeername6"
 	bpfProgRestoreRecvmsg4      = "restore_recvmsg4"
 	bpfProgRestoreRecvmsg6      = "restore_recvmsg6"
+	bpfVarBlockQuic             = "block_quic"
 	bpfVarProxyPort             = "proxy_port"
 	bpfVarProxyTgid             = "proxy_tgid"
 	bpfVarRecordOnly            = "record_only"
@@ -166,6 +167,7 @@ type bpfMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfVariableSpecs struct {
+	BlockQuic  *ebpf.VariableSpec `ebpf:"block_quic"`
 	ProxyPort  *ebpf.VariableSpec `ebpf:"proxy_port"`
 	ProxyTgid  *ebpf.VariableSpec `ebpf:"proxy_tgid"`
 	RecordOnly *ebpf.VariableSpec `ebpf:"record_only"`
@@ -220,6 +222,7 @@ func (m *bpfMaps) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfVariables struct {
+	BlockQuic  *ebpf.Variable `ebpf:"block_quic"`
 	ProxyPort  *ebpf.Variable `ebpf:"proxy_port"`
 	ProxyTgid  *ebpf.Variable `ebpf:"proxy_tgid"`
 	RecordOnly *ebpf.Variable `ebpf:"record_only"`

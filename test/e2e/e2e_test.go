@@ -246,6 +246,12 @@ func newDecerter(state *testing.T, mode decerterMode, capturePath string, rules 
 
 // newDecerter that serves the control API on apiSocket, empty is none; the decrypt mode runs --decrypt
 func newAPIDecerter(state *testing.T, mode decerterMode, capturePath string, rules []intercept.Rule, flags redirect.Filter, scopeText string, apiSocket string) (decerter app.App) {
+	decerter = newBlockingDecerter(state, mode, capturePath, rules, flags, scopeText, apiSocket, false)
+	return
+}
+
+// newAPIDecerter with --block-quic when blockQuic is true
+func newBlockingDecerter(state *testing.T, mode decerterMode, capturePath string, rules []intercept.Rule, flags redirect.Filter, scopeText string, apiSocket string, blockQuic bool) (decerter app.App) {
 	var scopeFilter *filter.Filter
 
 	if scopeText != "" {
@@ -259,7 +265,7 @@ func newAPIDecerter(state *testing.T, mode decerterMode, capturePath string, rul
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	decerter = app.New(context.Background(), flags, scopeFilter, proxyPort, udpIdleTimeout, false, false, mode == DecryptDecerterMode, rules, apiSocket, apiHoldTimeout, "", (mode == CaptureDecerterMode) || (mode == PlaintextDecerterMode), capturePath, mode == PlaintextDecerterMode, capturebpf.MaxSnaplen, platform.Detect("/"), logger)
+	decerter = app.New(context.Background(), flags, scopeFilter, proxyPort, udpIdleTimeout, blockQuic, false, false, mode == DecryptDecerterMode, rules, apiSocket, apiHoldTimeout, "", (mode == CaptureDecerterMode) || (mode == PlaintextDecerterMode), capturePath, mode == PlaintextDecerterMode, capturebpf.MaxSnaplen, platform.Detect("/"), logger)
 	return
 }
 

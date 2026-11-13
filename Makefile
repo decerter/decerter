@@ -25,12 +25,21 @@ BORINGSSL_RELEASES ?= 15 16 17
 # Flutter stable releases whose engine's BoringSSL gets offsets: all is every x.y.z tag from FLUTTER_MIN_VERSION on
 FLUTTER_VERSIONS ?= all
 FLUTTER_MIN_VERSION ?= 3.24.0
+# Chromium versions whose BoringSSL gets offsets: branches is the release branch of every milestone from CHROME_MIN_MILESTONE on with all its tags;
+# the Cronet builds of the decerter-a15 image (GoogleTTS, YouTube, Play services, the Google app) are trunk builds of their own, and
+# 160.0.8161.0@20d5177… is the ChromePublic snapshot the Android e2e tests install
+CHROME_VERSIONS ?= branches 122.0.6238.4 125.0.6383.0 126.0.6452.4 127.0.6493.0 160.0.8161.0@20d5177b437511f9931e078aa4d3ed2ed43cc1c0
+CHROME_MIN_MILESTONE ?= 124
 # empty: the script's default ~/.cache/decerter-boringssl, one shallow checkout per BoringSSL revision
 BORINGSSL_CACHE ?=
+# empty: the script's default ~/.cache/decerter-chromium/deps, the boringssl_revision of each Chromium tag read
+CHROMIUM_CACHE ?=
 # the Flutter SDKs the Android e2e tests build their Flutter app with, colon separated
 empty :=
 space := $(empty) $(empty)
 DECERTER_E2E_FLUTTER ?= $(subst $(space),:,$(wildcard $(HOME)/.cache/decerter-flutter/*/flutter))
+# the x86_64 ChromePublic apk of a Chromium snapshot for the ChromePublic cases, default the newest one unpacked in ~/.cache/decerter-chromium
+DECERTER_E2E_CHROMIUM ?= $(lastword $(sort $(wildcard $(HOME)/.cache/decerter-chromium/snapshot-AndroidDesktop_x64-*/chrome-android-desktop/apks/ChromePublic.apk)))
 # the newest NDK of the SDK, the BoringSSL probe is compiled for x86_64 and aarch64 Android with its clang
 ANDROID_NDK ?= $(lastword $(sort $(wildcard $(HOME)/Android/Sdk/ndk/*)))
 # licenses a dependency may have, each of them can be combined with AGPL-3.0-only; any other one needs a look first
@@ -111,6 +120,12 @@ generate-flutter-offsets: ## Generate BoringSSL offsets of the Flutter engine (d
 	tmp="$$(mktemp)"; \
 	ANDROID_NDK="$(ANDROID_NDK)" FLUTTER_MIN_VERSION="$(FLUTTER_MIN_VERSION)" BORINGSSL_CACHE="$(BORINGSSL_CACHE)" ./tools/offsetgen/boringssl.sh flutter $(FLUTTER_VERSIONS) > "$$tmp" && gofmt -w "$$tmp" && mv "$$tmp" internal/tls/boringssl/flutter_offsets_gen.go || { rm -f "$$tmp"; exit 1; }
 
+# the same finder for Chrome, WebView and Cronet; their BoringSSL revision comes from chromium/src's DEPS through gitiles, no Chromium checkout
+.PHONY: generate-chrome-offsets
+generate-chrome-offsets: ## Generate BoringSSL offsets of Chrome, WebView and Cronet for CHROME_VERSIONS (default is branches, every milestone's release branch from CHROME_MIN_MILESTONE, default 124, plus the image's Cronet and the e2e snapshot; or versions like 142.0.7444.171, version@commit for a snapshot), keyed by branch and patch, with the NDK in ANDROID_NDK; DEPS answers are cached in CHROMIUM_CACHE (default is ~/.cache/decerter-chromium/deps), BoringSSL checkouts in BORINGSSL_CACHE
+	tmp="$$(mktemp)"; \
+	ANDROID_NDK="$(ANDROID_NDK)" CHROME_MIN_MILESTONE="$(CHROME_MIN_MILESTONE)" BORINGSSL_CACHE="$(BORINGSSL_CACHE)" CHROMIUM_CACHE="$(CHROMIUM_CACHE)" ./tools/offsetgen/boringssl.sh chrome $(CHROME_VERSIONS) > "$$tmp" && gofmt -w "$$tmp" && mv "$$tmp" internal/tls/boringssl/chromium_offsets_gen.go || { rm -f "$$tmp"; exit 1; }
+
 .PHONY: generate
 generate: generate-vmlinux generate-bpf-objects ## Generate vmlinux.h and bpf object files
 
@@ -153,8 +168,8 @@ test-e2e: ## Run the e2e tests with sudo, needs root and the local users test an
 # google_apis because its adbd may run as root) from ANDROID_SDK_ROOT or ~/Android/Sdk as the cold setup case, and they stop it again; javac (a JDK) and the SDK's d8 build the Conscrypt client, tshark reads the live capture
 # the Flutter test app is built as your user with each SDK of decerter_E2E_FLUTTER (colon separated), cached in ~/.cache/decerter-flutter/e2e; the first build of an SDK takes minutes
 .PHONY: test-e2e-android
-test-e2e-android: ## Run the Android e2e tests on the emulator with sudo, needs the Android SDK with the emulator and the AVD decerter-a15, a JDK and tshark; the Flutter cases need DECERTER_E2E_FLUTTER (default is every ~/.cache/decerter-flutter/*/flutter)
-	sudo DECERTER_E2E_FLUTTER="$(DECERTER_E2E_FLUTTER)" go test -tags=e2e_android -count=1 -timeout 60m ./test/android/
+test-e2e-android: ## Run the Android e2e tests on the emulator with sudo, needs the Android SDK with the emulator and the AVD decerter-a15, a JDK and tshark; the Flutter cases need DECERTER_E2E_FLUTTER (default is every ~/.cache/decerter-flutter/*/flutter), the ChromePublic cases DECERTER_E2E_CHROMIUM
+	sudo DECERTER_E2E_FLUTTER="$(DECERTER_E2E_FLUTTER)" DECERTER_E2E_CHROMIUM="$(DECERTER_E2E_CHROMIUM)" go test -tags=e2e_android -count=1 -timeout 60m ./test/android/
 
 ### Build ###
 .PHONY: build

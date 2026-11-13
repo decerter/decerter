@@ -23,6 +23,7 @@ var (
 	scopeFilter  *filter.Filter
 	libssl       string
 	flowTable    bool
+	blockQuic    bool
 )
 
 // the processes whose flows and secrets decerter reads: run, capture and keylog
@@ -37,6 +38,11 @@ func addScopeFlags(flags *pflag.FlagSet) {
 	flags.Func("dst-cidr", "only flows to this destination `prefix`, IPv4 or IPv6, a bare address is a /32 or /128, repeatable or comma separated (default is every address)", parseDestinationCIDRs)
 	flags.Func("dst-port", "only flows to this destination `port`: tcp/<port>, udp/<port> or <port> for both, repeatable or comma separated (default is every port; with --dst-cidr both have to match)", parseDestinationPorts)
 	flags.Func("filter", "narrow the flows selected by the flags above with this `filter` in a subset of Wireshark's display filter language, see decerter help filter (default is none, every selected flow is in scope)", parseFilter)
+}
+
+// QUIC is never decrypted, the flag makes the selected apps fall back to TLS over TCP: run and capture
+func addBlockQuicFlag(flags *pflag.FlagSet) {
+	flags.BoolVar(&blockQuic, "block-quic", false, "make UDP connects and sends of the selected processes to port 443 fail with EPERM, whatever the destination filters, so QUIC (HTTP/3) falls back to TLS over TCP, which decerter can decrypt; QUIC itself is only relayed (default is false)")
 }
 
 func addLibsslFlag(flags *pflag.FlagSet) {

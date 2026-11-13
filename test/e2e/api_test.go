@@ -481,8 +481,14 @@ func TestAPINegative(state *testing.T) {
 
 // decerter in mode with the control API on a socket in the test's directory
 func startAPIDecerter(state *testing.T, mode decerterMode, rules []intercept.Rule) (client apiClient) {
+	client = startBlockingAPIDecerter(state, mode, rules, false)
+	return
+}
+
+// startAPIDecerter with --block-quic when blockQuic is true
+func startBlockingAPIDecerter(state *testing.T, mode decerterMode, rules []intercept.Rule, blockQuic bool) (client apiClient) {
 	socket := filepath.Join(state.TempDir(), "api.sock")
-	decerter := newAPIDecerter(state, mode, "", rules, testFlags(), "", socket)
+	decerter := newBlockingDecerter(state, mode, "", rules, testFlags(), "", socket, blockQuic)
 	startApp(state, &decerter, mode)
 	client = apiClient{
 		client: &http.Client{
@@ -740,7 +746,13 @@ func runAsUser(ctx context.Context, runAs account, input string, name string, ar
 
 // a udp server on loopback, run as root so it is not redirected, that echoes every datagram and tells what it got; socat sends an empty datagram at the end of its input, that one is not told
 func startUDPEchoServer(state *testing.T) (port string, received chan string) {
-	connection, err := net.ListenPacket("udp", net.JoinHostPort(destinationPrefix.Addr().String(), "0"))
+	port, received = startUDPEchoServerAt(state, net.JoinHostPort(destinationPrefix.Addr().String(), "0"))
+	return
+}
+
+// startUDPEchoServer on address
+func startUDPEchoServerAt(state *testing.T, address string) (port string, received chan string) {
+	connection, err := net.ListenPacket("udp", address)
 
 	if err != nil {
 		state.Fatalf("Could not listen for the udp echo server, error: %s", err.Error())

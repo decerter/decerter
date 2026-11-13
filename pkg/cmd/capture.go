@@ -56,7 +56,7 @@ exports the flows of the history from the packets decerter keeps of them (the la
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			quiet(cmd)
-			err = internal.Capture(selection, packageNames, scopeFilter, capturePath, apiSocket, plaintext, snaplen, flowTable, libssl, defaultProxyPort, &logger)
+			err = internal.Capture(selection, packageNames, scopeFilter, capturePath, apiSocket, plaintext, snaplen, flowTable, blockQuic, libssl, defaultProxyPort, &logger)
 			return
 		},
 	}
@@ -71,6 +71,7 @@ func init() {
 	captureCmd.Flags().StringVar(&apiSocket, "api-socket", "", "serve the control API with captures and the live stream on the unix socket at this `path`, @name is an abstract socket; the usual one is /run/decerter/api.sock on Linux and @decerter-api on Android (default is none)")
 	captureCmd.Flags().BoolVar(&plaintext, "plaintext", false, "write synthesized packets with the decrypted payload to the -w file instead of the captured packets and their secrets (default is false)")
 	captureCmd.Flags().Func("snaplen", "copy at most this many `bytes` of a packet, counted from the IP header; a packet cut short can't be decrypted and is a gap in its TCP stream with --plaintext (default is 262144, the largest value)", parseSnaplen)
+	addBlockQuicFlag(captureCmd.Flags())
 	addLibsslFlag(captureCmd.Flags())
 	addFlowTableFlag(captureCmd.Flags())
 

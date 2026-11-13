@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"net/netip"
+	"reflect"
 	"syscall"
 	"testing"
 )
@@ -153,5 +154,66 @@ func TestProtocolNamePositive(state *testing.T) {
 			state.Errorf("Test of redirect.DestinationPort.String function failed, text should be %s, text: %s", positive.Expected, text)
 			return
 		}
+	}
+}
+
+// Test if redirect.loadTimeVariables returns with the expected output: --block-quic and capture mode as 1 or 0, and every value fits its volatile
+// const in the object's spec.
+func TestLoadTimeVariablesPositive(state *testing.T) {
+	positiveCases := []struct {
+		RecordOnly bool
+		BlockQuic  bool
+		Expected   map[string]any
+	}{
+		{RecordOnly: false, BlockQuic: true, Expected: map[string]any{bpfVarProxyTgid: uint32(42), bpfVarProxyPort: uint16(15001), bpfVarRecordOnly: uint8(0), bpfVarBlockQuic: uint8(1)}},
+		{RecordOnly: true, BlockQuic: true, Expected: map[string]any{bpfVarProxyTgid: uint32(42), bpfVarProxyPort: uint16(15001), bpfVarRecordOnly: uint8(1), bpfVarBlockQuic: uint8(1)}},
+		{RecordOnly: false, BlockQuic: false, Expected: map[string]any{bpfVarProxyTgid: uint32(42), bpfVarProxyPort: uint16(15001), bpfVarRecordOnly: uint8(0), bpfVarBlockQuic: uint8(0)}},
+	}
+
+	for _, positive := range positiveCases {
+		variables := loadTimeVariables(15001, 42, positive.RecordOnly, positive.BlockQuic)
+
+		if !reflect.DeepEqual(variables, positive.Expected) {
+			state.Errorf("Test of redirect.loadTimeVariables function failed, variables should be %v, variables: %v", positive.Expected, variables)
+			continue
+		}
+
+		spec, err := loadBpf()
+
+		if err != nil {
+			state.Fatalf("Test of redirect.loadTimeVariables failed, cannot read the bpf spec, error: %s", err.Error())
+		}
+
+		for name, value := range variables {
+			variable, isVariable := spec.Variables[name]
+
+			if !isVariable {
+				state.Errorf("Test of redirect.loadTimeVariables function failed, %s is no volatile const of the object", name)
+				continue
+			}
+
+			if setErr := variable.Set(value); setErr != nil {
+				state.Errorf("Test of redirect.loadTimeVariables function failed, %s can't be set to %v, error: %s", name, value, setErr.Error())
+			}
+		}
+	}
+}
+
+// Test if the volatile consts of the redirect object refuse values of another size: block_quic is a uint8, a bool or a uint32 does not fit.
+func TestLoadTimeVariablesNegative(state *testing.T) {
+	spec, err := loadBpf()
+
+	if err != nil {
+		state.Fatalf("Test of redirect.loadTimeVariables failed, cannot read the bpf spec, error: %s", err.Error())
+	}
+
+	for _, value := range []any{uint32(1), uint16(1)} {
+		if setErr := spec.Variables[bpfVarBlockQuic].Set(value); setErr == nil {
+			state.Errorf("Test of the block_quic volatile const failed, a %T should not fit", value)
+		}
+	}
+
+	if _, isVariable := spec.Variables["block_quic_typo"]; isVariable {
+		state.Errorf("Test of the redirect spec failed, an unknown name should not be a variable")
 	}
 }

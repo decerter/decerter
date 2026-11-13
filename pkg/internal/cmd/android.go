@@ -29,7 +29,7 @@ func RestoreAndroid(logger *logging.Logger) (err error) {
 		return
 	}
 
-	decerter := app.New(context.Background(), redirect.Filter{}, nil, 0, time.Duration(0), false, false, false, nil, "", time.Duration(0), "", false, "", false, capturebpf.MaxSnaplen, currentPlatform, logger.Slog())
+	decerter := app.New(context.Background(), redirect.Filter{}, nil, 0, time.Duration(0), false, false, false, false, nil, "", time.Duration(0), "", false, "", false, capturebpf.MaxSnaplen, currentPlatform, logger.Slog())
 
 	defer func() {
 		err = errors.Join(err, decerter.Shutdown())
@@ -39,8 +39,8 @@ func RestoreAndroid(logger *logging.Logger) (err error) {
 	return
 }
 
-// on the device as root: for each package, whether decerter hooks its TLS: a Flutter app with known offsets, one it can't hook, or no Flutter app
-// the lines go to stdout, a Flutter app that can't be hooked fails with ErrFlutterUnknown after all lines are printed
+// on the device as root: for each package, whether decerter hooks its TLS: a Flutter or Chromium app with known offsets, one it can't hook, or neither
+// the lines go to stdout, an app library that can't be hooked fails with ErrLibraryUnknown after all lines are printed
 func AndroidTLS(packageNames []string, logger *logging.Logger) (err error) {
 	currentPlatform := platform.Detect("/")
 
@@ -65,7 +65,7 @@ func AndroidTLS(packageNames []string, logger *logging.Logger) (err error) {
 	}
 
 	for _, selected := range resolved {
-		lines, isKnown, describeErr := android.DescribeTLS(selected.Name, platform.AndroidAppDirectory, runtime.GOARCH)
+		lines, isKnown, describeErr := android.DescribeTLS(selected, packages, platform.AndroidAppDirectory, runtime.GOARCH)
 
 		if describeErr != nil {
 			err = errors.Join(err, describeErr)
@@ -79,7 +79,7 @@ func AndroidTLS(packageNames []string, logger *logging.Logger) (err error) {
 		}
 
 		if !isKnown {
-			err = errors.Join(err, fmt.Errorf("%w: %s", ErrFlutterUnknown, selected.Name))
+			err = errors.Join(err, fmt.Errorf("%w: %s", ErrLibraryUnknown, selected.Name))
 		}
 	}
 

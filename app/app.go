@@ -66,6 +66,7 @@ type App struct {
 	scope               *filter.Filter
 	proxyPort           uint16
 	udpIdleTimeout      time.Duration
+	blockQuic           bool
 	flowTable           bool
 	keylog              bool
 	decrypt             bool
@@ -106,8 +107,9 @@ type App struct {
 // isCapture is the capture command: nothing is redirected, the packets of the selected flows and the secrets of their TLS sessions are written to the pcapng file at capturePath, empty writes none, and to the captures and streams of the API; at most snaplen bytes of a packet
 // plaintext is the --plaintext option of capture mode: the file gets synthesized packets with the decrypted payload instead of the captured packets and the secrets
 // currentPlatform decides where the netd hook state is kept and whether hooks held exclusively by another program may be shared, only on Android
+// blockQuic is --block-quic of run and capture mode: UDP connects and sends of the selected processes to port 443 fail, so QUIC falls back to TLS over TCP
 // flags is the kernel selection of --uid, --pid, --dst-cidr and --dst-port; scopeFilter the --filter, which narrows it: its kernel terms are added to the maps, the proxy and the capture writer decide the rest per flow; nil is no filter
-func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, decrypt bool, rules []intercept.Rule, apiSocket string, holdTimeout time.Duration, libssl string, isCapture bool, capturePath string, plaintext bool, snaplen uint32, currentPlatform platform.Platform, logger *slog.Logger) (app App) {
+func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter, proxyPort uint16, udpIdleTimeout time.Duration, blockQuic bool, flowTable bool, keylog bool, decrypt bool, rules []intercept.Rule, apiSocket string, holdTimeout time.Duration, libssl string, isCapture bool, capturePath string, plaintext bool, snaplen uint32, currentPlatform platform.Platform, logger *slog.Logger) (app App) {
 	appCtx, cancel := context.WithCancel(ctx)
 	app = App{
 		ctx:                 appCtx,
@@ -119,6 +121,7 @@ func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter,
 		scope:               nil,
 		proxyPort:           proxyPort,
 		udpIdleTimeout:      udpIdleTimeout,
+		blockQuic:           blockQuic,
 		flowTable:           flowTable,
 		keylog:              keylog,
 		decrypt:             decrypt,
@@ -153,9 +156,9 @@ func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter,
 	return
 }
 
-// in capture mode the redirect object only records the flows
+// in capture mode the redirect object only records the flows, with --block-quic it rejects QUIC of the selected processes in both modes
 func (app *App) LoadBpfObjects() (err error) {
-	bpfMaps, bpfPrograms, closeFunction, loadErr := redirect.LoadBpfObjects(app.proxyPort, uint32(os.Getpid()), app.isCapture)
+	bpfMaps, bpfPrograms, closeFunction, loadErr := redirect.LoadBpfObjects(app.proxyPort, uint32(os.Getpid()), app.isCapture, app.blockQuic)
 
 	if err = loadErr; err != nil {
 		app.logger.Error("Could not load redirect bpf objects", "error", err)

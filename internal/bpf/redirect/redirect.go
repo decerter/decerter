@@ -48,8 +48,27 @@ const (
 	RestoreRecvmsg6      bpf.BpfProgramName = 10 // value: "restore_recvmsg6"
 )
 
+// the volatile consts of the object by their bpf2go names, with the C types' sizes: bools are uint8 1 or 0
+func loadTimeVariables(proxyPort uint16, proxyTgid uint32, recordOnly bool, blockQuic bool) (variables map[string]any) {
+	flag := func(value bool) (byteValue uint8) {
+		if value {
+			byteValue = 1
+		}
+
+		return
+	}
+	variables = map[string]any{
+		bpfVarProxyTgid:  proxyTgid,
+		bpfVarProxyPort:  proxyPort,
+		bpfVarRecordOnly: flag(recordOnly),
+		bpfVarBlockQuic:  flag(blockQuic),
+	}
+	return
+}
+
 // recordOnly is capture mode: connect and sendmsg only record the flows, nothing is redirected to the proxy
-func LoadBpfObjects(proxyPort uint16, proxyTgid uint32, recordOnly bool) (bpfMaps map[bpf.BpfMapName]*ebpf.Map, bpfPrograms map[bpf.BpfProgramName]*ebpf.Program, closeFunction func() error, err error) {
+// blockQuic is --block-quic: UDP connects and sends of the selected processes to port 443 fail with EPERM, so QUIC falls back to TLS over TCP
+func LoadBpfObjects(proxyPort uint16, proxyTgid uint32, recordOnly bool, blockQuic bool) (bpfMaps map[bpf.BpfMapName]*ebpf.Map, bpfPrograms map[bpf.BpfProgramName]*ebpf.Program, closeFunction func() error, err error) {
 	err = rlimit.RemoveMemlock()
 
 	if err != nil {
@@ -64,18 +83,8 @@ func LoadBpfObjects(proxyPort uint16, proxyTgid uint32, recordOnly bool) (bpfMap
 		return
 	}
 
-	recordOnlyValue := uint8(0)
-
-	if recordOnly {
-		recordOnlyValue = 1
-	}
-
 	// load-time constants have to be set before the programs are loaded
-	variables := map[string]any{
-		bpfVarProxyTgid:  proxyTgid,
-		bpfVarProxyPort:  proxyPort,
-		bpfVarRecordOnly: recordOnlyValue,
-	}
+	variables := loadTimeVariables(proxyPort, proxyTgid, recordOnly, blockQuic)
 
 	for name, value := range variables {
 		err = spec.Variables[name].Set(value)

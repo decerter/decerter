@@ -23,7 +23,8 @@ directory is /data/local/tmp/decerter.d), with the control API's abstract socket
 Then decerter runs on the device as root with --package <app>, and decerter ui runs on the host.
 restore runs on the device and puts netd's cgroup hooks back after decerter was killed.
 tls runs on the device and says whether decerter decrypts an app's TLS: Java apps through Conscrypt, Flutter apps through
-the BoringSSL in their libflutter.so when decerter knows the engine's Dart version.
+the BoringSSL in their libflutter.so when decerter knows the engine's Dart version, Chrome, Cronet and WebView through their
+own BoringSSL when decerter knows the Chrome version.
 
 Without setup, the same by hand:
   adb root
@@ -48,8 +49,8 @@ KernelSU) is used through su.
 It pushes the static decerter binary for the device's ABI to /data/local/tmp/decerter: this binary for an x86_64 emulator,
 decerter-arm64 next to it (make build-arm64) for an arm64 device, or the one --binary names. It checks that decerter has
 Conscrypt offsets for the Android release, without them TLS is relayed but not decrypted. --package is looked up on
-the device the way decerter run --package does it, and decerter android tls on the device says whether it is a Flutter app and
-whether decerter knows the offsets of its Dart version. Then it forwards a host port to the control API's abstract socket
+the device the way decerter run --package does it, and decerter android tls on the device says whether it is a Flutter or
+Chromium app and whether decerter knows the offsets of its version. Then it forwards a host port to the control API's abstract socket
 @decerter-api (adb forward tcp:<port> localabstract:decerter-api), keeping the forward an earlier setup made, and prints two
 commands: decerter run on the device with --package, and decerter ui on the host.
 
@@ -75,15 +76,20 @@ removes the binary, the data directory /data/local/tmp/decerter.d and the forwar
 	}
 	androidTLSCmd = &cobra.Command{
 		Use:   "tls --package <name>",
-		Short: "Say whether decerter decrypts the TLS of an app, a Flutter app needs known offsets",
-		Long: `Runs on the device as root and prints one line per package (and per install directory during an update).
+		Short: "Say whether decerter decrypts the TLS of an app, a Flutter or Chromium app needs known offsets",
+		Long: `Runs on the device as root and prints one line per package and library (and per install directory during an update).
 Java apps get TLS from Conscrypt, whose offsets come with the Android release. A Flutter app links its own BoringSSL
 into libflutter.so (dart:io's HttpClient and SecureSocket use it): decerter reads the Dart version the engine prints,
-picks the BoringSSL offsets of that version from its table and finds ssl_log_secret through its key log labels. The
-library may be extracted (lib/<isa>/libflutter.so of the install directory) or stored uncompressed in the apk.
-A Flutter app with an unknown Dart version, or a library decerter can't read, makes the command fail after printing; decerter
-run relays such an app's TLS without decrypting it. make generate-flutter-offsets FLUTTER_VERSIONS=<release> adds a
-Flutter release to the table. decerter android setup --package runs this for its package.`,
+picks the BoringSSL offsets of that version from its table and finds ssl_log_secret through its key log labels.
+Chrome, WebView and Cronet link their own BoringSSL into libmonochrome(_64).so, libchrome.so, libwebviewchromium.so or
+libcronet.<version>.so: decerter reads the Chromium version in the library and picks the offsets of its branch. Chrome
+built on Trichrome has the library in the Trichrome library package with Chrome's versionCode, which is looked at
+too. A library may be extracted (lib/<isa>/ of the install directory) or stored uncompressed in the apk. Cronet of
+Play services lives in a module directory of com.google.android.gms; decerter run finds it in the processes' mappings.
+A library with an unknown version, or one decerter can't read (a 32 bit one too), makes the command fail after printing;
+decerter run relays such an app's TLS without decrypting it. make generate-flutter-offsets FLUTTER_VERSIONS=<release>
+adds a Flutter release to the table, make generate-chrome-offsets CHROME_VERSIONS="branches <version>" a Chromium
+version. decerter android setup --package runs this for its package.`,
 		Example: `  adb shell /data/local/tmp/decerter android tls --package com.example.app`,
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) (err error) {

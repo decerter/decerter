@@ -105,7 +105,7 @@ func Setup(ctx context.Context, options Options, output io.Writer, logger *slog.
 	}
 
 	if options.Package != "" {
-		checkFlutter(ctx, adb, options.Package, report, logger)
+		checkAppTLS(ctx, adb, options.Package, report, logger)
 	}
 
 	port, err := forwardAPI(ctx, adb, options.Port, report)
@@ -418,17 +418,17 @@ func checkPackage(ctx context.Context, adb ADB, name string, report *printer, lo
 	return
 }
 
-// decerter android tls on the device: whether the package is a Flutter app and decerter knows its engine's offsets; a Flutter app it can't hook is a warning,
-// decerter still relays its TLS, only without decryption
-func checkFlutter(ctx context.Context, adb ADB, name string, report *printer, logger *slog.Logger) {
+// decerter android tls on the device: whether the package is a Flutter or Chromium app and decerter knows its library's offsets; a library it can't hook is a
+// warning, decerter still relays its TLS, only without decryption
+func checkAppTLS(ctx context.Context, adb ADB, name string, report *printer, logger *slog.Logger) {
 	output, tlsErr := adb.rootShell(ctx, platform.AndroidBinaryPath+" android tls --package "+shellQuote(name)+" 2>/dev/null")
 
 	for line := range strings.Lines(output) {
-		report.line("flutter", "%s", strings.TrimSpace(line))
+		report.line("app", "%s", strings.TrimSpace(line))
 	}
 
 	if tlsErr != nil {
-		logger.Warn("A Flutter app decerter can't hook, its TLS is relayed without decryption: add its Flutter release with make generate-flutter-offsets", "package", name, "error", tlsErr)
+		logger.Warn("A Flutter or Chromium library decerter can't hook, its TLS is relayed without decryption: add its version with make generate-flutter-offsets or make generate-chrome-offsets", "package", name, "error", tlsErr)
 	}
 }
 

@@ -29,6 +29,10 @@
 #define OK				0
 #define NOK				1
 #define REDIRECT		2
+#define BLOCK			3
+
+//UDP destination port of QUIC (HTTP/3) that block_quic makes fail
+#define QUIC_PORT		443
 
 //prefix length of a full address in an LPM_TRIE lookup key, IPv4 is stored IPv4-mapped
 #define ADDRESS_BITS	128
@@ -57,6 +61,9 @@ volatile const uint16_t proxy_port = 0;
 
 //Value: 1 in capture mode: flows are only recorded and nothing is redirected to the proxy, 0 in run mode, set from Go before load
 volatile const uint8_t record_only = 0;
+
+//Value: 1 to make UDP connects and sends of the selected processes to port 443 fail with EPERM, so QUIC falls back to TLS over TCP, 0 to let them through, set from Go before load
+volatile const uint8_t block_quic = 0;
 
 //source and destination of a UDP packet, IPv4 stored IPv4-mapped like in struct endpoint
 struct packet_info {
@@ -155,6 +162,25 @@ bool is_selected_process(uint32_t tgid, uint32_t uid)
 	}
 
 	return false;
+}
+
+//Check if a UDP connect or send goes to port 443 from a selected process while block_quic is set, whatever the destination filters say: QUIC to any server of the app would bypass TLS over TCP
+bool is_blocked_quic(struct bpf_sock_addr *ctx)
+{
+	if ((!ctx) || (!block_quic))
+	{
+		return false;
+	}
+
+	if ((ctx->protocol != IPPROTO_UDP) || (bpf_ntohs(ctx->user_port) != QUIC_PORT))
+	{
+		return false;
+	}
+
+	uint64_t pid_tgid = bpf_get_current_pid_tgid();
+	uint64_t uid_gid = bpf_get_current_uid_gid();
+
+	return is_selected_process((uint32_t)(pid_tgid >> 32), (uint32_t)uid_gid);
 }
 
 //Check if the flow passes the port, the CIDR and the comm filter, a filter that is not set passes everything, comm has to be filled
@@ -349,12 +375,18 @@ uint16_t save_flow(struct bpf_sock_addr *ctx, struct flow *flow)
 	return OK;
 }
 
-//Record the flow if it is in scope, its destination address is already filled, REDIRECT if the destination has to be rewritten to the proxy
+//Record the flow if it is in scope, its destination address is already filled, REDIRECT if the destination has to be rewritten to the proxy, BLOCK if the connect or send has to fail
 uint16_t record_flow(struct bpf_sock_addr *ctx, struct flow *flow)
 {
 	if ((!ctx) || (!flow))
 	{
 		return NOK;
+	}
+
+	//a blocked socket is never recorded, the app gets EPERM and nothing reaches the network
+	if (is_blocked_quic(ctx))
+	{
+		return BLOCK;
 	}
 
 	switch (check_flow(ctx, flow))

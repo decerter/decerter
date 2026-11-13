@@ -48,7 +48,7 @@ const (
 	// what decerter logs per Flutter app
 	flutterHookedLog  string = `"msg":"Attached secrets uprobe"`
 	flutterUnknownLog string = `"msg":"Could not hook the Flutter app, its TLS is relayed without secrets"`
-	flutterRescanLog  string = `"msg":"Found a selected Flutter app installed or updated while decerter runs"`
+	flutterRescanLog  string = `"msg":"Found a library of a selected app installed, updated or started while decerter runs"`
 	noSecretsLog      string = `"msg":"Could not decrypt tls flow, relaying without decryption"`
 	noSecretsError    string = `"error":"no secrets for the tls session"`
 )

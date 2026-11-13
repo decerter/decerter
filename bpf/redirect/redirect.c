@@ -4,7 +4,7 @@
 
 #include "redirect.h"
 
-//Record in scope TCP and connected UDP IPv4 flows and redirect them to the proxy, the connect is always allowed
+//Record in scope TCP and connected UDP IPv4 flows and redirect them to the proxy, the connect is allowed unless block_quic rejects it
 SEC("cgroup/connect4")
 int redirect_connect4(struct bpf_sock_addr *ctx)
 {
@@ -14,6 +14,8 @@ int redirect_connect4(struct bpf_sock_addr *ctx)
 		redirect_to_proxy4(ctx);
 
 		return SOCK_ALLOW;
+	case BLOCK:
+		return SOCK_REJECT;
 	case OK:
 		return SOCK_ALLOW;
 	default:
@@ -21,7 +23,7 @@ int redirect_connect4(struct bpf_sock_addr *ctx)
 	}
 }
 
-//Record in scope TCP and connected UDP IPv6 flows and redirect them to the proxy, the connect is always allowed
+//Record in scope TCP and connected UDP IPv6 flows and redirect them to the proxy, the connect is allowed unless block_quic rejects it
 SEC("cgroup/connect6")
 int redirect_connect6(struct bpf_sock_addr *ctx)
 {
@@ -31,6 +33,8 @@ int redirect_connect6(struct bpf_sock_addr *ctx)
 		redirect_to_proxy6(ctx);
 
 		return SOCK_ALLOW;
+	case BLOCK:
+		return SOCK_REJECT;
 	case OK:
 		return SOCK_ALLOW;
 	default:
@@ -38,7 +42,7 @@ int redirect_connect6(struct bpf_sock_addr *ctx)
 	}
 }
 
-//Record the original destination of in scope unconnected UDP IPv4 sends and redirect them to the proxy, the datagram is always allowed
+//Record the original destination of in scope unconnected UDP IPv4 sends and redirect them to the proxy, the datagram is allowed unless block_quic rejects it
 SEC("cgroup/sendmsg4")
 int redirect_sendmsg4(struct bpf_sock_addr *ctx)
 {
@@ -48,6 +52,8 @@ int redirect_sendmsg4(struct bpf_sock_addr *ctx)
 		redirect_to_proxy4(ctx);
 
 		return SOCK_ALLOW;
+	case BLOCK:
+		return SOCK_REJECT;
 	case OK:
 		return SOCK_ALLOW;
 	default:
@@ -55,7 +61,7 @@ int redirect_sendmsg4(struct bpf_sock_addr *ctx)
 	}
 }
 
-//Record the original destination of in scope unconnected UDP IPv6 sends and redirect them to the proxy, the datagram is always allowed
+//Record the original destination of in scope unconnected UDP IPv6 sends and redirect them to the proxy, the datagram is allowed unless block_quic rejects it
 SEC("cgroup/sendmsg6")
 int redirect_sendmsg6(struct bpf_sock_addr *ctx)
 {
@@ -65,6 +71,8 @@ int redirect_sendmsg6(struct bpf_sock_addr *ctx)
 		redirect_to_proxy6(ctx);
 
 		return SOCK_ALLOW;
+	case BLOCK:
+		return SOCK_REJECT;
 	case OK:
 		return SOCK_ALLOW;
 	default:
