@@ -3,9 +3,14 @@
 .DEFAULT_GOAL := help
 
 # Build Default Variables
-VERSION ?= development
+# the tag git describe finds, or v0.0.0-<commits since the root commit>-g<hash> before the first tag, -dirty with uncommitted changes (tools/release/version.sh)
+VERSION ?= $(shell ./tools/release/version.sh)
 GITCOMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null)
-BUILDDATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+# the commit time, not the time of the build, so one commit builds the same binary
+SOURCE_DATE_EPOCH ?= $(shell git log -1 --format=%ct 2>/dev/null)
+BUILDDATE ?= $(shell TZ=UTC git log -1 --format=%cd --date=format-local:%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+# make release refuses a dirty work tree unless this is 1
+ALLOW_DIRTY ?= 0
 LDFLAGS ?= -s -w -buildid= -X github.com/decerter/decerter/api.buildVersion=$(VERSION) -X github.com/decerter/decerter/api.gitCommit=$(GITCOMMIT) -X github.com/decerter/decerter/api.buildDate=$(BUILDDATE)
 VMLINUX ?= ./bpf/vmlinux.h
 VMLINUX_ARM64 ?= ./bpf/vmlinux-arm64.h
@@ -184,6 +189,11 @@ build-arm64: ## Run static go build for linux/arm64 from the committed bpf objec
 verify-static: build build-arm64 ## Check that both binaries are statically linked
 	file decerter | grep -q 'statically linked'
 	file decerter-arm64 | grep -q 'statically linked'
+
+# one tarball per architecture with the binary, the licenses, the third-party notices of go-licenses and the docs, see tools/release/release.sh
+.PHONY: release
+release: ## Build the static linux/amd64 and linux/arm64 release tarballs and their SHA256SUMS into dist/, versioned by git describe; refused on a dirty work tree unless ALLOW_DIRTY=1, nothing is tagged or published
+	VERSION="$(VERSION)" LDFLAGS="$(LDFLAGS)" SOURCE_DATE_EPOCH="$(SOURCE_DATE_EPOCH)" ALLOW_DIRTY="$(ALLOW_DIRTY)" GO_LICENSES="$$(go env GOPATH)/bin/go-licenses" DIST=dist ./tools/release/release.sh
 
 .PHONY: build-debug
 build-debug: ## Run go build with race condition detection (dynamic, never shipped)

@@ -11,7 +11,7 @@ var (
 	keylogCmd = &cobra.Command{
 		Use:   "keylog",
 		Short: "Print the TLS secrets of the selected processes in NSS key log format",
-		Long: `Print the TLS secrets of the processes selected with --uid and --pid on stdout in NSS key log format, the format of
+		Long: `Print the TLS secrets of the processes selected with --uid, --pid and --package on stdout in NSS key log format, the format of
 SSLKEYLOGFILE, until stopped. Only the secrets uprobe is attached: nothing is redirected or captured.
 A TLS 1.3 session gets four lines (both handshake and both application traffic secrets), a TLS 1.2 or DTLS 1.2
 session one CLIENT_RANDOM line. The logs go to stderr.`,

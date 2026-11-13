@@ -4,3 +4,4 @@ bpf/vmlinux-arm64.h
 /decerter
 /decerter-debug
 /decerter-arm64
+/dist/

@@ -16,7 +16,8 @@ var (
 	buildDate    string
 )
 
-// one line for decerter --version: version (commit …, date …, go version os/arch), the date is the build date from the Makefile or the commit time from the build info
+// one line for decerter --version: version (commit …, date …, go version os/arch), the date is the commit time, from the Makefile or the build info
+// make build and make release set the version of tools/release/version.sh; a plain go build gets the pseudo-version Go writes, v0.0.0-<time>-<hash>
 func Version() (version string) {
 	version, commit, date := buildVersion, gitCommit, buildDate
 	info, ok := debug.ReadBuildInfo()
