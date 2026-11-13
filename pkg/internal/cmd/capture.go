@@ -17,7 +17,7 @@ import (
 func Capture(selection redirect.Filter, scopeFilter *filter.Filter, capturePath string, plaintext bool, snaplen uint32, flowTable bool, libssl string, proxyPort uint16, logger *logging.Logger) (err error) {
 	ctx, cancel := shutdownContext()
 	defer cancel()
-	decerter := app.New(ctx, selection, scopeFilter, proxyPort, time.Duration(0), flowTable, false, false, nil, libssl, capturePath, plaintext, snaplen, platform.Detect("/"), logger.Slog())
+	decerter := app.New(ctx, selection, scopeFilter, proxyPort, time.Duration(0), flowTable, false, false, nil, "", time.Duration(0), libssl, capturePath, plaintext, snaplen, platform.Detect("/"), logger.Slog())
 	err = serve(ctx, &decerter, logger)
 	return
 }

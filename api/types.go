@@ -1,0 +1,325 @@
+// SPDX-License-Identifier: MIT
+
+package api
+
+import (
+	"time"
+)
+
+// the request and response bodies of the control API, as api/openapi.yaml describes them; this file and the spec are MIT, so any client can use them
+// JSON names are snake_case, times are RFC 3339 with nanoseconds, payloads are lowercase hex plus an escaped text form
+
+const (
+	// every path of this version of the API starts with it, a breaking change goes to /api/v2
+	BasePath string = "/api/v1"
+	// the host name clients put in the URL, the server does not look at it: curl --unix-socket /run/decerter/api.sock http://decerter/api/v1/status
+	HostName string = "decerter"
+)
+
+// what the proxy does with the flows in scope
+type Processing string
+
+const (
+	// relayed unchanged, the history has the flows but no payloads
+	RelayProcessing Processing = "relay"
+	// relayed unchanged, the decrypted TLS and DTLS application data is in the history (decerter run --decrypt)
+	DecryptProcessing Processing = "decrypt"
+	// every message goes through the rules and can be held (decerter run --intercept)
+	InterceptProcessing Processing = "intercept"
+)
+
+// the direction of a message, or the directions a rule or the hold queue takes (both only there)
+type Direction string
+
+const (
+	// client to server
+	UpDirection Direction = "up"
+	// server to client
+	DownDirection Direction = "down"
+	BothDirection Direction = "both"
+)
+
+// what one message of a flow is
+type Layer string
+
+const (
+	// one read of a plain tcp stream
+	TCPLayer Layer = "tcp"
+	// the application data of one TLS record
+	TLSLayer Layer = "tls"
+	// one udp datagram
+	UDPLayer Layer = "udp"
+	// the application data of one DTLS record
+	DTLSLayer Layer = "dtls"
+)
+
+type FlowState string
+
+const (
+	OpenFlowState   FlowState = "open"
+	ClosedFlowState FlowState = "closed"
+)
+
+// how a message got into the history
+type Origin string
+
+const (
+	// it went through the rules (and the hold queue)
+	RulesOrigin Origin = "rules"
+	// it went on before the rules could see it, the TLS secrets came too late
+	PassedOrigin Origin = "passed"
+	// a decrypted copy of what was relayed unchanged (--decrypt)
+	ObservedOrigin Origin = "observed"
+)
+
+type Verdict string
+
+const (
+	ForwardVerdict Verdict = "forward"
+	DropVerdict    Verdict = "drop"
+)
+
+// how a value of a request is written
+type ValueType string
+
+const (
+	// the UTF-8 bytes of the string as they are
+	TextValueType ValueType = "text"
+	// two hex digits per byte, white space is ignored
+	HexValueType ValueType = "hex"
+	// only the find value of a rule: an RE2 expression over the bytes, the replace value is its template ($1, ${name}, $$)
+	RegexValueType ValueType = "regex"
+)
+
+type EventType string
+
+const (
+	FlowOpenedEventType       EventType = "flow_opened"
+	FlowClosedEventType       EventType = "flow_closed"
+	MessageEventType          EventType = "message"
+	HeldEventType             EventType = "held"
+	HoldEditedEventType       EventType = "hold_edited"
+	HoldReleasedEventType     EventType = "hold_released"
+	RuleAddedEventType        EventType = "rule_added"
+	RuleDeletedEventType      EventType = "rule_deleted"
+	InterceptChangedEventType EventType = "intercept_changed"
+	// the last event of a stream whose client read too slowly, the server ends the stream after it
+	OverflowEventType EventType = "overflow"
+)
+
+// GET /api/v1/status
+type Status struct {
+	Mode       string         `json:"mode"`
+	Processing Processing     `json:"processing"`
+	Version    string         `json:"version"`
+	Platform   string         `json:"platform"`
+	Scope      string         `json:"scope"`
+	TLSSecrets bool           `json:"tls_secrets"`
+	Started    time.Time      `json:"started"`
+	Intercept  InterceptState `json:"intercept"`
+	Rules      int            `json:"rules"`
+	History    HistoryStatus  `json:"history"`
+}
+
+// what the flow history holds now and its bounds; the oldest flows go first when a bound is reached
+type HistoryStatus struct {
+	Flows        int           `json:"flows"`
+	OpenFlows    int           `json:"open_flows"`
+	Messages     int           `json:"messages"`
+	PayloadBytes int64         `json:"payload_bytes"`
+	EvictedFlows uint64        `json:"evicted_flows"`
+	Limits       HistoryLimits `json:"limits"`
+}
+
+type HistoryLimits struct {
+	Flows            int   `json:"flows"`
+	Messages         int   `json:"messages"`
+	FlowMessages     int   `json:"flow_messages"`
+	PayloadBytes     int64 `json:"payload_bytes"`
+	FlowPayloadBytes int64 `json:"flow_payload_bytes"`
+}
+
+// GET /api/v1/status and PUT /api/v1/intercept; Available is false unless decerter runs with --intercept, holding and rules need the intercept pipeline
+type InterceptState struct {
+	Available          bool      `json:"available"`
+	Enabled            bool      `json:"enabled"`
+	Filter             string    `json:"filter"`
+	Direction          Direction `json:"direction"`
+	HoldTimeoutSeconds float64   `json:"hold_timeout_seconds"`
+	Held               int       `json:"held"`
+}
+
+// PUT /api/v1/intercept: Filter empty holds every message of the direction, Direction empty is up
+type InterceptRequest struct {
+	Enabled   bool      `json:"enabled"`
+	Filter    string    `json:"filter,omitzero"`
+	Direction Direction `json:"direction,omitzero"`
+}
+
+type Process struct {
+	PID     uint32 `json:"pid"`
+	UID     uint32 `json:"uid"`
+	GID     uint32 `json:"gid"`
+	Comm    string `json:"comm"`
+	Cmdline string `json:"cmdline"`
+	Exe     string `json:"exe"`
+}
+
+// the ClientHello the client sent and, once the record layer has seen the ServerHello, the session; ClientRandom names the session in a key log
+type TLSInfo struct {
+	OfferedVersion string   `json:"offered_version"`
+	ServerName     string   `json:"server_name"`
+	OfferedALPN    []string `json:"offered_alpn"`
+	ClientRandom   string   `json:"client_random,omitzero"`
+	Version        string   `json:"version,omitzero"`
+	CipherSuite    string   `json:"cipher_suite,omitzero"`
+	ALPN           string   `json:"alpn,omitzero"`
+}
+
+// one direction of a flow: Bytes and Datagrams (udp) are what the proxy sent on, known when the flow is closed; Messages counts its messages in the history
+type Traffic struct {
+	Bytes     int64 `json:"bytes"`
+	Datagrams int64 `json:"datagrams"`
+	Messages  int   `json:"messages"`
+}
+
+// one flow of the history: a redirected tcp connection or udp session in scope
+// Layer is the layer of its messages, empty until it has one; Truncated is true when messages or payload bytes of it were not kept
+type Flow struct {
+	ID           uint64    `json:"id"`
+	Protocol     string    `json:"protocol"`
+	State        FlowState `json:"state"`
+	Opened       time.Time `json:"opened"`
+	Closed       time.Time `json:"closed,omitzero"`
+	Client       string    `json:"client"`
+	Destination  string    `json:"destination"`
+	Cookie       uint64    `json:"cookie"`
+	Process      Process   `json:"process"`
+	TLS          *TLSInfo  `json:"tls,omitzero"`
+	Layer        Layer     `json:"layer,omitzero"`
+	Up           Traffic   `json:"up"`
+	Down         Traffic   `json:"down"`
+	PayloadBytes int64     `json:"payload_bytes"`
+	Truncated    bool      `json:"truncated"`
+}
+
+// GET /api/v1/flows, newest first; NextCursor is empty on the last page
+type FlowList struct {
+	Flows      []Flow `json:"flows"`
+	NextCursor string `json:"next_cursor,omitzero"`
+}
+
+// one message of a flow without its payload
+// Length is what went on (0 for a drop), OriginalLength what the peer sent; StoredLength is how much of the payload the history kept
+type Message struct {
+	ID             uint64    `json:"id"`
+	FlowID         uint64    `json:"flow_id"`
+	Direction      Direction `json:"direction"`
+	Layer          Layer     `json:"layer"`
+	Time           time.Time `json:"time"`
+	Origin         Origin    `json:"origin"`
+	Verdict        Verdict   `json:"verdict"`
+	Edited         bool      `json:"edited"`
+	Length         int       `json:"length"`
+	OriginalLength int       `json:"original_length"`
+	StoredLength   int       `json:"stored_length"`
+}
+
+// GET /api/v1/flows/{id}/messages, oldest first
+type MessageList struct {
+	Messages   []Message `json:"messages"`
+	NextCursor string    `json:"next_cursor,omitzero"`
+}
+
+// a window of a payload: Offset and Length are the bytes in it, Total what there is; Escaped keeps printable ASCII and writes \n, \r, \t, \\ and \xNN for the rest
+type Payload struct {
+	Offset  int    `json:"offset"`
+	Length  int    `json:"length"`
+	Total   int    `json:"total"`
+	Hex     string `json:"hex"`
+	Escaped string `json:"escaped"`
+}
+
+// GET /api/v1/messages/{id}: Payload is what went on, Original what the peer sent when a rule or an edit changed it, the same window of both
+type MessageDetail struct {
+	Message
+	Payload  Payload  `json:"payload"`
+	Original *Payload `json:"original,omitzero"`
+}
+
+// a held message waiting for forward, drop or the timeout; its id is the message id
+// Payload is the whole payload that goes on when it is forwarded, left out in events
+type Hold struct {
+	ID             uint64    `json:"id"`
+	FlowID         uint64    `json:"flow_id"`
+	Direction      Direction `json:"direction"`
+	Layer          Layer     `json:"layer"`
+	HeldAt         time.Time `json:"held_at"`
+	Deadline       time.Time `json:"deadline"`
+	Edited         bool      `json:"edited"`
+	Length         int       `json:"length"`
+	OriginalLength int       `json:"original_length"`
+	Payload        *Payload  `json:"payload,omitzero"`
+}
+
+// GET /api/v1/holds, oldest first
+type HoldList struct {
+	Holds []Hold `json:"holds"`
+}
+
+// a value of a request: text, hex, or for the find value of a rule a regex
+type Value struct {
+	Type  ValueType `json:"type"`
+	Value string    `json:"value"`
+}
+
+// PUT /api/v1/holds/{id}: the new payload, text or hex
+type EditRequest struct {
+	Payload Value `json:"payload"`
+}
+
+// POST /api/v1/rules: every occurrence of Find in a message of the direction, layer and filter becomes Replace
+// Direction empty is both, Layer empty is every layer, Filter empty every flow
+type RuleRequest struct {
+	Filter    string    `json:"filter,omitzero"`
+	Direction Direction `json:"direction,omitzero"`
+	Layer     Layer     `json:"layer,omitzero"`
+	Find      Value     `json:"find"`
+	Replace   Value     `json:"replace"`
+}
+
+// a rule of the API, Hits counts the messages it changed
+type Rule struct {
+	ID        uint64    `json:"id"`
+	Created   time.Time `json:"created"`
+	Filter    string    `json:"filter"`
+	Direction Direction `json:"direction"`
+	Layer     Layer     `json:"layer,omitzero"`
+	Find      Value     `json:"find"`
+	Replace   Value     `json:"replace"`
+	Hits      uint64    `json:"hits"`
+}
+
+// GET /api/v1/rules, in the order they run
+type RuleList struct {
+	Rules []Rule `json:"rules"`
+}
+
+// one event of GET /api/v1/events, the data of a server-sent event whose event name is Type; Seq counts the events of the server
+// the field of the type is set: Flow for flow_*, Message for message (no payload), Hold for held and hold_* (no payload, Reason for hold_released), Rule for rule_*, Intercept for intercept_changed; Reason for overflow
+type Event struct {
+	Seq       uint64          `json:"seq"`
+	Type      EventType       `json:"type"`
+	Time      time.Time       `json:"time"`
+	Flow      *Flow           `json:"flow,omitzero"`
+	Message   *Message        `json:"message,omitzero"`
+	Hold      *Hold           `json:"hold,omitzero"`
+	Rule      *Rule           `json:"rule,omitzero"`
+	Intercept *InterceptState `json:"intercept,omitzero"`
+	Reason    string          `json:"reason,omitzero"`
+}
+
+// the body of every error response
+type Error struct {
+	Error string `json:"error"`
+}

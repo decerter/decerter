@@ -186,7 +186,7 @@ func newTestApp(ctx context.Context, flags redirect.Filter, filterText string, o
 	}
 
 	logger := slog.New(slog.NewTextHandler(output, nil))
-	app = New(ctx, flags, scopeFilter, 15001, 30*time.Second, false, false, false, nil, "", "", false, 0, platform.Platform{Type: platform.LinuxType}, logger)
+	app = New(ctx, flags, scopeFilter, 15001, 30*time.Second, false, false, false, nil, "", time.Minute, "", "", false, 0, platform.Platform{Type: platform.LinuxType}, logger)
 	return
 }
 

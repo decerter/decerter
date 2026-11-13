@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/decerter/decerter/internal/bpf/redirect"
+	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/tlsrecord"
 )
@@ -83,7 +84,7 @@ func TestProcessPositive(state *testing.T) {
 
 	for _, positive := range positiveCases {
 		output := &bytes.Buffer{}
-		pipeline := intercept.New(rules, output)
+		pipeline := intercept.New(rules, output, nil)
 		message := pipeline.Message(intercept.Flow{Comm: "curl"}, tlsrecord.ClientDirection, intercept.TCPLayer, []byte(positive.Input))
 		result := pipeline.Process(context.Background(), message, logger)
 
@@ -141,7 +142,7 @@ func TestProcessNegative(state *testing.T) {
 	logs := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(logs, nil))
 	rules := []intercept.Rule{failingRule{}, badRule{}, replaceRule{old: []byte("a"), new: []byte("b")}, dropRule{marker: []byte("b")}, replaceRule{old: []byte("b"), new: []byte("c")}}
-	pipeline := intercept.New(rules, nil)
+	pipeline := intercept.New(rules, nil, nil)
 	message := pipeline.Message(intercept.Flow{}, tlsrecord.ServerDirection, intercept.UDPLayer, []byte("a"))
 	result := pipeline.Process(state.Context(), message, logger)
 
@@ -201,8 +202,8 @@ func TestPrintPositive(state *testing.T) {
 
 	// a pipeline without output prints nothing, Show marks the message as passed
 	output := &bytes.Buffer{}
-	intercept.New(nil, nil).Show(intercept.Message{Flow: flow, Layer: intercept.UDPLayer, Plain: []byte("x")})
-	intercept.New(nil, output).Show(intercept.Message{Flow: flow, Direction: tlsrecord.ServerDirection, Layer: intercept.DTLSLayer, Plain: []byte("x")})
+	intercept.New(nil, nil, nil).Show(intercept.Message{Flow: flow, Layer: intercept.UDPLayer, Plain: []byte("x")})
+	intercept.New(nil, output, nil).Show(intercept.Message{Flow: flow, Direction: tlsrecord.ServerDirection, Layer: intercept.DTLSLayer, Plain: []byte("x")})
 
 	if !strings.HasPrefix(output.String(), "dtls pid=4242") || !strings.Contains(output.String(), "direction=down id=0 length=1 shown=1 passed\n") {
 		state.Errorf("Test of intercept.Show function failed, output: %q", output.String())
@@ -248,8 +249,9 @@ func TestFlowOfPositive(state *testing.T) {
 		Client:              netip.AddrPort{},
 	}
 	client := netip.MustParseAddrPort("[::1]:5000")
-	expected := intercept.Flow{Cookie: 3, IPProtocol: 17, Client: client, Destination: flow.OriginalDestination, Tgid: 10, UID: 10092, Comm: "app", Session: tlsrecord.Session{}}
-	interceptFlow := intercept.FlowOf(3, flow, client)
+	values := filter.Values{PID: 10, UID: 10092, GID: 10092, Comm: "app", TLS: filter.AbsentTLSState}
+	expected := intercept.Flow{ID: 5, Cookie: 3, IPProtocol: 17, Client: client, Destination: flow.OriginalDestination, Tgid: 10, UID: 10092, Comm: "app", Session: tlsrecord.Session{}, Values: values}
+	interceptFlow := intercept.FlowOf(5, 3, flow, client, values)
 
 	if !reflect.DeepEqual(interceptFlow, expected) {
 		state.Errorf("Test of intercept.FlowOf function failed, flow should be %+v, flow: %+v", expected, interceptFlow)
@@ -257,7 +259,7 @@ func TestFlowOfPositive(state *testing.T) {
 	}
 
 	// one counter for every flow of the pipeline, ids start at 1
-	pipeline := intercept.New(nil, nil)
+	pipeline := intercept.New(nil, nil, nil)
 
 	for expectedID := range uint64(3) {
 		message := pipeline.Message(interceptFlow, tlsrecord.ClientDirection, intercept.UDPLayer, nil)

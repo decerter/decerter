@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -28,12 +29,13 @@ const (
 )
 
 // what a test server serves: plain HTTP when Certificate is nil, TLS pinned to Version and CipherSuite when they are set
-// the server picks HTTP/2 through ALPN when HTTP2 is true, or with prior knowledge on plain HTTP
+// the server picks HTTP/2 through ALPN when HTTP2 is true, or with prior knowledge on plain HTTP; KeyLog gets the server's NSS key log lines, nil is none
 type serverConfig struct {
 	Certificate *certificate
 	Version     uint16
 	CipherSuite uint16
 	HTTP2       bool
+	KeyLog      io.Writer
 }
 
 // what a test server saw of one request
@@ -76,6 +78,7 @@ func startServer(state *testing.T, config serverConfig) (server testServer) {
 			MinVersion:   tls.VersionTLS12,
 			MaxVersion:   tls.VersionTLS13,
 			NextProtos:   []string{"http/1.1"},
+			KeyLogWriter: config.KeyLog,
 		}
 
 		if config.Version != 0 {

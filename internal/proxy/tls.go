@@ -152,6 +152,9 @@ func stopOrPrint(conn *tlsrecord.Conn, observer *TLSObserver, records []tlsrecor
 		}
 
 		printRecord(observer.flow, observer.client, session, record)
+		flow := observer.interceptFlow
+		flow.Session = session
+		observer.recorder.Observe(flow, record.Direction, intercept.TLSLayer, record.Payload)
 	}
 
 	if err != nil {

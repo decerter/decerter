@@ -4,7 +4,8 @@
 # usage: tools/licensecheck/spdx.sh
 #
 # Checks that every source file of the repository (tracked, or new and not ignored) has an SPDX line with the license of
-# its part, as docs/development.md lists them: the first line, or the second after a shebang.
+# its part, as docs/development.md lists them: the first line, or the second after a shebang. The control API contract
+# (api/openapi.yaml and its Go types in api/types.go) is MIT, so any client can be generated from it.
 # Not checked: the vendored libbpf headers in bpf/include/bpf, which keep the headers libbpf ships, and the bpf2go output,
 # which is generated from AGPL inputs; offsets_gen.go is written with its SPDX line by tools/offsetgen and is checked.
 set -euo pipefail
@@ -31,6 +32,9 @@ while IFS= read -r -d '' file; do
 	bpf/*.c | bpf/*.h)
 		allowed='GPL-2.0-only OR MIT'
 		;;
+	api/openapi.yaml | api/types.go)
+		allowed='MIT'
+		;;
 	*)
 		allowed='AGPL-3.0-only|AGPL-3.0-only AND BSD-3-Clause'
 		;;
@@ -49,7 +53,7 @@ while IFS= read -r -d '' file; do
 		echo "$file: SPDX-License-Identifier is \"$license\", expected ${allowed//|/ or }" >&2
 		status=1
 	fi
-done < <(git ls-files -z --cached --others --exclude-standard -- '*.go' '*.c' '*.h' '*.cc' '*.java' '*.sh' 'Makefile' '**/Makefile')
+done < <(git ls-files -z --cached --others --exclude-standard -- '*.go' '*.c' '*.h' '*.cc' '*.java' '*.sh' '*.yaml' '*.yml' 'Makefile' '**/Makefile')
 
 if [ "$status" -eq 0 ]; then
 	echo "SPDX lines are fine in $checked source files"

@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 
 	"github.com/decerter/decerter/internal/bpf/redirect"
+	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/tlsrecord"
 )
 
@@ -30,7 +31,9 @@ const (
 
 // the intercepted connection a message belongs to: the redirected socket of the app and the original destination
 // Session is the TLS session of a TLSLayer or DTLSLayer flow, Version and CipherSuite are zero for any other
+// ID names the flow in the API's history, 0 without one; Values is what the scope filter knew of the flow when it was decided, the filters of API rules and of the hold queue are tested on it
 type Flow struct {
+	ID          uint64
 	Cookie      uint64
 	IPProtocol  uint8
 	Client      netip.AddrPort
@@ -39,6 +42,7 @@ type Flow struct {
 	UID         uint32
 	Comm        string
 	Session     tlsrecord.Session
+	Values      filter.Values
 }
 
 // one piece of a flow on its way through the proxy, Plain is what the peer sent, decrypted for TLS
@@ -52,12 +56,28 @@ type Message struct {
 	Plain     []byte
 }
 
+// how a message reached the recorder of a pipeline
+type Origin string
+
+const (
+	// the message went through the rules
+	RulesOrigin Origin = "rules"
+	// the message went on before the rules could see it, the secrets of its TLS session came too late
+	PassedOrigin Origin = "passed"
+	// a decrypted copy of what the relay sent on unchanged (--decrypt), no rule saw it
+	ObservedOrigin Origin = "observed"
+)
+
+// gets every message of a pipeline after the rules, with what they made of it; it must not block and must not keep message.Plain or result.Plain without a copy
+type Recorder func(message Message, result Result, origin Origin)
+
 // the rules every message of the intercepted flows goes through, in order, and where the messages are printed, nil prints nothing
-// counter gives the message ids of the flows, one shared counter is enough for an id that is unique per flow
+// counter gives the message ids of the flows, one shared counter makes an id unique in the process; recorder gets every message after the rules, nil is none
 type Pipeline struct {
-	rules   []Rule
-	output  io.Writer
-	counter *atomic.Uint64
+	rules    []Rule
+	output   io.Writer
+	recorder Recorder
+	counter  *atomic.Uint64
 }
 
 // what the pipeline made of a message: Plain goes on when Verdict is ForwardVerdict, Changed is true when it differs from what the peer sent
@@ -67,18 +87,20 @@ type Result struct {
 	Changed bool
 }
 
-func New(rules []Rule, output io.Writer) (pipeline *Pipeline) {
+func New(rules []Rule, output io.Writer, recorder Recorder) (pipeline *Pipeline) {
 	pipeline = &Pipeline{
-		rules:   rules,
-		output:  output,
-		counter: &atomic.Uint64{},
+		rules:    rules,
+		output:   output,
+		recorder: recorder,
+		counter:  &atomic.Uint64{},
 	}
 	return
 }
 
-// the flow of a redirected socket, the TLS session is added once it is known
-func FlowOf(cookie uint64, flow redirect.Flow, client netip.AddrPort) (interceptFlow Flow) {
+// the flow of a redirected socket, the TLS session is added once it is known; id is the flow of the API's history, 0 without one
+func FlowOf(id uint64, cookie uint64, flow redirect.Flow, client netip.AddrPort, values filter.Values) (interceptFlow Flow) {
 	interceptFlow = Flow{
+		ID:          id,
 		Cookie:      cookie,
 		IPProtocol:  flow.IPProtocol,
 		Client:      client,
@@ -87,6 +109,7 @@ func FlowOf(cookie uint64, flow redirect.Flow, client netip.AddrPort) (intercept
 		UID:         flow.UID,
 		Comm:        flow.Comm,
 		Session:     tlsrecord.Session{},
+		Values:      values,
 	}
 	return
 }
@@ -146,16 +169,24 @@ func (pipeline *Pipeline) Process(ctx context.Context, message Message, logger *
 		Print(pipeline.output, message, result, false)
 	}
 
+	if pipeline.recorder != nil {
+		pipeline.recorder(message, result, RulesOrigin)
+	}
+
 	return
 }
 
-// a message that went on before the rules could see it, the secrets of its TLS session came too late: only printed
+// a message that went on before the rules could see it, the secrets of its TLS session came too late: only printed and recorded
 func (pipeline *Pipeline) Show(message Message) {
-	if pipeline.output == nil {
-		return
+	result := Result{Plain: message.Plain, Verdict: ForwardVerdict, Changed: false}
+
+	if pipeline.output != nil {
+		Print(pipeline.output, message, result, true)
 	}
 
-	Print(pipeline.output, message, Result{Plain: message.Plain, Verdict: ForwardVerdict, Changed: false}, true)
+	if pipeline.recorder != nil {
+		pipeline.recorder(message, result, PassedOrigin)
+	}
 }
 
 func DirectionName(direction tlsrecord.Direction) (name string) {

@@ -12,14 +12,19 @@ import (
 )
 
 const (
-	defaultProxyPort uint16 = 15001
+	defaultProxyPort   uint16        = 15001
+	defaultHoldTimeout time.Duration = 60 * time.Second
+	// a held message blocks its direction of the flow, so a hold is never longer than this
+	maxHoldTimeout time.Duration = time.Hour
 )
 
 var (
 	proxyPort      uint16        = defaultProxyPort
 	udpIdleTimeout time.Duration = 30 * time.Second
+	holdTimeout    time.Duration = defaultHoldTimeout
 	decrypt        bool
 	interceptFlows bool
+	apiSocket      string
 	runCmd         = &cobra.Command{
 		Use:   "run",
 		Short: "Redirect the selected flows through decerter's proxy, optionally decrypting or intercepting them",
@@ -37,6 +42,13 @@ with the same session keys; plain TCP chunks and UDP datagrams run through the r
 line is the identity rule, which changes nothing: every message is printed on stdout with a header line, its escaped text
 and a hex dump, at most 2048 bytes, and a TLS flow or DTLS session ends with one line counting what happened to its records.
 
+--api-socket serves the control API (HTTP under /api/v1, described by api/openapi.yaml) on a unix socket: the history
+of the flows in scope with their decrypted or intercepted messages, a live event stream and a key log export. With
+--intercept it also holds messages for editing, forwarding or dropping, and runs match-and-replace rules added over the
+API after the identity rule. A socket file gets mode 0660 and the group decerter when that group exists, and is for root only
+otherwise; an abstract socket (@name, the default on Android) lets root and, on Android, adb's shell user connect.
+A held message that nobody decides goes on unchanged after --hold-timeout.
+
 The secrets come from OpenSSL 3's libssl on Linux (amd64 only) and Conscrypt's BoringSSL on Android. A process with its
 own TLS library, such as Chrome, Cronet, Flutter or Go programs, is relayed without decryption.`,
 		Example: `  # the flows of the local user test (uid 1001), TLS decrypted
@@ -44,11 +56,16 @@ own TLS library, such as Chrome, Cronet, Flutter or Go programs, is relayed with
   sudo -u test curl -s https://example.com/
 
   # only curl's flows to port 443, every record through the identity rule
-  sudo decerter run --uid 1001 --intercept --filter 'proc.comm == "curl" && tcp.dstport == 443'`,
+  sudo decerter run --uid 1001 --intercept --filter 'proc.comm == "curl" && tcp.dstport == 443'
+
+  # the control API: hold the test user's requests, list the flows
+  sudo decerter run --uid 1001 --intercept --api-socket /run/decerter/api.sock
+  sudo curl --unix-socket /run/decerter/api.sock -X PUT -d '{"enabled": true}' http://decerter/api/v1/intercept
+  sudo curl --unix-socket /run/decerter/api.sock http://decerter/api/v1/flows`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			quiet(cmd)
-			err = internal.Run(selection, scopeFilter, proxyPort, udpIdleTimeout, flowTable, decrypt, interceptFlows, libssl, &logger)
+			err = internal.Run(selection, scopeFilter, proxyPort, udpIdleTimeout, flowTable, decrypt, interceptFlows, apiSocket, holdTimeout, libssl, &logger)
 			return
 		},
 	}
@@ -63,6 +80,8 @@ func init() {
 	runCmd.Flags().BoolVar(&interceptFlows, "intercept", false, "run every message of the redirected flows through the identity rule and print it, TLS and DTLS 1.2 records are decrypted and encrypted again (default is false)")
 	runCmd.Flags().Func("port", "`port` of the TCP proxy listener and the UDP proxy socket on lo (default is 15001)", parsePort)
 	runCmd.Flags().Func("udp-idle-timeout", "a UDP session ends after this `duration` without a datagram in either direction (default is 30s)", parseIdleTimeout)
+	runCmd.Flags().StringVar(&apiSocket, "api-socket", "", "serve the control API on the unix socket at this `path`, @name is an abstract socket; the usual one is /run/decerter/api.sock on Linux and @decerter-api on Android (default is none)")
+	runCmd.Flags().Func("hold-timeout", "a message held over the control API goes on unchanged when nobody forwards or drops it within this `duration`, at most 1h (default is 60s)", parseHoldTimeout)
 	addLibsslFlag(runCmd.Flags())
 	addFlowTableFlag(runCmd.Flags())
 	runCmd.MarkFlagsMutuallyExclusive("decrypt", "intercept")
@@ -101,5 +120,22 @@ func parseIdleTimeout(value string) (err error) {
 	}
 
 	udpIdleTimeout = timeout
+	return
+}
+
+func parseHoldTimeout(value string) (err error) {
+	timeout, parseErr := time.ParseDuration(value)
+
+	if err = parseErr; err != nil {
+		err = fmt.Errorf("invalid hold timeout %q: %w", value, err)
+		return
+	}
+
+	if (timeout <= 0) || (timeout > maxHoldTimeout) {
+		err = fmt.Errorf("invalid hold timeout %q: must be positive and at most %s", value, maxHoldTimeout)
+		return
+	}
+
+	holdTimeout = timeout
 	return
 }

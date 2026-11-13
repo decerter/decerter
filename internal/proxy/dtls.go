@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/netip"
 	"os"
 	"sync"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/bpf/secrets"
+	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
@@ -32,12 +32,15 @@ type dtlsItem struct {
 // with a pipeline it intercepts: the sender of each direction takes its queue in order, runs the rules on the application data, seals the records again and writes the datagrams
 // isRaw is true once the record layer gave up, every datagram goes on as it came from then on
 // holdDeadline ends the wait for the secrets, graceDeadline lets held records go on raw before it
+// session is the udp session it belongs to, a record in the rules keeps it busy; recorder gets the observed application data, nil records nothing
 type dtlsInterception struct {
 	mutex            *sync.Mutex
 	wake             *sync.Cond
+	session          *UDPSession
 	bpfFlow          redirect.Flow
 	flow             intercept.Flow
 	pipeline         *intercept.Pipeline
+	recorder         *history.History
 	secretsBpfMaps   map[bpf.BpfMapName]*ebpf.Map
 	conn             tlsrecord.DTLSConn
 	isRaw            bool
@@ -57,14 +60,16 @@ type dtlsInterception struct {
 }
 
 // a DTLS session found by the ClientHello in the first datagram of a udp session, pipeline nil only observes it
-func newDTLSInterception(cookie uint64, bpfFlow redirect.Flow, client netip.AddrPort, pipeline *intercept.Pipeline, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, logger *slog.Logger) (dtls *dtlsInterception) {
+func newDTLSInterception(session *UDPSession, pipeline *intercept.Pipeline, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, recorder *history.History, logger *slog.Logger) (dtls *dtlsInterception) {
 	mutex := &sync.Mutex{}
 	dtls = &dtlsInterception{
 		mutex:          mutex,
 		wake:           sync.NewCond(mutex),
-		bpfFlow:        bpfFlow,
-		flow:           intercept.FlowOf(cookie, bpfFlow, client),
+		session:        session,
+		bpfFlow:        session.flow,
+		flow:           session.interceptFlow,
 		pipeline:       pipeline,
+		recorder:       recorder,
 		secretsBpfMaps: secretsBpfMaps,
 		conn:           tlsrecord.NewDTLS(maxHoldBytes, pipeline != nil),
 		pollPause:      interceptPollStart,
@@ -279,6 +284,9 @@ func (dtls *dtlsInterception) show(records []tlsrecord.Record) {
 		}
 
 		printRecord(dtls.bpfFlow, dtls.flow.Client, session, record)
+		flow := dtls.flow
+		flow.Session = session
+		dtls.recorder.Observe(flow, record.Direction, intercept.DTLSLayer, record.Payload)
 	}
 }
 
@@ -439,7 +447,7 @@ func (dtls *dtlsInterception) prepare(ctx context.Context, direction tlsrecord.D
 
 		// only application data goes through the rules, the Finished and the alerts are sealed again as they came
 		if record.ContentType == tlsrecord.ApplicationDataContentType {
-			result := dtls.pipeline.Process(ctx, dtls.pipeline.Message(flow, direction, intercept.DTLSLayer, record.Payload), logger)
+			result := dtls.session.process(ctx, dtls.pipeline, dtls.pipeline.Message(flow, direction, intercept.DTLSLayer, record.Payload), logger)
 
 			// the receiver sees a gap in the sequence numbers, which its replay window takes
 			if result.Verdict == intercept.DropVerdict {

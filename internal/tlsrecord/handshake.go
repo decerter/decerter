@@ -43,10 +43,12 @@ type clientHello struct {
 }
 
 // what a filter reads of a ClientHello: the highest version it offers, the first host name of server_name and the ALPN protocols, empty when it has none
+// ClientRandom names the session in secrets_map, the API's key log export looks the flow's secrets up with it
 type Hello struct {
-	Version    uint16
-	ServerName string
-	Protocols  []string
+	Version      uint16
+	ServerName   string
+	Protocols    []string
+	ClientRandom [randomLength]byte
 }
 
 type serverHello struct {
@@ -403,9 +405,10 @@ func toHello(body []byte, isDTLS bool) (hello Hello, err error) {
 	}
 
 	hello = Hello{
-		Version:    parsed.version,
-		ServerName: parsed.serverName,
-		Protocols:  parsed.protocols,
+		Version:      parsed.version,
+		ServerName:   parsed.serverName,
+		Protocols:    parsed.protocols,
+		ClientRandom: parsed.random,
 	}
 	return
 }

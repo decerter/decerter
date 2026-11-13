@@ -102,40 +102,6 @@ func TestRedirectNegative(state *testing.T) {
 	stopDeviceDecerter(state, decerter, true)
 }
 
-// Test if the legacy GET / to GET /test rewrite reaches the host server from Conscrypt over TLS 1.3 and TLS 1.2.
-func TestRewritePositive(state *testing.T) {
-	requireDex(state)
-	servers := startHTTPSServers(state, nil)
-	decerter := startDeviceDecerter(state, rewriteBinary, "rewrite", "-uid "+strconv.FormatUint(uint64(appUID), 10)+" -dst-cidr "+hostCIDR, redirectReady)
-
-	for _, server := range servers {
-		err := testDex(state.Context(), appUID, server, "/", "/test")
-
-		if err != nil {
-			state.Errorf("Test of the rewrite failed, error: %s", err.Error())
-		}
-	}
-
-	stopDeviceDecerter(state, decerter, true)
-}
-
-// Test if the rewrite leaves the HTTPS calls of a uid it does not select alone.
-func TestRewriteNegative(state *testing.T) {
-	requireDex(state)
-	servers := startHTTPSServers(state, nil)
-	decerter := startDeviceDecerter(state, rewriteBinary, "rewrite-negative", "-uid "+strconv.FormatUint(uint64(appUID), 10)+" -dst-cidr "+hostCIDR, redirectReady)
-
-	for _, server := range servers {
-		err := testDex(state.Context(), shellUID, server, "/", "/")
-
-		if err != nil {
-			state.Errorf("Test of the rewrite failed, error: %s", err.Error())
-		}
-	}
-
-	stopDeviceDecerter(state, decerter, true)
-}
-
 // Test if decerter run --decrypt prints the request line of a Conscrypt call over TLS 1.3 and TLS 1.2, which reaches the server unchanged.
 func TestDecryptPositive(state *testing.T) {
 	requireDex(state)
@@ -398,7 +364,7 @@ func requireDex(state *testing.T) {
 
 // stop every decerter of the tests with SIGTERM, SIGKILL if it hangs, and restore netd's hooks if one was killed
 func cleanDevice(ctx context.Context) (err error) {
-	for _, binary := range []string{decerterBinary, rewriteBinary} {
+	for _, binary := range []string{decerterBinary} {
 		decerter := deviceDecerter{Binary: binary, Name: ""}
 		isRunning, runningErr := decerter.isRunning(ctx)
 

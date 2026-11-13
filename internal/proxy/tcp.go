@@ -18,6 +18,7 @@ import (
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/filter"
+	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
@@ -61,7 +62,8 @@ func controlTCP(network, address string, rawConnection syscall.RawConn) (err err
 // secretsBpfMaps are the maps of the secrets object, with them the TLS flows are decrypted next to the relay and printed, nil relays every flow without a look inside
 // pipeline intercepts every flow instead: TLS records are held, decrypted, run through its rules and sealed again, plain tcp goes through the rules too; nil only relays or observes
 // scope decides once per flow which flows are looked at: a flow out of scope is relayed as it is, without decryption, rules or a flow line; nil is every flow in scope
-func ServeTCP(ctx context.Context, listener *net.TCPListener, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, scope *filter.Filter, waitGroup *sync.WaitGroup, logger *slog.Logger) {
+// recorder is the API's history, every flow in scope goes into it with what was decrypted or intercepted of it; nil records nothing
+func ServeTCP(ctx context.Context, listener *net.TCPListener, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, scope *filter.Filter, recorder *history.History, waitGroup *sync.WaitGroup, logger *slog.Logger) {
 	// listener closer
 	stop := context.AfterFunc(ctx, func() {
 		closeErr := listener.Close()
@@ -95,13 +97,13 @@ func ServeTCP(ctx context.Context, listener *net.TCPListener, bpfMaps map[bpf.Bp
 
 		// proxied tcp connection
 		waitGroup.Go(func() {
-			handleTCP(ctx, client, bpfMaps, secretsBpfMaps, pipeline, scope, logger)
+			handleTCP(ctx, client, bpfMaps, secretsBpfMaps, pipeline, scope, recorder, logger)
 		})
 	}
 }
 
 // look up the original destination of the client, dial it and copy both directions until both are done
-func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, scope *filter.Filter, logger *slog.Logger) {
+func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, scope *filter.Filter, recorder *history.History, logger *slog.Logger) {
 	startTime := time.Now()
 	clientAddressPort := client.RemoteAddr().(*net.TCPAddr).AddrPort()
 	localAddressPort := client.LocalAddr().(*net.TCPAddr).AddrPort()
@@ -161,14 +163,18 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 	}()
 
 	// the scope is decided before a byte goes on; a filter with a ClientHello field waits for the first client bytes, or the first server bytes of a protocol where the server speaks first
-	values := scopeValues(flow, cmdline, clientAddressPort, scope)
+	// the history wants to know of every flow in scope whether it is TLS, so it waits for them too
+	values := scopeValues(flow, cmdline, clientAddressPort, scope, recorder != nil)
 	result := isInScope(scope, values)
 	var opening []TLSChunk
+	var clientRandom [32]byte
 
-	if result == filter.UnknownResult {
+	if (result == filter.UnknownResult) || ((result == filter.TrueResult) && (recorder != nil)) {
 		openingChunks, isTLS, hello := readOpening(ctx, client, upstream, logger)
 		opening = openingChunks
-		result = isInScope(scope, values.WithClientHello(isTLS, hello.Version, hello.ServerName, hello.Protocols))
+		values = values.WithClientHello(isTLS, hello.Version, hello.ServerName, hello.Protocols)
+		clientRandom = hello.ClientRandom
+		result = isInScope(scope, values)
 	}
 
 	if cmdline == "" {
@@ -181,8 +187,12 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 		return
 	}
 
+	flowID := recorder.OpenFlow(cookie, values, clientRandom)
+	interceptFlow := intercept.FlowOf(flowID, cookie, flow, clientAddressPort, values)
+
 	if pipeline != nil {
-		upBytes, downBytes := interceptTCP(ctx, client, upstream, opening, intercept.FlowOf(cookie, flow, clientAddressPort), pipeline, secretsBpfMaps, logger)
+		upBytes, downBytes := interceptTCP(ctx, client, upstream, opening, interceptFlow, pipeline, secretsBpfMaps, logger)
+		recorder.CloseFlow(flowID, history.Counters{Bytes: upBytes, Datagrams: 0}, history.Counters{Bytes: downBytes, Datagrams: 0})
 		printFlow(flow, cmdline, clientAddressPort, strconv.FormatInt(upBytes, 10)+"B", strconv.FormatInt(downBytes, 10)+"B", time.Since(startTime))
 		return
 	}
@@ -191,7 +201,7 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 	observerGroup := sync.WaitGroup{}
 
 	if secretsBpfMaps != nil {
-		observer = NewTLSObserver(flow, clientAddressPort, secretsBpfMaps)
+		observer = NewTLSObserver(flow, clientAddressPort, interceptFlow, recorder, secretsBpfMaps)
 
 		// tls observer of the flow, decrypts copies of the relayed bytes
 		observerGroup.Go(func() {
@@ -207,6 +217,7 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 		observerGroup.Wait()
 	}
 
+	recorder.CloseFlow(flowID, history.Counters{Bytes: upBytes, Datagrams: 0}, history.Counters{Bytes: downBytes, Datagrams: 0})
 	printFlow(flow, cmdline, clientAddressPort, strconv.FormatInt(upBytes, 10)+"B", strconv.FormatInt(downBytes, 10)+"B", time.Since(startTime))
 }
 

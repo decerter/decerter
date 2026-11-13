@@ -45,6 +45,8 @@ const (
 	curlMaxTime    string        = "10"
 	proxyPort      uint16        = 15001
 	udpIdleTimeout time.Duration = 30 * time.Second
+	// a message held over the API that nobody decides goes on after this
+	apiHoldTimeout time.Duration = 3 * time.Second
 )
 
 // how decerter runs in a test
@@ -57,6 +59,10 @@ const (
 	CaptureDecerterMode decerterMode = "capture"
 	// record the flows into a pcapng file with the decrypted payload
 	PlaintextDecerterMode decerterMode = "plaintext"
+	// redirect to the proxy, which decrypts and prints the TLS flows (--decrypt)
+	DecryptDecerterMode decerterMode = "decrypt"
+	// redirect to the proxy, which only relays
+	RelayDecerterMode decerterMode = "relay"
 )
 
 type account struct {
@@ -189,6 +195,12 @@ func testFlags() (flags redirect.Filter) {
 // startDecerter with the flags given and a --filter, empty is none
 func startFilteredDecerter(state *testing.T, mode decerterMode, capturePath string, rules []intercept.Rule, flags redirect.Filter, scopeText string) (stop func() error) {
 	decerter := newDecerter(state, mode, capturePath, rules, flags, scopeText)
+	stop = startApp(state, &decerter, mode)
+	return
+}
+
+// start a decerter made by newDecerter or newAPIDecerter, stop shuts it down once and is a cleanup of the test too
+func startApp(state *testing.T, decerter *app.App, mode decerterMode) (stop func() error) {
 	stop = sync.OnceValue(decerter.Shutdown)
 
 	state.Cleanup(func() {
@@ -209,6 +221,12 @@ func startFilteredDecerter(state *testing.T, mode decerterMode, capturePath stri
 
 // a decerter that is not started yet, the filter must parse
 func newDecerter(state *testing.T, mode decerterMode, capturePath string, rules []intercept.Rule, flags redirect.Filter, scopeText string) (decerter app.App) {
+	decerter = newAPIDecerter(state, mode, capturePath, rules, flags, scopeText, "")
+	return
+}
+
+// newDecerter that serves the control API on apiSocket, empty is none; the decrypt mode runs --decrypt
+func newAPIDecerter(state *testing.T, mode decerterMode, capturePath string, rules []intercept.Rule, flags redirect.Filter, scopeText string, apiSocket string) (decerter app.App) {
 	var scopeFilter *filter.Filter
 
 	if scopeText != "" {
@@ -222,7 +240,7 @@ func newDecerter(state *testing.T, mode decerterMode, capturePath string, rules 
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	decerter = app.New(context.Background(), flags, scopeFilter, proxyPort, udpIdleTimeout, false, false, false, rules, "", capturePath, mode == PlaintextDecerterMode, capturebpf.MaxSnaplen, platform.Detect("/"), logger)
+	decerter = app.New(context.Background(), flags, scopeFilter, proxyPort, udpIdleTimeout, false, false, mode == DecryptDecerterMode, rules, apiSocket, apiHoldTimeout, "", capturePath, mode == PlaintextDecerterMode, capturebpf.MaxSnaplen, platform.Detect("/"), logger)
 	return
 }
 

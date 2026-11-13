@@ -6,14 +6,15 @@ decerter selects local processes by UID or PID. eBPF cgroup hooks send their soc
 Requires Linux ≥ 6.6.
 
 ## Current features
-- `decerter run`: redirect the TCP and UDP flows of the selected processes through decerter's proxy. `--decrypt` prints the plaintext of TLS and DTLS 1.2 records; `--intercept` holds every record, decrypts it, runs it through the intercept rules and encrypts it again with the same session keys (the command line has the identity rule, which prints every message; other rules only come from Go code for now).
+- `decerter run`: redirect the TCP and UDP flows of the selected processes through decerter's proxy. `--decrypt` prints the plaintext of TLS and DTLS 1.2 records; `--intercept` holds every record, decrypts it, runs it through the intercept rules and encrypts it again with the same session keys (the command line has the identity rule, which prints every message; more rules come from the control API).
+- Control API (`decerter run --api-socket`): HTTP on a unix socket under `/api/v1`, described by [api/openapi.yaml](api/openapi.yaml): flow history with a filter, message payloads, a live event stream, holding messages to edit, forward or drop them, match-and-replace rules, and a key log export.
 - `decerter capture -w <file>|-`: write the selected flows to pcapng without redirecting anything, with a Decryption Secrets Block per TLS session, so Wireshark and tshark decrypt the file by themselves; `--plaintext` writes synthesized decrypted packets for tcpdump and other tools; `-w -` streams live into Wireshark or tshark.
 - `decerter keylog`: print the TLS secrets of the selected processes in NSS key log format (`SSLKEYLOGFILE`).
 - `--filter`: a subset of Wireshark's display filter language over process, address, port and TLS ClientHello fields (`decerter help filter`); the parts the kernel can check go into BPF maps.
 - TLS secrets from OpenSSL 3 (Linux, amd64) and from Conscrypt's BoringSSL (Android 15 and later); TLS 1.2, TLS 1.3 and DTLS 1.2.
 - Android: rooted devices with a GKI kernel from android15-6.6 on; decerter shares netd's cgroup hooks while it runs and `decerter android restore` puts them back after a crash.
 
-Planned, not built yet: a control API on a unix socket, a minimal web UI (`decerter ui`) and an MCP server (`decerter mcp`).
+Planned, not built yet: the capture endpoints of the API, a minimal web UI (`decerter ui`) and an MCP server (`decerter mcp`).
 
 ## Requirements
 - Linux 6.6 or newer with BTF (`/sys/kernel/btf/vmlinux`) and cgroup v2 mounted at `/sys/fs/cgroup`.
@@ -86,6 +87,36 @@ sudo ./decerter run --uid 1001 --dst-cidr 10.0.0.0/8,fd00::/8 --dst-port tcp/443
 
 The proxy listens on port 15001 of `lo` (`--port`), TCP and UDP; a UDP session ends after 30 s without a datagram (`--udp-idle-timeout`). `--flow-table` prints the kernel's flow table every 5 s for debugging.
 
+### control API
+```sh
+sudo ./decerter run --uid 1001 --intercept --api-socket /run/decerter/api.sock
+api() { sudo curl -s --unix-socket /run/decerter/api.sock "$@"; }   # or curl without sudo as a member of the group decerter
+
+api http://decerter/api/v1/status
+api 'http://decerter/api/v1/flows?filter=tls.sni+contains+%22example%22'      # newest first, ?limit=&cursor= pages
+api http://decerter/api/v1/flows/1/messages                                   # direction, length, edited; no payloads
+api 'http://decerter/api/v1/messages/1?offset=0&length=4096'                  # payload as hex and escaped text
+api -N http://decerter/api/v1/events                                          # server-sent events, no payloads
+
+# hold the client's requests, edit one and let it go
+api -X PUT -d '{"enabled": true, "filter": "proc.comm == \"curl\""}' http://decerter/api/v1/intercept
+api http://decerter/api/v1/holds                                              # held messages with their payloads
+api -X PUT -d '{"payload": {"type": "text", "value": "GET /test HTTP/1.1\r\nHost: example.com\r\n\r\n"}}' http://decerter/api/v1/holds/7
+api -X POST http://decerter/api/v1/holds/7/forward                            # or /drop
+
+# a match-and-replace rule for the next requests, and its removal
+api -X POST -d '{"direction": "up", "find": {"type": "regex", "value": "GET /(\\S*) "}, "replace": {"type": "text", "value": "GET /test/$1 "}}' http://decerter/api/v1/rules
+api -X DELETE http://decerter/api/v1/rules/1
+
+api 'http://decerter/api/v1/keylog?filter=tls' > keys.log                     # NSS key log of the TLS sessions in the history
+```
+
+`--api-socket` takes a socket path or `@name` for an abstract socket (Android: `@decerter-api`). A socket file gets mode 0660 and the group `decerter` when that group exists (decerter doesn't create it: `groupadd decerter`), and mode 0600 for root alone otherwise; decerter refuses a path that exists and is no socket, replaces a socket a killed decerter left, and removes its socket on exit. An abstract socket has no mode, so decerter checks the peer with `SO_PEERCRED`: root, on Android also adb's shell user (uid 2000), on Linux peers whose primary group is `decerter`. On Android, `adb forward tcp:8080 localabstract:decerter-api` makes the API reachable as `http://127.0.0.1:8080/api/v1/…` on the host; adbd connects as root after `adb root` and as shell otherwise.
+
+The history is in memory: at most 10000 flows, 200000 messages and 64 MiB of payload, 20000 messages and 1 MiB of payload per flow; the oldest flow goes first. It records the flows in scope in every run mode, the decrypted records with `--decrypt` and every message through the rules with `--intercept`; plain relaying keeps no payloads. With the API every flow in scope is classified as TLS or not, so the proxy reads its first bytes before relaying it, as a `--filter` on a ClientHello field does.
+
+Holding and rules need `--intercept`. The rules of the code run first (the identity rule), then the API rules in the order they were added, then the hold queue, so a held message shows what goes on the wire. A held message blocks only its own direction of its own flow (the client's UDP datagrams have a sender per session for this); one that nobody decides goes on unchanged after `--hold-timeout` (60 s), turning intercept off lets every held message go on, and a flow that ends drops what it held. A dropped request is simply not sent: the client waits for an answer until its own timeout. A rule sees one message at a time (a TLS record, one read of a TCP stream or one datagram), so a value split over two messages is not found.
+
 ### capture
 ```sh
 # real packets plus a Decryption Secrets Block per TLS session: tshark decrypts without a key log file
@@ -143,10 +174,12 @@ TLS secrets on Android come from Conscrypt's BoringSSL (`/apex/com.android.consc
 - `--decrypt` drops back to plain relaying for a flow it can't keep up with (unthrottled loopback transfers); the relay itself is unaffected. `--intercept` ignores the peer's `record_size_limit` and `max_fragment_length`.
 - Capture: a TLS flow is held until its secrets arrive (at most 10 s and 1 MiB per flow, 64 MiB in total; past that it is written without keys), so the file is in time order within a flow but not across flows. Packets between two selected local sockets appear twice. With `--plaintext` a gap (a truncated or lost packet) leaves the rest of that flow encrypted, and UDP GSO super-datagrams are not split.
 - `--filter`: no slices, arithmetic, functions or bitwise operators.
+- Control API: the event stream has no replay; a client 256 events behind gets an `overflow` event and the stream ends. The history and the rules live only as long as decerter runs. `capture` has no API yet.
 
 ## License
 - The core (Go userspace, tools, tests) is licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`).
 - The BPF C programs under `bpf/` are dual-licensed `GPL-2.0-only OR MIT`, matching their `SEC("license") = "Dual MIT/GPL"`.
+- The control API contract, [api/openapi.yaml](api/openapi.yaml), and its Go types, [api/types.go](api/types.go), are `MIT`, so any client can be generated from them.
 - The vendored libbpf headers in `bpf/include/bpf/` keep their upstream license (`LGPL-2.1 OR BSD-2-Clause`).
 - `internal/tlsrecord/cipher.go` and `internal/tlsrecord/keyschedule.go` contain code derived from `crypto/tls` of the Go standard library and keep the copyright notice of the Go authors (`AGPL-3.0-only AND BSD-3-Clause`, the BSD license is [internal/tlsrecord/LICENSE-Go.txt](internal/tlsrecord/LICENSE-Go.txt)).
 - The dependencies are under MIT, BSD-3-Clause and Apache-2.0 licenses; `make license-check` fails on one that isn't on the allowed list, and `make license-report` lists them.

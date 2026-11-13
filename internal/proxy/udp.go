@@ -18,6 +18,7 @@ import (
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/filter"
+	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
@@ -60,10 +61,11 @@ func controlUDP(network, address string, rawConnection syscall.RawConn) (err err
 }
 
 // read until the socket is closed by the context, every session relays its replies in its own goroutine on waitGroup
-// pipeline runs every datagram of both directions through its rules, nil relays them as they are
+// pipeline runs every datagram of both directions through its rules, nil relays them as they are; the client's datagrams go through them in a sender per session, so a held one stops only its session
 // a session whose first datagram has a DTLS ClientHello is read by the DTLS record layer with the secrets of secretsBpfMaps: intercepted with a pipeline, observed and printed without one
 // scope decides each session when it starts, with the DTLS ClientHello of its first datagram: one out of scope is relayed as it is, without the record layer, rules or a flow line; nil is every session in scope
-func ServeUDP(ctx context.Context, connection *net.UDPConn, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, scope *filter.Filter, waitGroup *sync.WaitGroup, logger *slog.Logger) {
+// recorder is the API's history, every session in scope goes into it; nil records nothing
+func ServeUDP(ctx context.Context, connection *net.UDPConn, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, scope *filter.Filter, recorder *history.History, waitGroup *sync.WaitGroup, logger *slog.Logger) {
 	// socket closer
 	stop := context.AfterFunc(ctx, func() {
 		closeErr := connection.Close()
@@ -105,7 +107,7 @@ func ServeUDP(ctx context.Context, connection *net.UDPConn, idleTimeout time.Dur
 			continue
 		}
 
-		session, sessionErr := udpSessionOf(ctx, connection, client, local, buffer[:datagramSize], &sessions, idleTimeout, bpfMaps, secretsBpfMaps, pipeline, scope, waitGroup, logger)
+		session, sessionErr := udpSessionOf(ctx, connection, client, local, buffer[:datagramSize], &sessions, idleTimeout, bpfMaps, secretsBpfMaps, pipeline, scope, recorder, waitGroup, logger)
 
 		if sessionErr != nil {
 			continue
@@ -115,6 +117,15 @@ func ServeUDP(ctx context.Context, connection *net.UDPConn, idleTimeout time.Dur
 		if isDTLSIntercepted(session) {
 			if !session.dtls.take(tlsrecord.ClientDirection, buffer[:datagramSize]) {
 				logger.Debug("Could not queue dtls datagram, it is lost", "client", client, "destination", session.key.destination)
+			}
+
+			continue
+		}
+
+		// the sender of the session runs the rules and writes
+		if session.upQueue != nil {
+			if !session.upQueue.take(buffer[:datagramSize]) {
+				logger.Debug("Could not queue udp datagram, it is lost", "client", client, "destination", session.key.destination)
 			}
 
 			continue
@@ -167,7 +178,7 @@ func datagramDestination(controlMessage []byte) (local netip.Addr, err error) {
 
 // the flow is looked up for every datagram: a new socket on the same client port or a new destination of an unconnected socket gets its own session
 // the datagram that starts a session tells if it is DTLS
-func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.AddrPort, local netip.Addr, datagram []byte, sessions *UDPSessions, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, scope *filter.Filter, waitGroup *sync.WaitGroup, logger *slog.Logger) (session *UDPSession, err error) {
+func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.AddrPort, local netip.Addr, datagram []byte, sessions *UDPSessions, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, scope *filter.Filter, recorder *history.History, waitGroup *sync.WaitGroup, logger *slog.Logger) (session *UDPSession, err error) {
 	cookie, flow, lookupErr := redirect.FlowByClient(client, syscall.IPPROTO_UDP, bpfMaps)
 
 	if err = lookupErr; err != nil {
@@ -202,13 +213,10 @@ func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.Add
 	}
 
 	// the first datagram is all the session has when it is decided, a DTLS ClientHello fragmented over more datagrams counts as one without fields
-	result := isInScope(scope, scopeValues(flow, cmdline, client, scope))
-
-	if result == filter.UnknownResult {
-		// a DTLS ClientHello that can not be read is TLS without its fields
-		hello, _, _ := tlsrecord.ReadDTLSClientHello(datagram)
-		result = isInScope(scope, scopeValues(flow, cmdline, client, scope).WithClientHello(tlsrecord.IsDTLSClientHello(datagram), hello.Version, hello.ServerName, hello.Protocols))
-	}
+	// a DTLS ClientHello that can not be read is TLS without its fields
+	hello, _, _ := tlsrecord.ReadDTLSClientHello(datagram)
+	values := scopeValues(flow, cmdline, client, scope, recorder != nil).WithClientHello(tlsrecord.IsDTLSClientHello(datagram), hello.Version, hello.ServerName, hello.Protocols)
+	result := isInScope(scope, values)
 
 	if cmdline == "" {
 		cmdline = "?"
@@ -239,26 +247,38 @@ func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.Add
 	}
 	session.lastActive.Store(session.startTime.UnixNano())
 
-	// out of scope the datagrams go on as they are, past the rules
+	// out of scope the datagrams go on as they are, past the rules and the history
 	if session.isInScope {
-		startDTLS(ctx, connection, session, datagram, secretsBpfMaps, pipeline, logger)
+		flowID := recorder.OpenFlow(cookie, values, hello.ClientRandom)
+		session.interceptFlow = intercept.FlowOf(flowID, cookie, flow, client, values)
+		startDTLS(ctx, connection, session, datagram, secretsBpfMaps, pipeline, recorder, logger)
 	} else {
 		session.isRaw = true
 		logger.Debug("Udp session is out of scope, relaying it as it is")
+	}
+
+	// plain datagrams through the rules: the client's go through a sender of the session
+	if (pipeline != nil) && !session.isRaw && (session.dtls == nil) {
+		session.upQueue = newUDPQueue()
+
+		// udp sender of the session
+		session.upQueue.sender.Go(func() {
+			sendUDP(ctx, pipeline, session, logger)
+		})
 	}
 
 	sessions.Add(session)
 
 	// udp reply relay
 	waitGroup.Go(func() {
-		relayUDP(ctx, connection, session, sessions, idleTimeout, pipeline, logger)
+		relayUDP(ctx, connection, session, sessions, idleTimeout, pipeline, recorder, logger)
 	})
 
 	return
 }
 
 // copy replies from upstream to the client until the session is idle for idleTimeout or the context is cancelled
-func relayUDP(ctx context.Context, connection *net.UDPConn, session *UDPSession, sessions *UDPSessions, idleTimeout time.Duration, pipeline *intercept.Pipeline, logger *slog.Logger) {
+func relayUDP(ctx context.Context, connection *net.UDPConn, session *UDPSession, sessions *UDPSessions, idleTimeout time.Duration, pipeline *intercept.Pipeline, recorder *history.History, logger *slog.Logger) {
 	// a deadline in the past unblocks the upstream read
 	stop := context.AfterFunc(ctx, func() {
 		deadlineErr := session.upstream.SetReadDeadline(time.Unix(1, 0))
@@ -272,9 +292,13 @@ func relayUDP(ctx context.Context, connection *net.UDPConn, session *UDPSession,
 	defer func() {
 		sessions.Remove(session)
 
-		// the senders of a DTLS session write to the upstream socket until they are done
+		// the senders of a DTLS session and of plain datagrams write to the upstream socket until they are done
 		if session.dtls != nil {
 			session.dtls.close()
+		}
+
+		if session.upQueue != nil {
+			session.upQueue.close()
 		}
 
 		closeErr := session.upstream.Close()
@@ -290,6 +314,7 @@ func relayUDP(ctx context.Context, connection *net.UDPConn, session *UDPSession,
 			return
 		}
 
+		recorder.CloseFlow(session.interceptFlow.ID, history.Counters{Bytes: session.upBytes.Load(), Datagrams: session.upDatagrams.Load()}, history.Counters{Bytes: session.downBytes.Load(), Datagrams: session.downDatagrams.Load()})
 		printFlow(session.flow, session.cmdline, session.key.client, up, down, time.Since(session.startTime))
 	}()
 
@@ -374,16 +399,50 @@ func interceptDatagram(ctx context.Context, pipeline *intercept.Pipeline, sessio
 		return
 	}
 
-	flow := intercept.FlowOf(session.key.cookie, session.flow, session.key.client)
-	processed := pipeline.Process(ctx, pipeline.Message(flow, direction, intercept.UDPLayer, datagram), logger)
+	processed := session.process(ctx, pipeline, pipeline.Message(session.interceptFlow, direction, intercept.UDPLayer, datagram), logger)
 	result = processed.Plain
 	isSent = processed.Verdict == intercept.ForwardVerdict
 	return
 }
 
+// the client's datagrams of one session through the rules and to the server, in order, until the session is over
+func sendUDP(ctx context.Context, pipeline *intercept.Pipeline, session *UDPSession, logger *slog.Logger) {
+	for {
+		datagrams, isEnd := session.upQueue.next()
+
+		if isEnd {
+			return
+		}
+
+		size := 0
+
+		for _, datagram := range datagrams {
+			size += len(datagram)
+			result, isSent := interceptDatagram(ctx, pipeline, session, tlsrecord.ClientDirection, datagram, logger)
+
+			if !isSent {
+				continue
+			}
+
+			_, writeErr := session.upstream.Write(result)
+
+			if writeErr != nil {
+				// an ICMP error of an earlier datagram shows up here as ECONNREFUSED, the datagram is lost like without the proxy
+				logger.Debug("Could not send datagram to original destination", "error", writeErr, "client", session.key.client, "destination", session.key.destination)
+				continue
+			}
+
+			session.upDatagrams.Add(1)
+			session.upBytes.Add(int64(len(result)))
+		}
+
+		session.upQueue.sent(size)
+	}
+}
+
 // a session whose first datagram has a DTLS ClientHello gets the DTLS record layer when there are secrets, and is relayed past the rules without them
 // intercepting, a sender per direction writes the datagrams: to the server over the upstream socket, to the client from the proxy address it sent to
-func startDTLS(ctx context.Context, connection *net.UDPConn, session *UDPSession, datagram []byte, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, logger *slog.Logger) {
+func startDTLS(ctx context.Context, connection *net.UDPConn, session *UDPSession, datagram []byte, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, recorder *history.History, logger *slog.Logger) {
 	if !tlsrecord.IsDTLSClientHello(datagram) {
 		return
 	}
@@ -394,7 +453,7 @@ func startDTLS(ctx context.Context, connection *net.UDPConn, session *UDPSession
 		return
 	}
 
-	session.dtls = newDTLSInterception(session.key.cookie, session.flow, session.key.client, pipeline, secretsBpfMaps, logger)
+	session.dtls = newDTLSInterception(session, pipeline, secretsBpfMaps, recorder, logger)
 
 	if pipeline == nil {
 		return

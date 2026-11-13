@@ -1,0 +1,265 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+
+//go:build e2e_android
+
+package android_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	v1 "github.com/decerter/decerter/api"
+)
+
+const (
+	// the abstract socket of decerter on Android, adb forwards a host port to it
+	apiSocket string = "@decerter-api"
+	// how often the held messages are looked at
+	holdPoll time.Duration = 100 * time.Millisecond
+	// what decerter logs for every client of the api socket, with its uid
+	apiClientLog string = `"msg":"Api client connected"`
+)
+
+// the control API of the decerter on the device through adb forward tcp:<port> localabstract:decerter-api
+type apiClient struct {
+	client *http.Client
+	port   string
+}
+
+// what the dex printed, or why it failed
+type dexResult struct {
+	err error
+}
+
+// Test if a rule added over the API through adb forward rewrites GET / to GET /test of a Conscrypt call over TLS 1.3 and TLS 1.2, and a deleted rule changes nothing.
+func TestRewritePositive(state *testing.T) {
+	requireDex(state)
+	servers := startHTTPSServers(state, nil)
+	decerter := startDeviceDecerter(state, decerterBinary, "rewrite", apiArguments(), redirectReady)
+	client := forwardAPI(state)
+	rule := v1.Rule{}
+	status, err := client.call(state.Context(), http.MethodPost, "/rules", v1.RuleRequest{Filter: "tls", Direction: v1.UpDirection, Layer: v1.TLSLayer, Find: v1.Value{Type: v1.TextValueType, Value: "GET / "}, Replace: v1.Value{Type: v1.TextValueType, Value: "GET /test "}}, &rule)
+
+	if (err != nil) || (status != http.StatusCreated) {
+		state.Fatalf("Test of the rewrite failed, cannot add the rule over adb forward, status: %d, error: %v", status, err)
+	}
+
+	for _, server := range servers {
+		err = testDex(state.Context(), appUID, server, "/", "/test")
+
+		if err != nil {
+			state.Errorf("Test of the rewrite failed, error: %s", err.Error())
+		}
+	}
+
+	status, err = client.call(state.Context(), http.MethodDelete, fmt.Sprintf("/rules/%d", rule.ID), nil, nil)
+
+	if (err != nil) || (status != http.StatusNoContent) {
+		state.Fatalf("Test of the rewrite failed, cannot delete the rule, status: %d, error: %v", status, err)
+	}
+
+	err = testDex(state.Context(), appUID, servers[0], "/", "/")
+
+	if err != nil {
+		state.Errorf("Test of the rewrite failed, a deleted rule should change nothing, error: %s", err.Error())
+	}
+
+	checkAPIClient(state, decerter)
+	stopDeviceDecerter(state, decerter, true)
+}
+
+// Test if the rule leaves the HTTPS calls of a uid decerter does not select alone.
+func TestRewriteNegative(state *testing.T) {
+	requireDex(state)
+	servers := startHTTPSServers(state, nil)
+	decerter := startDeviceDecerter(state, decerterBinary, "rewrite-negative", apiArguments(), redirectReady)
+	client := forwardAPI(state)
+	status, err := client.call(state.Context(), http.MethodPost, "/rules", v1.RuleRequest{Direction: v1.UpDirection, Find: v1.Value{Type: v1.TextValueType, Value: "GET / "}, Replace: v1.Value{Type: v1.TextValueType, Value: "GET /test "}}, nil)
+
+	if (err != nil) || (status != http.StatusCreated) {
+		state.Fatalf("Test of the rewrite failed, cannot add the rule over adb forward, status: %d, error: %v", status, err)
+	}
+
+	for _, server := range servers {
+		err = testDex(state.Context(), shellUID, server, "/", "/")
+
+		if err != nil {
+			state.Errorf("Test of the rewrite failed, error: %s", err.Error())
+		}
+	}
+
+	stopDeviceDecerter(state, decerter, true)
+}
+
+// Test if a Conscrypt request held over the API through adb forward can be edited from GET / to GET /test and forwarded, and the server receives /test.
+func TestHoldPositive(state *testing.T) {
+	requireDex(state)
+	servers := startHTTPSServers(state, nil)
+	decerter := startDeviceDecerter(state, decerterBinary, "hold", apiArguments(), redirectReady)
+	client := forwardAPI(state)
+	status, err := client.call(state.Context(), http.MethodPut, "/intercept", v1.InterceptRequest{Enabled: true, Filter: "tls", Direction: v1.UpDirection}, nil)
+
+	if (err != nil) || (status != http.StatusOK) {
+		state.Fatalf("Test of the hold failed, cannot turn intercept on over adb forward, status: %d, error: %v", status, err)
+	}
+
+	for _, server := range servers {
+		resultChannel := make(chan dexResult, 1)
+
+		// the app's call, it waits while its request is held
+		go func() {
+			resultChannel <- dexResult{err: testDex(state.Context(), appUID, server, "/", "/test")}
+		}()
+
+		held, holdErr := client.waitHeld(state.Context())
+
+		if holdErr != nil {
+			state.Fatalf("Test of the hold failed, port %s, error: %s", server.Port, holdErr.Error())
+		}
+
+		payload, decodeErr := hex.DecodeString(held.Payload.Hex)
+
+		if (decodeErr != nil) || !bytes.HasPrefix(payload, []byte("GET / HTTP/1.1\r\n")) {
+			state.Fatalf("Test of the hold failed, port %s, the held request should start with GET /, payload: %q, error: %v", server.Port, payload, decodeErr)
+		}
+
+		status, err = client.call(state.Context(), http.MethodPut, fmt.Sprintf("/holds/%d", held.ID), v1.EditRequest{Payload: v1.Value{Type: v1.TextValueType, Value: strings.Replace(string(payload), "GET / ", "GET /test ", 1)}}, nil)
+
+		if (err == nil) && (status == http.StatusOK) {
+			status, err = client.call(state.Context(), http.MethodPost, fmt.Sprintf("/holds/%d/forward", held.ID), nil, nil)
+		}
+
+		result := <-resultChannel
+
+		if (err != nil) || (status != http.StatusNoContent) || (result.err != nil) {
+			state.Errorf("Test of the hold failed, port %s, the edited request should reach the server, status: %d, error: %v", server.Port, status, errors.Join(err, result.err))
+		}
+	}
+
+	checkAPIClient(state, decerter)
+	stopDeviceDecerter(state, decerter, true)
+}
+
+// decerter run with --intercept and the API on its abstract socket, debug logs name the uid of every api client
+func apiArguments() (arguments string) {
+	arguments = "--log-level debug run --intercept --api-socket " + apiSocket + " --uid " + strconv.FormatUint(uint64(appUID), 10) + " --dst-cidr " + hostCIDR
+	return
+}
+
+// adb forward of a free host port to the api socket, removed when the test ends
+func forwardAPI(state *testing.T) (client apiClient) {
+	output, err := device.run(state.Context(), adbTimeout, "forward", "tcp:0", "localabstract:"+strings.TrimPrefix(apiSocket, "@"))
+
+	if err != nil {
+		state.Fatalf("Could not forward the api socket, error: %s", err.Error())
+	}
+
+	port := strings.TrimSpace(output)
+
+	state.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), adbTimeout)
+		defer cancel()
+
+		if _, removeErr := device.run(ctx, adbTimeout, "forward", "--remove", "tcp:"+port); removeErr != nil {
+			state.Errorf("Could not remove the adb forward, error: %s", removeErr.Error())
+		}
+	})
+
+	client = apiClient{client: &http.Client{Timeout: adbTimeout}, port: port}
+	return
+}
+
+// adbd connects to the abstract socket as root after adb root, as shell otherwise, and decerter let it in
+func checkAPIClient(state *testing.T, decerter deviceDecerter) {
+	log, err := decerter.log(state.Context())
+
+	if err != nil {
+		state.Fatalf("Could not read the log of %s, error: %s", decerter.Binary, err.Error())
+	}
+
+	isRoot := strings.Contains(log, apiClientLog+`,"uid":0,`)
+	isShell := strings.Contains(log, apiClientLog+`,"uid":2000,`)
+
+	if (!isRoot && !isShell) || strings.Contains(log, `"msg":"Refused api client"`) {
+		state.Errorf("adb forward should connect as root or shell and be let in, log:\n%s", log)
+	}
+}
+
+// one request with a JSON body, nil sends none; result nil reads no answer
+func (client apiClient) call(ctx context.Context, method string, path string, body any, result any) (status int, err error) {
+	var reader io.Reader = http.NoBody
+
+	if body != nil {
+		encoded, encodeErr := json.Marshal(body)
+
+		if err = encodeErr; err != nil {
+			return
+		}
+
+		reader = bytes.NewReader(encoded)
+	}
+
+	request, err := http.NewRequestWithContext(ctx, method, "http://"+net.JoinHostPort("127.0.0.1", client.port)+v1.BasePath+path, reader)
+
+	if err != nil {
+		return
+	}
+
+	response, err := client.client.Do(request)
+
+	if err != nil {
+		return
+	}
+
+	defer func() {
+		err = errors.Join(err, response.Body.Close())
+	}()
+
+	status = response.StatusCode
+	answer, err := io.ReadAll(response.Body)
+
+	if (err != nil) || (result == nil) || (status >= 300) {
+		return
+	}
+
+	err = json.Unmarshal(answer, result)
+	return
+}
+
+// the first held message, it comes once the dex sent its request
+func (client apiClient) waitHeld(ctx context.Context) (held v1.Hold, err error) {
+	holdCtx, cancel := context.WithTimeout(ctx, outputTimeout)
+	defer cancel()
+
+	for {
+		holds := v1.HoldList{}
+		_, err = client.call(holdCtx, http.MethodGet, "/holds", nil, &holds)
+
+		if err != nil {
+			return
+		}
+
+		if len(holds.Holds) > 0 {
+			held = holds.Holds[0]
+			return
+		}
+
+		select {
+		case <-holdCtx.Done():
+			err = fmt.Errorf("no message was held: %w", holdCtx.Err())
+			return
+		case <-time.After(holdPoll):
+		}
+	}
+}

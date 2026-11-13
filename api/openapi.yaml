@@ -1,0 +1,832 @@
+# SPDX-License-Identifier: MIT
+#
+# The control API of decerter: decerter run --api-socket <path> serves it on a unix socket. This file is the contract every client
+# (decerter ui, decerter mcp, decerter-pro, scripts) is built against; api/types.go holds the same types in Go. Both are MIT-licensed,
+# the rest of decerter is AGPL-3.0-only. Breaking changes go to /api/v2.
+openapi: 3.0.3
+info:
+  title: decerter control API
+  version: "1"
+  license:
+    name: MIT
+    url: https://opensource.org/license/mit
+  description: |
+    HTTP/1.1 on a unix socket, there is no TCP listener. Use any host name in the URL:
+
+        curl --unix-socket /run/decerter/api.sock http://decerter/api/v1/status
+
+    Access: a socket file has mode 0660 and the group `decerter` when that group exists, mode 0600 (root only) otherwise.
+    An abstract socket (`@name`, the default `@decerter-api` on Android) has no mode; decerter checks the peer with SO_PEERCRED
+    and lets root in, on Android also adb's shell user (uid 2000) that `adb forward tcp:<port> localabstract:decerter-api`
+    connects as, and on Linux peers whose primary group is `decerter`. There is no token.
+
+    The history keeps the flows in scope in memory with their messages: at most 10000 flows, 200000 messages and
+    64 MiB of payload in total, 20000 messages and 1 MiB of payload per flow. The oldest flow is evicted first when a
+    total bound is reached; a flow over its own bound keeps its metadata and is marked `truncated`. Payloads are only
+    recorded with `--decrypt` (observed copies) and `--intercept` (what went through the rules); plain relaying keeps
+    the flows alone. Every flow in scope is classified as TLS or not: with the API, the proxy reads the first bytes of
+    each flow before relaying it.
+
+    Payloads in responses are lowercase hex (`hex`) plus an escaped text form (`escaped`: printable ASCII as it is,
+    `\\`, `\n`, `\r`, `\t` and `\xNN` for every other byte). Values in requests are `{"type": "text"|"hex", "value": …}`.
+
+    Holding and rules need `decerter run --intercept`; otherwise those operations answer 409. A held message blocks only
+    its own direction of its own flow. Rules run in this order: the rules compiled into decerter (the identity rule of
+    `--intercept`), then the API rules in the order they were added, then the hold queue, so a held message shows what
+    goes on the wire.
+servers:
+  - url: http://decerter/api/v1
+paths:
+  /status:
+    get:
+      operationId: getStatus
+      summary: Mode, version, intercept state, scope filter and history usage
+      responses:
+        "200":
+          description: The status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Status"
+  /flows:
+    get:
+      operationId: listFlows
+      summary: Flows of the history, newest first
+      parameters:
+        - $ref: "#/components/parameters/Filter"
+        - name: limit
+          in: query
+          description: Flows per page.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 100
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of flows
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FlowList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+  /flows/{id}:
+    get:
+      operationId: getFlow
+      summary: One flow
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: The flow
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Flow"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /flows/{id}/messages:
+    get:
+      operationId: listMessages
+      summary: Messages of a flow without payloads, oldest first
+      parameters:
+        - $ref: "#/components/parameters/ID"
+        - name: limit
+          in: query
+          description: Messages per page.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of messages
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /messages/{id}:
+    get:
+      operationId: getMessage
+      summary: One message with a window of its payload
+      description: |
+        `payload` is what went on, `original` what the peer sent when a rule or an edit changed it (the same window of
+        both). A held message is not in the history until it is released, read it with listHolds.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+        - name: offset
+          in: query
+          description: First byte of the window.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: length
+          in: query
+          description: Bytes in the window.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 65536
+            default: 4096
+      responses:
+        "200":
+          description: The message
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MessageDetail"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /events:
+    get:
+      operationId: streamEvents
+      summary: Live server-sent events
+      description: |
+        A `text/event-stream` from now on, without replay: each event has `id:` (its `seq`), `event:` (its `type`) and
+        `data:` (the JSON Event). A comment line comes every 15 s. Message and hold events carry no payload. A client
+        that falls 256 events behind gets what is still buffered, then one `overflow` event whose `seq` is the first lost
+        event, and the stream ends; the proxy never waits for a client.
+      responses:
+        "200":
+          description: The event stream, each data line is an Event
+          content:
+            text/event-stream:
+              schema:
+                type: string
+  /intercept:
+    put:
+      operationId: setIntercept
+      summary: Turn holding on or off
+      description: |
+        With `enabled` the messages of `direction` (default `up`, the client's) whose flow matches `filter` (default
+        every flow) are held until forwarded, dropped or the hold timeout of `decerter run --hold-timeout` (default 60 s)
+        passes, which forwards them as they are then. Turning it off forwards every held message as it is. A new filter
+        or direction applies to the messages that come after it.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InterceptRequest"
+      responses:
+        "200":
+          description: The new state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InterceptState"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /holds:
+    get:
+      operationId: listHolds
+      summary: Held messages waiting for a decision, oldest first, with their whole payloads
+      responses:
+        "200":
+          description: The held messages, empty without --intercept
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HoldList"
+  /holds/{id}:
+    put:
+      operationId: editHold
+      summary: Replace the payload of a held message
+      description: The message goes on with the new payload when it is forwarded or its hold times out.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EditRequest"
+      responses:
+        "200":
+          description: The held message with its new payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Hold"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /holds/{id}/forward:
+    post:
+      operationId: forwardHold
+      summary: Let a held message go on
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "204":
+          description: Forwarded
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /holds/{id}/drop:
+    post:
+      operationId: dropHold
+      summary: Drop a held message
+      description: |
+        The message does not go on: a TLS record is left out and the later records of its direction take its sequence
+        number, TCP bytes are not sent, a datagram is lost. The peers are not told; an HTTP client waits for an answer
+        until its own timeout.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "204":
+          description: Dropped
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /rules:
+    get:
+      operationId: listRules
+      summary: The API rules in the order they run
+      responses:
+        "200":
+          description: The rules, empty without --intercept
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RuleList"
+    post:
+      operationId: addRule
+      summary: Add a match-and-replace rule, it runs after the rules before it
+      description: |
+        Every occurrence of `find` in a message of `direction`, `layer` and `filter` becomes `replace`. A message is one
+        TLS or DTLS record, one read of a plain TCP stream or one UDP datagram, so a value that spans two messages is
+        not found. A `regex` find is RE2 over the bytes (use `(?s)` for `.` to match a newline) and must not match the
+        empty string; its `replace` is a template where `$1`, `${1}` and `${name}` are groups and `$$` is a `$`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RuleRequest"
+            example:
+              filter: tcp.dstport == 443
+              direction: up
+              layer: tls
+              find:
+                type: regex
+                value: "GET /(\\S*) "
+              replace:
+                type: text
+                value: "GET /test/$1 "
+      responses:
+        "201":
+          description: The rule with its id
+          headers:
+            Location:
+              description: The path of the rule
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Rule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /rules/{id}:
+    delete:
+      operationId: deleteRule
+      summary: Delete a rule, a message it is working on is finished first
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "204":
+          description: Deleted
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /keylog:
+    get:
+      operationId: exportKeylog
+      summary: NSS key log lines of the TLS and DTLS sessions in the history
+      description: |
+        The SSLKEYLOGFILE lines of every TLS and DTLS flow of the history the filter takes, looked up in the secrets the
+        uprobe collected; a session whose secrets are not (any more) there is left out. The secrets only go to the
+        client, decerter never logs them.
+      parameters:
+        - $ref: "#/components/parameters/Filter"
+      responses:
+        "200":
+          description: Key log lines, each ends with a newline
+          content:
+            text/plain:
+              schema:
+                type: string
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "409":
+          $ref: "#/components/responses/Conflict"
+components:
+  parameters:
+    ID:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        format: uint64
+        minimum: 0
+    Filter:
+      name: filter
+      in: query
+      description: A filter in the language of --filter (decerter help filter), evaluated on the stored flows; empty takes every flow.
+      schema:
+        type: string
+    Cursor:
+      name: cursor
+      in: query
+      description: The next_cursor of the page before, empty for the first page.
+      schema:
+        type: string
+  responses:
+    BadRequest:
+      description: A parameter or the body is invalid, a filter error has a marker under its column
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: No such flow, message, held message or rule
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Conflict:
+      description: Not possible in this mode, holding and rules need --intercept, the key log needs TLS secrets
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+    Processing:
+      type: string
+      description: relay (no payloads), decrypt (--decrypt) or intercept (--intercept)
+      enum: [relay, decrypt, intercept]
+    Direction:
+      type: string
+      description: up is client to server, down server to client
+      enum: [up, down]
+    Directions:
+      type: string
+      enum: [up, down, both]
+    Layer:
+      type: string
+      description: tcp is one read of a plain stream, tls and dtls the application data of one record, udp one datagram
+      enum: [tcp, tls, udp, dtls]
+    ValueType:
+      type: string
+      description: text (UTF-8 bytes as they are), hex (two digits per byte, white space ignored), regex (only the find value of a rule)
+      enum: [text, hex, regex]
+    Value:
+      type: object
+      required: [type, value]
+      properties:
+        type:
+          $ref: "#/components/schemas/ValueType"
+        value:
+          type: string
+    Status:
+      type: object
+      required: [mode, processing, version, platform, scope, tls_secrets, started, intercept, rules, history]
+      properties:
+        mode:
+          type: string
+          enum: [run]
+        processing:
+          $ref: "#/components/schemas/Processing"
+        version:
+          type: string
+        platform:
+          type: string
+          enum: [linux, android]
+        scope:
+          type: string
+          description: The --filter of the run, empty without one
+        tls_secrets:
+          type: boolean
+          description: The secrets uprobe is loaded
+        started:
+          type: string
+          format: date-time
+        intercept:
+          $ref: "#/components/schemas/InterceptState"
+        rules:
+          type: integer
+        history:
+          $ref: "#/components/schemas/HistoryStatus"
+    HistoryStatus:
+      type: object
+      required: [flows, open_flows, messages, payload_bytes, evicted_flows, limits]
+      properties:
+        flows:
+          type: integer
+        open_flows:
+          type: integer
+        messages:
+          type: integer
+        payload_bytes:
+          type: integer
+          format: int64
+        evicted_flows:
+          type: integer
+          format: uint64
+        limits:
+          $ref: "#/components/schemas/HistoryLimits"
+    HistoryLimits:
+      type: object
+      required: [flows, messages, flow_messages, payload_bytes, flow_payload_bytes]
+      properties:
+        flows:
+          type: integer
+        messages:
+          type: integer
+        flow_messages:
+          type: integer
+        payload_bytes:
+          type: integer
+          format: int64
+        flow_payload_bytes:
+          type: integer
+          format: int64
+    InterceptState:
+      type: object
+      required: [available, enabled, filter, direction, hold_timeout_seconds, held]
+      properties:
+        available:
+          type: boolean
+          description: false unless decerter runs with --intercept
+        enabled:
+          type: boolean
+        filter:
+          type: string
+        direction:
+          $ref: "#/components/schemas/Directions"
+        hold_timeout_seconds:
+          type: number
+        held:
+          type: integer
+          description: Messages held now
+    InterceptRequest:
+      type: object
+      required: [enabled]
+      additionalProperties: false
+      properties:
+        enabled:
+          type: boolean
+        filter:
+          type: string
+          description: Hold only the messages of flows this filter takes, empty is every flow
+        direction:
+          $ref: "#/components/schemas/Directions"
+    Process:
+      type: object
+      required: [pid, uid, gid, comm, cmdline, exe]
+      properties:
+        pid:
+          type: integer
+          format: uint32
+        uid:
+          type: integer
+          format: uint32
+        gid:
+          type: integer
+          format: uint32
+        comm:
+          type: string
+        cmdline:
+          type: string
+          description: Empty when /proc could not be read
+        exe:
+          type: string
+    TLSInfo:
+      type: object
+      description: The ClientHello and, once the record layer has seen the ServerHello, the session
+      required: [offered_version, server_name, offered_alpn]
+      properties:
+        offered_version:
+          type: string
+          description: The highest version the ClientHello offers, empty when it could not be read
+        server_name:
+          type: string
+        offered_alpn:
+          type: array
+          items:
+            type: string
+        client_random:
+          type: string
+          description: 64 hex digits, names the session in a key log
+        version:
+          type: string
+        cipher_suite:
+          type: string
+        alpn:
+          type: string
+    Traffic:
+      type: object
+      required: [bytes, datagrams, messages]
+      properties:
+        bytes:
+          type: integer
+          format: int64
+          description: What the proxy sent on, set when the flow closes
+        datagrams:
+          type: integer
+          format: int64
+          description: UDP only, set when the flow closes
+        messages:
+          type: integer
+          description: Messages in the history
+    Flow:
+      type: object
+      required: [id, protocol, state, opened, client, destination, cookie, process, up, down, payload_bytes, truncated]
+      properties:
+        id:
+          type: integer
+          format: uint64
+        protocol:
+          type: string
+          enum: [tcp, udp]
+        state:
+          type: string
+          enum: [open, closed]
+        opened:
+          type: string
+          format: date-time
+        closed:
+          type: string
+          format: date-time
+        client:
+          type: string
+          description: The local end of the app's socket, address:port
+        destination:
+          type: string
+          description: The original destination, address:port
+        cookie:
+          type: integer
+          format: uint64
+          description: The kernel's socket cookie
+        process:
+          $ref: "#/components/schemas/Process"
+        tls:
+          $ref: "#/components/schemas/TLSInfo"
+        layer:
+          $ref: "#/components/schemas/Layer"
+        up:
+          $ref: "#/components/schemas/Traffic"
+        down:
+          $ref: "#/components/schemas/Traffic"
+        payload_bytes:
+          type: integer
+          format: int64
+          description: Payload bytes the history keeps of the flow
+        truncated:
+          type: boolean
+          description: Messages or payload bytes of the flow were not kept
+    FlowList:
+      type: object
+      required: [flows]
+      properties:
+        flows:
+          type: array
+          items:
+            $ref: "#/components/schemas/Flow"
+        next_cursor:
+          type: string
+          description: Absent on the last page
+    Message:
+      type: object
+      required: [id, flow_id, direction, layer, time, origin, verdict, edited, length, original_length, stored_length]
+      properties:
+        id:
+          type: integer
+          format: uint64
+        flow_id:
+          type: integer
+          format: uint64
+        direction:
+          $ref: "#/components/schemas/Direction"
+        layer:
+          $ref: "#/components/schemas/Layer"
+        time:
+          type: string
+          format: date-time
+          description: When the message went on (or was dropped)
+        origin:
+          type: string
+          description: rules (went through the rules), passed (went on before the TLS secrets came), observed (--decrypt)
+          enum: [rules, passed, observed]
+        verdict:
+          type: string
+          enum: [forward, drop]
+        edited:
+          type: boolean
+          description: A rule or an edit changed it, or it was dropped
+        length:
+          type: integer
+          description: Bytes that went on
+        original_length:
+          type: integer
+          description: Bytes the peer sent
+        stored_length:
+          type: integer
+          description: Bytes of the payload the history kept
+    MessageList:
+      type: object
+      required: [messages]
+      properties:
+        messages:
+          type: array
+          items:
+            $ref: "#/components/schemas/Message"
+        next_cursor:
+          type: string
+    Payload:
+      type: object
+      required: [offset, length, total, hex, escaped]
+      properties:
+        offset:
+          type: integer
+        length:
+          type: integer
+          description: Bytes in this window
+        total:
+          type: integer
+          description: Bytes there are
+        hex:
+          type: string
+        escaped:
+          type: string
+    MessageDetail:
+      allOf:
+        - $ref: "#/components/schemas/Message"
+        - type: object
+          required: [payload]
+          properties:
+            payload:
+              $ref: "#/components/schemas/Payload"
+            original:
+              $ref: "#/components/schemas/Payload"
+    Hold:
+      type: object
+      required: [id, flow_id, direction, layer, held_at, deadline, edited, length, original_length]
+      properties:
+        id:
+          type: integer
+          format: uint64
+          description: The message id
+        flow_id:
+          type: integer
+          format: uint64
+        direction:
+          $ref: "#/components/schemas/Direction"
+        layer:
+          $ref: "#/components/schemas/Layer"
+        held_at:
+          type: string
+          format: date-time
+        deadline:
+          type: string
+          format: date-time
+          description: When it goes on by itself
+        edited:
+          type: boolean
+        length:
+          type: integer
+        original_length:
+          type: integer
+        payload:
+          $ref: "#/components/schemas/Payload"
+    HoldList:
+      type: object
+      required: [holds]
+      properties:
+        holds:
+          type: array
+          items:
+            $ref: "#/components/schemas/Hold"
+    EditRequest:
+      type: object
+      required: [payload]
+      additionalProperties: false
+      properties:
+        payload:
+          $ref: "#/components/schemas/Value"
+    RuleRequest:
+      type: object
+      required: [find, replace]
+      additionalProperties: false
+      properties:
+        filter:
+          type: string
+          description: Empty is every flow
+        direction:
+          $ref: "#/components/schemas/Directions"
+        layer:
+          $ref: "#/components/schemas/Layer"
+        find:
+          $ref: "#/components/schemas/Value"
+        replace:
+          $ref: "#/components/schemas/Value"
+    Rule:
+      type: object
+      required: [id, created, filter, direction, find, replace, hits]
+      properties:
+        id:
+          type: integer
+          format: uint64
+        created:
+          type: string
+          format: date-time
+        filter:
+          type: string
+        direction:
+          $ref: "#/components/schemas/Directions"
+        layer:
+          $ref: "#/components/schemas/Layer"
+        find:
+          $ref: "#/components/schemas/Value"
+        replace:
+          $ref: "#/components/schemas/Value"
+        hits:
+          type: integer
+          format: uint64
+          description: Messages the rule changed
+    RuleList:
+      type: object
+      required: [rules]
+      properties:
+        rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/Rule"
+    EventType:
+      type: string
+      enum: [flow_opened, flow_closed, message, held, hold_edited, hold_released, rule_added, rule_deleted, intercept_changed, overflow]
+    Event:
+      type: object
+      description: |
+        flow_* carry flow, message carries message, held and hold_* carry hold (without payload; hold_released also
+        reason: forward, drop, timeout, intercept_off or closed), rule_* carry rule, intercept_changed carries intercept,
+        overflow carries reason and is the last event of the stream.
+      required: [seq, type, time]
+      properties:
+        seq:
+          type: integer
+          format: uint64
+        type:
+          $ref: "#/components/schemas/EventType"
+        time:
+          type: string
+          format: date-time
+        flow:
+          $ref: "#/components/schemas/Flow"
+        message:
+          $ref: "#/components/schemas/Message"
+        hold:
+          $ref: "#/components/schemas/Hold"
+        rule:
+          $ref: "#/components/schemas/Rule"
+        intercept:
+          $ref: "#/components/schemas/InterceptState"
+        reason:
+          type: string

@@ -16,7 +16,7 @@ import (
 func Keylog(selection redirect.Filter, libssl string, logger *logging.Logger) (err error) {
 	ctx, cancel := shutdownContext()
 	defer cancel()
-	decerter := app.New(ctx, selection, nil, 0, time.Duration(0), false, true, false, nil, libssl, "", false, capturebpf.MaxSnaplen, platform.Detect("/"), logger.Slog())
+	decerter := app.New(ctx, selection, nil, 0, time.Duration(0), false, true, false, nil, "", time.Duration(0), libssl, "", false, capturebpf.MaxSnaplen, platform.Detect("/"), logger.Slog())
 	err = serve(ctx, &decerter, logger)
 	return
 }

@@ -45,7 +45,7 @@ var (
 
 // Test if proxy.scopeValues and proxy.isInScope return with the expected output.
 func TestScopeValuesPositive(state *testing.T) {
-	values := scopeValues(testFlow, "curl -s https://example.com/", testClient, nil)
+	values := scopeValues(testFlow, "curl -s https://example.com/", testClient, nil, false)
 	expected := filter.Values{PID: testFlow.Tgid, UID: 1001, GID: 1002, Comm: "curl", Cmdline: "curl -s https://example.com/", Exe: "", IPProtocol: syscall.IPPROTO_TCP, Source: testClient, Destination: testFlow.OriginalDestination, TLS: filter.UnknownTLSState, TLSVersion: 0, ServerName: "", Protocols: nil}
 
 	if !reflect.DeepEqual(values, expected) {
@@ -66,7 +66,7 @@ func TestScopeValuesPositive(state *testing.T) {
 		state.Fatalf("Test of proxy.scopeValues failed, cannot find test binary, error: %s", err.Error())
 	}
 
-	values = scopeValues(testFlow, "", testClient, &scope)
+	values = scopeValues(testFlow, "", testClient, &scope, false)
 
 	if values.Exe != executable {
 		state.Errorf("Test of proxy.scopeValues function failed, exe should be %s, exe: %s", executable, values.Exe)
@@ -237,7 +237,7 @@ func TestUDPSessionsPositive(state *testing.T) {
 func TestTLSObserverPositive(state *testing.T) {
 	logs := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(logs, nil))
-	observer := NewTLSObserver(testFlow, testClient, nil)
+	observer := NewTLSObserver(testFlow, testClient, intercept.Flow{}, nil, nil)
 
 	for range observerQueueLength {
 		observer.Observe(tlsrecord.ClientDirection, []byte("x"), logger)
@@ -257,9 +257,9 @@ func TestTLSObserverPositive(state *testing.T) {
 	}
 
 	// more bytes than the backlog may hold stop it at once, a flow that is not TLS stops it without a warning
-	big := NewTLSObserver(testFlow, testClient, nil)
+	big := NewTLSObserver(testFlow, testClient, intercept.Flow{}, nil, nil)
 	big.Observe(tlsrecord.ClientDirection, make([]byte, maxObserverBytes+1), logger)
-	plain := NewTLSObserver(testFlow, testClient, nil)
+	plain := NewTLSObserver(testFlow, testClient, intercept.Flow{}, nil, nil)
 	plain.Stop(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	if big.Active() || (len(big.chunks) != 0) || plain.Active() {
@@ -360,8 +360,8 @@ func relay(state *testing.T, request []byte, response []byte) (upstream []byte, 
 		err = errors.Join(err, app.Close(), proxyClient.Close(), proxyUpstream.Close(), server.Close())
 	}()
 
-	pipeline := intercept.New([]intercept.Rule{replaceRule{old: []byte("GET / "), new: []byte("GET /test ")}}, nil)
-	flow := intercept.FlowOf(1, testFlow, testClient)
+	pipeline := intercept.New([]intercept.Rule{replaceRule{old: []byte("GET / "), new: []byte("GET /test ")}}, nil, nil)
+	flow := intercept.FlowOf(0, 1, testFlow, testClient, filter.Values{})
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	doneChannel := make(chan [2]int64, 1)
 	serverErrChannel := make(chan error, 1)

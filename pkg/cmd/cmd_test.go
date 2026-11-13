@@ -38,6 +38,7 @@ func TestParseFlagsPositive(state *testing.T) {
 		{Parse: parseFilter, Value: `proc.uid == 1001 && tls.sni contains "example"`},
 		{Parse: parsePort, Value: "8080"},
 		{Parse: parseIdleTimeout, Value: "1m30s"},
+		{Parse: parseHoldTimeout, Value: "2m"},
 		{Parse: parseSnaplen, Value: "1500"},
 		{Parse: parseLogLevel, Value: "trace"},
 	}
@@ -63,7 +64,7 @@ func TestParseFlagsPositive(state *testing.T) {
 		return
 	}
 
-	if (scopeFilter == nil) || (scopeFilter.String() != `proc.uid == 1001 && tls.sni contains "example"`) || (proxyPort != 8080) || (udpIdleTimeout != 90*time.Second) || (snaplen != 1500) || !logger.Slog().Enabled(state.Context(), slog.LevelDebug-4) {
+	if (scopeFilter == nil) || (scopeFilter.String() != `proc.uid == 1001 && tls.sni contains "example"`) || (proxyPort != 8080) || (udpIdleTimeout != 90*time.Second) || (holdTimeout != 2*time.Minute) || (snaplen != 1500) || !logger.Slog().Enabled(state.Context(), slog.LevelDebug-4) {
 		state.Errorf("Test of the flag parsers failed, filter %v, port %d, timeout %s, snaplen %d", scopeFilter, proxyPort, udpIdleTimeout, snaplen)
 		return
 	}
@@ -95,6 +96,9 @@ func TestExecuteNegative(state *testing.T) {
 		{Args: []string{"run", "--uid", "1001", "--port", "0"}, Text: `invalid port "0": must be between 1 and 65535`},
 		{Args: []string{"run", "--uid", "1001", "--udp-idle-timeout", "0s"}, Text: `invalid udp idle timeout "0s": must be positive`},
 		{Args: []string{"run", "--uid", "1001", "--udp-idle-timeout", "soon"}, Text: `invalid udp idle timeout "soon"`},
+		{Args: []string{"run", "--uid", "1001", "--hold-timeout", "0s"}, Text: `invalid hold timeout "0s": must be positive and at most 1h0m0s`},
+		{Args: []string{"run", "--uid", "1001", "--hold-timeout", "2h"}, Text: `invalid hold timeout "2h": must be positive and at most 1h0m0s`},
+		{Args: []string{"run", "--uid", "1001", "--hold-timeout", "later"}, Text: `invalid hold timeout "later"`},
 		{Args: []string{"capture", "-w", "out.pcapng", "--uid", "1001", "--snaplen", "262145"}, Text: `invalid snaplen "262145": must be between 1 and 262144`},
 		// the parse error shows where in the filter it is, the way tshark does
 		{Args: []string{"run", "--filter", `proc.comm = "curl"`}, Text: "invalid filter: column 11: syntax error: unexpected \"=\", equality is ==\nproc.comm = \"curl\"\n          ^"},
@@ -128,7 +132,7 @@ func TestExecutePositive(state *testing.T) {
 	}{
 		{Args: []string{"--version"}, Text: []string{"decerter ", "(commit "}},
 		{Args: []string{"help", "filter"}, Text: []string{"subset of Wireshark's display filter language", "  proc.comm      string, flow, comm_map\n", "  tls.alpn       string, several values, clienthello\n"}},
-		{Args: []string{"run", "--help"}, Text: []string{"--decrypt", "--udp-idle-timeout duration", "--log-level level"}},
+		{Args: []string{"run", "--help"}, Text: []string{"--decrypt", "--udp-idle-timeout duration", "--api-socket path", "--hold-timeout duration", "--log-level level"}},
 		{Args: []string{"capture", "--help"}, Text: []string{"-w, --write file", "--snaplen bytes"}},
 	}
 
@@ -202,6 +206,8 @@ func resetState(state *testing.T) {
 	flowTable = false
 	decrypt = false
 	interceptFlows = false
+	apiSocket = ""
+	holdTimeout = defaultHoldTimeout
 	proxyPort = defaultProxyPort
 	udpIdleTimeout = 30 * time.Second
 	capturePath = ""

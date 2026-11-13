@@ -31,12 +31,11 @@ const (
 	buildTimeout time.Duration = 5 * time.Minute
 	// an installed app with the INTERNET permission whose UID the clients borrow, netd refuses sockets to a UID without it
 	appPackage string = "com.android.proxyhandler"
-	// the binaries on the device; decerter and rewrite are found by name with pidof
-	decerterBinary    string = "decerter"
-	rewriteBinary string = "rewrite"
-	clientBinary  string = "client"
-	dexName       string = "decerter-https.dex"
-	caName        string = "ca.crt"
+	// the binaries on the device; decerter is found by name with pidof
+	decerterBinary   string = "decerter"
+	clientBinary string = "client"
+	dexName      string = "decerter-https.dex"
+	caName       string = "ca.crt"
 	// what decerter logs once it is attached, per mode
 	redirectReady string = `"msg":"Redirecting flows"`
 	captureReady  string = `"msg":"Capturing packets"`
@@ -204,7 +203,7 @@ func setup() (err error) {
 	return
 }
 
-// build decerter, the rewrite decerter and the client for the emulator: static linux/amd64 like make build
+// build decerter and the client for the emulator: static linux/amd64 like make build
 func buildBinaries(ctx context.Context) (err error) {
 	goPath, lookErr := exec.LookPath("go")
 
@@ -213,9 +212,8 @@ func buildBinaries(ctx context.Context) (err error) {
 	}
 
 	packages := map[string]string{
-		decerterBinary:    "github.com/decerter/decerter/cmd/decerter",
-		rewriteBinary: "./rewrite",
-		clientBinary:  "./client",
+		decerterBinary:   "github.com/decerter/decerter/cmd/decerter",
+		clientBinary: "./client",
 	}
 
 	for name, buildPackage := range packages {
@@ -322,7 +320,7 @@ func pushFiles(ctx context.Context) (err error) {
 		return
 	}
 
-	for _, name := range []string{decerterBinary, rewriteBinary, clientBinary} {
+	for _, name := range []string{decerterBinary, clientBinary} {
 		err = device.push(ctx, filepath.Join(workDirectory, name), deviceDirectory+"/"+name, "755")
 
 		if err != nil {
@@ -360,7 +358,8 @@ func teardown() (err error) {
 	}
 
 	if device.Serial != "" {
-		_, removeErr := device.shell(ctx, "rm -rf "+deviceDirectory+" "+dataDirectory)
+		// sync before the emulator is killed, a removal still in the page cache would be lost
+		_, removeErr := device.shell(ctx, "rm -rf "+deviceDirectory+" "+dataDirectory+" && sync")
 		left, listErr := device.shell(ctx, "ls -A /data/local/tmp")
 		err = errors.Join(err, removeErr, listErr)
 

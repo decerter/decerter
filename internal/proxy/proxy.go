@@ -21,8 +21,8 @@ func processCmdline(tgid uint32) (cmdline string, err error) {
 }
 
 // what the scope filter knows of a flow when the proxy takes it: the flow of the kernel, the client endpoint (the local end of the app's socket) and /proc; the ClientHello comes later
-// cmdline is empty when it could not be read, exe is only read when the filter asks for it
-func scopeValues(flow redirect.Flow, cmdline string, client netip.AddrPort, scope *filter.Filter) (values filter.Values) {
+// cmdline is empty when it could not be read, exe is only read when the filter asks for it or the flow goes into the API's history (isRecorded)
+func scopeValues(flow redirect.Flow, cmdline string, client netip.AddrPort, scope *filter.Filter, isRecorded bool) (values filter.Values) {
 	values = filter.Values{
 		PID:         flow.Tgid,
 		UID:         flow.UID,
@@ -39,7 +39,7 @@ func scopeValues(flow redirect.Flow, cmdline string, client netip.AddrPort, scop
 		Protocols:   nil,
 	}
 
-	if (scope != nil) && scope.Uses(filter.ExeField) {
+	if isRecorded || ((scope != nil) && scope.Uses(filter.ExeField)) {
 		exe, exeErr := filter.ReadExe(flow.Tgid)
 
 		if exeErr == nil {

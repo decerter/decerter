@@ -15,18 +15,19 @@ import (
 )
 
 // redirect the selected flows through the proxy until stopped; decrypt prints the plaintext of TLS and DTLS records, interceptFlows runs every message through the identity rule and prints it
-func Run(selection redirect.Filter, scopeFilter *filter.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, decrypt bool, interceptFlows bool, libssl string, logger *logging.Logger) (err error) {
+// apiSocket serves the control API on this socket, empty serves none; holdTimeout is how long a message held over the API waits for a decision
+func Run(selection redirect.Filter, scopeFilter *filter.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, decrypt bool, interceptFlows bool, apiSocket string, holdTimeout time.Duration, libssl string, logger *logging.Logger) (err error) {
 	ctx, cancel := shutdownContext()
 	defer cancel()
 
-	// rules only come from code for now, the command line has the identity rule
+	// the command line has the identity rule, which prints every message; the API adds its rules and hold queue after it
 	var rules []intercept.Rule
 
 	if interceptFlows {
 		rules = []intercept.Rule{intercept.IdentityRule{}}
 	}
 
-	decerter := app.New(ctx, selection, scopeFilter, proxyPort, udpIdleTimeout, flowTable, false, decrypt, rules, libssl, "", false, capturebpf.MaxSnaplen, platform.Detect("/"), logger.Slog())
+	decerter := app.New(ctx, selection, scopeFilter, proxyPort, udpIdleTimeout, flowTable, false, decrypt, rules, apiSocket, holdTimeout, libssl, "", false, capturebpf.MaxSnaplen, platform.Detect("/"), logger.Slog())
 	err = serve(ctx, &decerter, logger)
 	return
 }

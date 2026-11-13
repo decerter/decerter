@@ -111,7 +111,10 @@ type interception struct {
 // relay an intercepted tcp flow until both directions are done, written is what went to each destination
 // TLS needs secretsBpfMaps, without them a TLS flow is relayed raw; plain tcp goes through the rules either way
 // opening are the bytes read before the scope was decided, they are taken first in the order they came
+// the rules get a context that ends with the flow, so a message held for the API is let go when the flow is aborted
 func interceptTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn, opening []TLSChunk, flow intercept.Flow, pipeline *intercept.Pipeline, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, logger *slog.Logger) (upBytes int64, downBytes int64) {
+	flowCtx, cancelFlow := context.WithCancel(ctx)
+	defer cancelFlow()
 	mutex := &sync.Mutex{}
 	interception := &interception{
 		mutex:          mutex,
@@ -130,6 +133,7 @@ func interceptTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPCon
 	abortOnce := sync.Once{}
 	abort := func() {
 		abortOnce.Do(func() {
+			cancelFlow()
 			// a deadline in the past unblocks the reads and writes without closing the sockets twice
 			deadlineErr := errors.Join(client.SetDeadline(time.Unix(1, 0)), upstream.SetDeadline(time.Unix(1, 0)))
 
@@ -164,10 +168,10 @@ func interceptTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPCon
 
 	// sender to upstream
 	waitGroup.Go(func() {
-		upBytes = interception.send(ctx, upstream, tlsrecord.ClientDirection, abort, logger.With("direction", "up"))
+		upBytes = interception.send(flowCtx, upstream, tlsrecord.ClientDirection, abort, logger.With("direction", "up"))
 	})
 
-	downBytes = interception.send(ctx, client, tlsrecord.ServerDirection, abort, logger.With("direction", "down"))
+	downBytes = interception.send(flowCtx, client, tlsrecord.ServerDirection, abort, logger.With("direction", "down"))
 	waitGroup.Wait()
 	interception.spinGroup.Wait()
 	interception.finish()

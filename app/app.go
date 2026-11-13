@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 
+	v1 "github.com/decerter/decerter/api"
+	"github.com/decerter/decerter/internal/api"
 	"github.com/decerter/decerter/internal/attach"
 	"github.com/decerter/decerter/internal/bpf"
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
@@ -26,6 +28,7 @@ import (
 	"github.com/decerter/decerter/internal/bpf/secrets"
 	"github.com/decerter/decerter/internal/capture"
 	"github.com/decerter/decerter/internal/filter"
+	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/platform"
 	"github.com/decerter/decerter/internal/proxy"
@@ -69,6 +72,11 @@ type App struct {
 	keylog              bool
 	decrypt             bool
 	rules               []intercept.Rule
+	apiSocket           string
+	holdTimeout         time.Duration
+	apiServer           *api.Server
+	backend             *api.Backend
+	startTime           time.Time
 	libssl              string
 	logSecretAddress    uint64
 	capturePath         string
@@ -92,12 +100,13 @@ type App struct {
 // keylog is the keylog command: load and attach only the secrets uprobe and print NSS key log lines, no redirect, proxy or route sync
 // decrypt is the --decrypt option of run mode: the proxy decrypts the TLS flows with the secrets of the uprobe and prints their plaintext
 // rules make the proxy intercept every flow instead of observing it: TLS records are decrypted, run through the rules, printed and sealed again, plain tcp and udp go through them too; empty intercepts nothing
+// apiSocket serves the control API in run mode on this unix socket path, @name is an abstract socket, empty serves none; with rules the API adds its own rules and the hold queue after them, holdTimeout is how long a held message waits for a decision
 // libssl overrides the resolved libssl path, empty means search the standard directories
 // capturePath is the capture command: nothing is redirected, the packets of the selected flows and the secrets of their TLS sessions are written to this pcapng file, at most snaplen bytes of a packet
 // plaintext is the --plaintext option of capture mode: the file gets synthesized packets with the decrypted payload instead of the captured packets and the secrets
 // currentPlatform decides where the netd hook state is kept and whether hooks held exclusively by another program may be shared, only on Android
 // flags is the kernel selection of --uid, --pid, --dst-cidr and --dst-port; scopeFilter the --filter, which narrows it: its kernel terms are added to the maps, the proxy and the capture writer decide the rest per flow; nil is no filter
-func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, decrypt bool, rules []intercept.Rule, libssl string, capturePath string, plaintext bool, snaplen uint32, currentPlatform platform.Platform, logger *slog.Logger) (app App) {
+func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter, proxyPort uint16, udpIdleTimeout time.Duration, flowTable bool, keylog bool, decrypt bool, rules []intercept.Rule, apiSocket string, holdTimeout time.Duration, libssl string, capturePath string, plaintext bool, snaplen uint32, currentPlatform platform.Platform, logger *slog.Logger) (app App) {
 	appCtx, cancel := context.WithCancel(ctx)
 	app = App{
 		ctx:                 appCtx,
@@ -113,6 +122,11 @@ func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter,
 		keylog:              keylog,
 		decrypt:             decrypt,
 		rules:               rules,
+		apiSocket:           apiSocket,
+		holdTimeout:         holdTimeout,
+		apiServer:           nil,
+		backend:             nil,
+		startTime:           time.Now(),
 		libssl:              libssl,
 		logSecretAddress:    0,
 		capturePath:         capturePath,
@@ -344,18 +358,47 @@ func (app *App) StartProxy() (err error) {
 		secretsBpfMaps = app.secretsBpfMaps
 	}
 
+	processing := v1.RelayProcessing
+
 	switch {
 	case isIntercepting:
-		pipeline = intercept.New(app.rules, os.Stdout)
-		app.logger.Info("Intercepting the flows of the proxy", "rules", len(app.rules), "tls", secretsBpfMaps != nil)
+		processing = v1.InterceptProcessing
 	case secretsBpfMaps != nil:
+		processing = v1.DecryptProcessing
+	default:
+	}
+
+	// the API's history records every flow in scope, its rules and hold queue run after the rules of the code
+	rules := app.rules
+	var recorder *history.History
+
+	if app.apiSocket != "" {
+		app.backend = app.newBackend(processing)
+		recorder = app.backend.History
+
+		if isIntercepting {
+			rules = append(slices.Clone(app.rules), app.backend.Rules, app.backend.Holds)
+		}
+	}
+
+	switch processing {
+	case v1.InterceptProcessing:
+		var recordMessage intercept.Recorder
+
+		if recorder != nil {
+			recordMessage = recorder.Record
+		}
+
+		pipeline = intercept.New(rules, os.Stdout, recordMessage)
+		app.logger.Info("Intercepting the flows of the proxy", "rules", len(app.rules), "tls", secretsBpfMaps != nil)
+	case v1.DecryptProcessing:
 		app.logger.Info("Decrypting tls flows of the tcp proxy and dtls sessions of the udp proxy")
 	default:
 	}
 
 	// tcp proxy, closes the listener when the context is cancelled
 	app.waitGroup.Go(func() {
-		proxy.ServeTCP(app.ctx, app.tcpListener, app.redirectBpfMaps, secretsBpfMaps, pipeline, app.scope, app.waitGroup, app.logger)
+		proxy.ServeTCP(app.ctx, app.tcpListener, app.redirectBpfMaps, secretsBpfMaps, pipeline, app.scope, recorder, app.waitGroup, app.logger)
 	})
 
 	connection, udpListenErr := proxy.ListenUDP(app.ctx, app.proxyPort)
@@ -370,10 +413,71 @@ func (app *App) StartProxy() (err error) {
 
 	// udp proxy, closes the socket when the context is cancelled
 	app.waitGroup.Go(func() {
-		proxy.ServeUDP(app.ctx, app.udpConnection, app.udpIdleTimeout, app.redirectBpfMaps, secretsBpfMaps, pipeline, app.scope, app.waitGroup, app.logger)
+		proxy.ServeUDP(app.ctx, app.udpConnection, app.udpIdleTimeout, app.redirectBpfMaps, secretsBpfMaps, pipeline, app.scope, recorder, app.waitGroup, app.logger)
 	})
 
 	return
+}
+
+// the control API socket is created first in run mode, a path that can't be used stops decerter before anything is attached; it is served last, by ServeAPI
+func (app *App) ListenAPI() (err error) {
+	if app.apiSocket == "" {
+		return
+	}
+
+	server, listenErr := api.Listen(app.apiSocket, app.platform, app.logger)
+
+	if err = listenErr; err != nil {
+		return
+	}
+
+	app.apiServer = server
+	app.closeFunctions = append(app.closeFunctions, server.Close)
+	return
+}
+
+// what the API serves of this run: the history and, when the proxy intercepts, its rules and hold queue; the key log is read from secrets_map when it is asked for
+func (app *App) newBackend(processing v1.Processing) (backend *api.Backend) {
+	scope := ""
+
+	if app.scopeFilter != nil {
+		scope = app.scopeFilter.String()
+	}
+
+	info := api.Info{
+		Mode:               "run",
+		Processing:         processing,
+		Platform:           string(app.platform.Type),
+		Scope:              scope,
+		Started:            app.startTime,
+		HoldTimeout:        app.holdTimeout,
+		HasTLSSecrets:      app.secretsBpfMaps != nil,
+		IsInterceptCapable: processing == v1.InterceptProcessing,
+	}
+	var keyLog func(clientRandom [32]byte) (keyLog string, found bool, err error)
+
+	if app.secretsBpfMaps != nil {
+		secretsBpfMaps := app.secretsBpfMaps
+		keyLog = func(clientRandom [32]byte) (keyLog string, found bool, err error) {
+			keyLog, found, err = secrets.LookupKeyLog(clientRandom, secretsBpfMaps)
+			return
+		}
+	}
+
+	backend = api.NewBackend(info, history.DefaultLimits(), keyLog)
+	return
+}
+
+// serve the control API until decerter stops, everything it serves is running by now
+func (app *App) ServeAPI() {
+	if app.apiServer == nil {
+		return
+	}
+
+	// control api server, removes its socket when the context is cancelled
+	app.waitGroup.Go(func() {
+		app.apiServer.Serve(app.ctx, app.backend, app.logger)
+	})
 }
 
 // the programs that learn clients, restore addresses and clean up come first, so the first redirected socket already has them
@@ -1176,6 +1280,12 @@ func (app *App) startCaptureMode() (err error) {
 }
 
 func (app *App) startRunMode() (err error) {
+	err = app.ListenAPI()
+
+	if err != nil {
+		return
+	}
+
 	err = app.LoadBpfObjects()
 
 	if err != nil {
@@ -1228,6 +1338,7 @@ func (app *App) startRunMode() (err error) {
 	}
 
 	app.StartFlowTable()
+	app.ServeAPI()
 	return
 }
 

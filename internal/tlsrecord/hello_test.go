@@ -44,9 +44,12 @@ func TestReadClientHelloPositive(state *testing.T) {
 		}
 
 		hello, isComplete, err := tlsrecord.ReadClientHello(clientHello)
+		// the random is new in every hello, it is the 32 bytes after the record, handshake and version headers
+		expected := positive.Expected
+		expected.ClientRandom = [32]byte(clientHello[11:43])
 
-		if (err != nil) || !isComplete || !reflect.DeepEqual(hello, positive.Expected) {
-			state.Errorf("Test of tlsrecord.ReadClientHello function failed, hello should be %+v, hello: %+v, complete: %v, error: %v", positive.Expected, hello, isComplete, err)
+		if (err != nil) || !isComplete || !reflect.DeepEqual(hello, expected) {
+			state.Errorf("Test of tlsrecord.ReadClientHello function failed, hello should be %+v, hello: %+v, complete: %v, error: %v", expected, hello, isComplete, err)
 			return
 		}
 	}
@@ -104,9 +107,15 @@ func TestReadDTLSClientHelloPositive(state *testing.T) {
 
 	for _, positive := range positiveCases {
 		hello, isComplete, err := tlsrecord.ReadDTLSClientHello(positive.Datagram)
+		// the random follows the record header, the handshake header and the version
+		expected := positive.Expected
 
-		if (err != nil) || (isComplete != positive.IsComplete) || !reflect.DeepEqual(hello, positive.Expected) {
-			state.Errorf("Test of tlsrecord.ReadDTLSClientHello function failed, hello should be %+v complete %v, hello: %+v, complete: %v, error: %v", positive.Expected, positive.IsComplete, hello, isComplete, err)
+		if positive.IsComplete {
+			expected.ClientRandom = [32]byte(positive.Datagram[27:59])
+		}
+
+		if (err != nil) || (isComplete != positive.IsComplete) || !reflect.DeepEqual(hello, expected) {
+			state.Errorf("Test of tlsrecord.ReadDTLSClientHello function failed, hello should be %+v complete %v, hello: %+v, complete: %v, error: %v", expected, positive.IsComplete, hello, isComplete, err)
 			return
 		}
 	}
