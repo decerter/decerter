@@ -65,8 +65,8 @@ func ParseTarget(value string) (target Target, err error) {
 	return
 }
 
-// every connection goes to the api, whatever the URL names
-func newTransport(target Target) (transport *http.Transport) {
+// every connection goes to the api, whatever the URL names; decerter ui and decerter mcp both use it
+func NewTransport(target Target) (transport *http.Transport) {
 	transport = &http.Transport{
 		DialContext: func(ctx context.Context, network string, address string) (net.Conn, error) {
 			dialer := net.Dialer{}
@@ -89,7 +89,7 @@ func Check(ctx context.Context, target Target) (status v1.Status, err error) {
 	connection, err := dialer.DialContext(ctx, string(target.Network), target.Address)
 
 	if err != nil {
-		err = explain(err, target)
+		err = Explain(err, target)
 		return
 	}
 
@@ -114,14 +114,14 @@ func Check(ctx context.Context, target Target) (status v1.Status, err error) {
 	err = request.Write(connection)
 
 	if err != nil {
-		err = explain(err, target)
+		err = Explain(err, target)
 		return
 	}
 
 	response, err := http.ReadResponse(bufio.NewReader(connection), request)
 
 	if err != nil {
-		err = explain(err, target)
+		err = Explain(err, target)
 		return
 	}
 
@@ -132,7 +132,7 @@ func Check(ctx context.Context, target Target) (status v1.Status, err error) {
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxStatusBytes))
 
 	if err != nil {
-		err = explain(err, target)
+		err = Explain(err, target)
 		return
 	}
 
@@ -150,8 +150,8 @@ func Check(ctx context.Context, target Target) (status v1.Status, err error) {
 	return
 }
 
-// the reason a user can act on, the error of the dial after it
-func explain(err error, target Target) (explained error) {
+// the reason a user can act on, the error of the dial after it; for any error of a request to target, other errors come back as they are
+func Explain(err error, target Target) (explained error) {
 	explained = err
 
 	switch {
@@ -182,7 +182,7 @@ func newProxy(target Target, logger *slog.Logger) (handler http.Handler) {
 				proxyRequest.Out.Header.Del(name)
 			}
 		},
-		Transport:     newTransport(target),
+		Transport:     NewTransport(target),
 		FlushInterval: -1,
 		ErrorLog:      slog.NewLogLogger(logger.Handler(), slog.LevelDebug),
 		// the security headers of the guard stay the only ones, the api sets no cookie
@@ -199,7 +199,7 @@ func newProxy(target Target, logger *slog.Logger) (handler http.Handler) {
 				return
 			}
 
-			err = explain(err, target)
+			err = Explain(err, target)
 			logger.Warn("Could not reach the control api", "error", err, "path", request.URL.Path)
 			writeError(writer, http.StatusBadGateway, err, logger)
 		},

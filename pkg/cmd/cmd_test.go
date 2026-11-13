@@ -43,6 +43,7 @@ func TestParseFlagsPositive(state *testing.T) {
 		{Parse: parseSnaplen, Value: "1500"},
 		{Parse: parseLogLevel, Value: "trace"},
 		{Parse: parseUIAPISocket, Value: "127.0.0.1:8080"},
+		{Parse: parseMCPAPISocket, Value: "@decerter-api"},
 	}
 
 	for _, parser := range parsers {
@@ -66,8 +67,8 @@ func TestParseFlagsPositive(state *testing.T) {
 		return
 	}
 
-	if (scopeFilter == nil) || (scopeFilter.String() != `proc.uid == 1001 && tls.sni contains "example"`) || (proxyPort != 8080) || (udpIdleTimeout != 90*time.Second) || (holdTimeout != 2*time.Minute) || (snaplen != 1500) || !logger.Slog().Enabled(state.Context(), slog.LevelDebug-4) || (uiTarget != ui.Target{Network: ui.TCPNetwork, Address: "127.0.0.1:8080"}) {
-		state.Errorf("Test of the flag parsers failed, filter %v, port %d, timeout %s, snaplen %d, ui api %s", scopeFilter, proxyPort, udpIdleTimeout, snaplen, uiTarget)
+	if (scopeFilter == nil) || (scopeFilter.String() != `proc.uid == 1001 && tls.sni contains "example"`) || (proxyPort != 8080) || (udpIdleTimeout != 90*time.Second) || (holdTimeout != 2*time.Minute) || (snaplen != 1500) || !logger.Slog().Enabled(state.Context(), slog.LevelDebug-4) || (uiTarget != ui.Target{Network: ui.TCPNetwork, Address: "127.0.0.1:8080"}) || (mcpTarget != ui.Target{Network: ui.UnixNetwork, Address: "@decerter-api"}) {
+		state.Errorf("Test of the flag parsers failed, filter %v, port %d, timeout %s, snaplen %d, ui api %s, mcp api %s", scopeFilter, proxyPort, udpIdleTimeout, snaplen, uiTarget, mcpTarget)
 		return
 	}
 }
@@ -109,6 +110,8 @@ func TestExecuteNegative(state *testing.T) {
 		{Args: []string{"ui", "--api-socket", "10.0.0.1:8080"}, Text: `invalid api socket: a tcp api address must be a loopback ip address`},
 		{Args: []string{"ui", "--api-socket", ""}, Text: `invalid api socket: invalid api address "": empty`},
 		{Args: []string{"ui", "extra"}, Text: `unknown command "extra" for "decerter ui"`},
+		{Args: []string{"mcp", "--api-socket", "[::2]:8080"}, Text: `invalid api socket: a tcp api address must be a loopback ip address`},
+		{Args: []string{"mcp", "extra"}, Text: `unknown command "extra" for "decerter mcp"`},
 	}
 
 	for _, negative := range negativeCases {
@@ -140,6 +143,7 @@ func TestExecutePositive(state *testing.T) {
 		{Args: []string{"run", "--help"}, Text: []string{"--decrypt", "--udp-idle-timeout duration", "--api-socket path", "--hold-timeout duration", "--log-level level"}},
 		{Args: []string{"capture", "--help"}, Text: []string{"-w, --write file", "--snaplen bytes"}},
 		{Args: []string{"ui", "--help"}, Text: []string{"--api-socket address", "--open", "adb forward tcp:8080 localabstract:decerter-api"}},
+		{Args: []string{"mcp", "--help"}, Text: []string{"--api-socket address", "--output-dir directory", "claude mcp add decerter -- decerter mcp", "<untrusted-traffic"}},
 	}
 
 	for _, positive := range positiveCases {
@@ -221,6 +225,7 @@ func resetState(state *testing.T) {
 	snaplen = capturebpf.MaxSnaplen
 	uiTarget = ui.Target{}
 	openBrowser = false
+	mcpTarget = ui.Target{}
 	logger.ChangeLogLevel(slog.LevelInfo)
 	commands := []*cobra.Command{rootCmd}
 

@@ -33,6 +33,7 @@ import (
 	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/platform"
+	decertercmd "github.com/decerter/decerter/pkg/cmd"
 )
 
 const (
@@ -87,6 +88,12 @@ var (
 )
 
 func TestMain(main *testing.M) {
+	// the test binary is decerter mcp for the stdio cases, its arguments are decerter's
+	if os.Getenv(mcpServerEnvironment) == "1" {
+		decertercmd.Execute()
+		os.Exit(0)
+	}
+
 	err := prepare()
 
 	if err != nil {
