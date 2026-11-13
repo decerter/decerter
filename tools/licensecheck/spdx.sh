@@ -5,7 +5,8 @@
 #
 # Checks that every source file of the repository (tracked, or new and not ignored) has an SPDX line with the license of
 # its part, as docs/development.md lists them: the first line, or the second after a shebang. The control API contract
-# (api/openapi.yaml and its Go types in api/types.go) is MIT, so any client can be generated from it.
+# (api/openapi.yaml and its Go types in api/types.go) is MIT, so any client can be generated from it. The page of decerter ui
+# (internal/ui/web: HTML, JS and CSS) has it in a comment: <!-- … --> after the doctype, // in JS, /* … */ in CSS.
 # Not checked: the vendored libbpf headers in bpf/include/bpf, which keep the headers libbpf ships, and the bpf2go output,
 # which is generated from AGPL inputs; offsets_gen.go is written with its SPDX line by tools/offsetgen and is checked.
 set -euo pipefail
@@ -41,7 +42,7 @@ while IFS= read -r -d '' file; do
 	esac
 
 	checked=$((checked + 1))
-	license="$(head -n 2 "$file" | sed -n -E 's#^(//|\#|/\*) SPDX-License-Identifier: (.*[^ */])( \*/)?$#\2#p' | head -n 1)"
+	license="$(head -n 2 "$file" | sed -n -E 's#^(//|\#|/\*|<!--) SPDX-License-Identifier: (.*[^ */>-])( \*/| -->)?$#\2#p' | head -n 1)"
 
 	if [ -z "$license" ]; then
 		echo "$file: no SPDX-License-Identifier line in its first two lines" >&2
@@ -53,7 +54,7 @@ while IFS= read -r -d '' file; do
 		echo "$file: SPDX-License-Identifier is \"$license\", expected ${allowed//|/ or }" >&2
 		status=1
 	fi
-done < <(git ls-files -z --cached --others --exclude-standard -- '*.go' '*.c' '*.h' '*.cc' '*.java' '*.sh' '*.yaml' '*.yml' 'Makefile' '**/Makefile')
+done < <(git ls-files -z --cached --others --exclude-standard -- '*.go' '*.c' '*.h' '*.cc' '*.java' '*.sh' '*.yaml' '*.yml' 'Makefile' '**/Makefile' 'internal/ui/web/*.html' 'internal/ui/web/*.js' 'internal/ui/web/*.css')
 
 if [ "$status" -eq 0 ]; then
 	echo "SPDX lines are fine in $checked source files"

@@ -16,6 +16,7 @@ import (
 
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
 	"github.com/decerter/decerter/internal/bpf/redirect"
+	"github.com/decerter/decerter/internal/ui"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -41,6 +42,7 @@ func TestParseFlagsPositive(state *testing.T) {
 		{Parse: parseHoldTimeout, Value: "2m"},
 		{Parse: parseSnaplen, Value: "1500"},
 		{Parse: parseLogLevel, Value: "trace"},
+		{Parse: parseUIAPISocket, Value: "127.0.0.1:8080"},
 	}
 
 	for _, parser := range parsers {
@@ -64,8 +66,8 @@ func TestParseFlagsPositive(state *testing.T) {
 		return
 	}
 
-	if (scopeFilter == nil) || (scopeFilter.String() != `proc.uid == 1001 && tls.sni contains "example"`) || (proxyPort != 8080) || (udpIdleTimeout != 90*time.Second) || (holdTimeout != 2*time.Minute) || (snaplen != 1500) || !logger.Slog().Enabled(state.Context(), slog.LevelDebug-4) {
-		state.Errorf("Test of the flag parsers failed, filter %v, port %d, timeout %s, snaplen %d", scopeFilter, proxyPort, udpIdleTimeout, snaplen)
+	if (scopeFilter == nil) || (scopeFilter.String() != `proc.uid == 1001 && tls.sni contains "example"`) || (proxyPort != 8080) || (udpIdleTimeout != 90*time.Second) || (holdTimeout != 2*time.Minute) || (snaplen != 1500) || !logger.Slog().Enabled(state.Context(), slog.LevelDebug-4) || (uiTarget != ui.Target{Network: ui.TCPNetwork, Address: "127.0.0.1:8080"}) {
+		state.Errorf("Test of the flag parsers failed, filter %v, port %d, timeout %s, snaplen %d, ui api %s", scopeFilter, proxyPort, udpIdleTimeout, snaplen, uiTarget)
 		return
 	}
 }
@@ -104,6 +106,9 @@ func TestExecuteNegative(state *testing.T) {
 		{Args: []string{"run", "--filter", `proc.comm = "curl"`}, Text: "invalid filter: column 11: syntax error: unexpected \"=\", equality is ==\nproc.comm = \"curl\"\n          ^"},
 		{Args: []string{"--log-level", "loud", "run"}, Text: "invalid log level"},
 		{Args: []string{"run"}, Environment: map[string]string{"DECERTER_UID": "abc"}, Text: `invalid environment variable DECERTER_UID: invalid argument "abc" for "--uid" flag: invalid uid "abc"`},
+		{Args: []string{"ui", "--api-socket", "10.0.0.1:8080"}, Text: `invalid api socket: a tcp api address must be a loopback ip address`},
+		{Args: []string{"ui", "--api-socket", ""}, Text: `invalid api socket: invalid api address "": empty`},
+		{Args: []string{"ui", "extra"}, Text: `unknown command "extra" for "decerter ui"`},
 	}
 
 	for _, negative := range negativeCases {
@@ -134,6 +139,7 @@ func TestExecutePositive(state *testing.T) {
 		{Args: []string{"help", "filter"}, Text: []string{"subset of Wireshark's display filter language", "  proc.comm      string, flow, comm_map\n", "  tls.alpn       string, several values, clienthello\n"}},
 		{Args: []string{"run", "--help"}, Text: []string{"--decrypt", "--udp-idle-timeout duration", "--api-socket path", "--hold-timeout duration", "--log-level level"}},
 		{Args: []string{"capture", "--help"}, Text: []string{"-w, --write file", "--snaplen bytes"}},
+		{Args: []string{"ui", "--help"}, Text: []string{"--api-socket address", "--open", "adb forward tcp:8080 localabstract:decerter-api"}},
 	}
 
 	for _, positive := range positiveCases {
@@ -213,6 +219,8 @@ func resetState(state *testing.T) {
 	capturePath = ""
 	plaintext = false
 	snaplen = capturebpf.MaxSnaplen
+	uiTarget = ui.Target{}
+	openBrowser = false
 	logger.ChangeLogLevel(slog.LevelInfo)
 	commands := []*cobra.Command{rootCmd}
 

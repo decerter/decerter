@@ -8,13 +8,14 @@ Requires Linux ≥ 6.6.
 ## Current features
 - `decerter run`: redirect the TCP and UDP flows of the selected processes through decerter's proxy. `--decrypt` prints the plaintext of TLS and DTLS 1.2 records; `--intercept` holds every record, decrypts it, runs it through the intercept rules and encrypts it again with the same session keys (the command line has the identity rule, which prints every message; more rules come from the control API).
 - Control API (`decerter run --api-socket`): HTTP on a unix socket under `/api/v1`, described by [api/openapi.yaml](api/openapi.yaml): flow history with a filter, message payloads, a live event stream, holding messages to edit, forward or drop them, match-and-replace rules, and a key log export.
+- `decerter ui`: a minimal web page on `127.0.0.1` for the control API, run as your user: the live flow list with a filter, messages as text or hex, intercept on and off, and editing, forwarding or dropping held messages.
 - `decerter capture -w <file>|-`: write the selected flows to pcapng without redirecting anything, with a Decryption Secrets Block per TLS session, so Wireshark and tshark decrypt the file by themselves; `--plaintext` writes synthesized decrypted packets for tcpdump and other tools; `-w -` streams live into Wireshark or tshark.
 - `decerter keylog`: print the TLS secrets of the selected processes in NSS key log format (`SSLKEYLOGFILE`).
 - `--filter`: a subset of Wireshark's display filter language over process, address, port and TLS ClientHello fields (`decerter help filter`); the parts the kernel can check go into BPF maps.
 - TLS secrets from OpenSSL 3 (Linux, amd64) and from Conscrypt's BoringSSL (Android 15 and later); TLS 1.2, TLS 1.3 and DTLS 1.2.
 - Android: rooted devices with a GKI kernel from android15-6.6 on; decerter shares netd's cgroup hooks while it runs and `decerter android restore` puts them back after a crash.
 
-Planned, not built yet: the capture endpoints of the API, a minimal web UI (`decerter ui`) and an MCP server (`decerter mcp`).
+Planned, not built yet: the capture endpoints of the API and an MCP server (`decerter mcp`).
 
 ## Requirements
 - Linux 6.6 or newer with BTF (`/sys/kernel/btf/vmlinux`) and cgroup v2 mounted at `/sys/fs/cgroup`.
@@ -58,6 +59,7 @@ Available Commands:
   help        Help about any command
   keylog      Print the TLS secrets of the selected processes in NSS key log format
   run         Redirect the selected flows through decerter's proxy, optionally decrypting or intercepting them
+  ui          Serve the minimal web UI on 127.0.0.1, a client of the control API
 
 Flags:
   -h, --help              help for decerter
@@ -117,6 +119,19 @@ The history is in memory: at most 10000 flows, 200000 messages and 64 MiB of pay
 
 Holding and rules need `--intercept`. The rules of the code run first (the identity rule), then the API rules in the order they were added, then the hold queue, so a held message shows what goes on the wire. A held message blocks only its own direction of its own flow (the client's UDP datagrams have a sender per session for this); one that nobody decides goes on unchanged after `--hold-timeout` (60 s), turning intercept off lets every held message go on, and a flow that ends drops what it held. A dropped request is simply not sent: the client waits for an answer until its own timeout. A rule sees one message at a time (a TLS record, one read of a TCP stream or one datagram), so a value split over two messages is not found.
 
+### ui
+```sh
+sudo ./decerter run --uid 1001 --intercept --api-socket /run/decerter/api.sock
+./decerter ui                     # as your user in the group decerter; prints http://127.0.0.1:<port>/?token=…
+./decerter ui --open              # the same, and opens it with xdg-open
+```
+
+`decerter ui` is a small web page served by decerter itself (HTML, CSS and vanilla JS embedded in the binary, no build step): the flow list, live over the event stream, with a filter box in the `--filter` language and paging; a flow with its messages; a message as escaped text or a hex dump, 4 KiB at a time, and as the peer sent it when it was changed; intercept on and off with a filter and a direction; and the held messages, to edit as escaped text (`\r`, `\n`, `\t`, `\\`, `\xNN`; line breaks are only layout) or as hex, and to forward or drop. There is no rules editor; rules are added with curl or a script. The full UI is the separate decerter-pro.
+
+It runs as your user and needs only the API socket, which is for root and the group `decerter`: `sudo groupadd decerter`, `sudo usermod -aG decerter $USER`, log in again (or `newgrp decerter`) and restart `decerter run`, so the socket and `/run/decerter` get the group. Without that decerter ui stops at start and says so. `--api-socket` takes the same path as `decerter run` (default `/run/decerter/api.sock`), `@name` for an abstract socket, or a loopback `ip:port` such as the host side of `adb forward`.
+
+It listens on `127.0.0.1` only, on a port the kernel picks, and prints a URL with a random 32-byte token. The first load sets the token as an `HttpOnly`, `SameSite=Strict` cookie and redirects to `/` without it. Every request, the page and the API proxy alike, needs that cookie and the `Host` `127.0.0.1:<port>` (against DNS rebinding); a request that changes something also needs the page's `Origin`, and requests from other sites are refused; anything else gets `403`. The page sends a strict Content-Security-Policy and shows the traffic only as text. decerter ui forwards only `/api/v1/…` to the socket, without the browser's cookie, `Origin` and `Referer`, so it can do nothing curl on the socket can't. `[::1]` is not served: one address is one origin and one cookie.
+
 ### capture
 ```sh
 # real packets plus a Decryption Secrets Block per TLS session: tshark decrypts without a key log file
@@ -158,6 +173,11 @@ adb shell /data/local/tmp/decerter run --uid 10092 --decrypt
 # so the logs have to go to a file on the device
 adb exec-out sh -c '/data/local/tmp/decerter capture --uid 10092 -w - 2>/data/local/tmp/decerter.log' | tshark -l -i - -Y 'http or http2'
 
+# the control API and the minimal UI on the workstation; adb forward's port is open to every local user of the workstation
+adb shell /data/local/tmp/decerter run --uid 10092 --intercept --api-socket @decerter-api
+adb forward tcp:8080 localabstract:decerter-api
+./decerter ui --api-socket 127.0.0.1:8080
+
 # after decerter was killed with SIGKILL: put netd's hooks back
 adb shell /data/local/tmp/decerter android restore
 ```
@@ -174,6 +194,7 @@ TLS secrets on Android come from Conscrypt's BoringSSL (`/apex/com.android.consc
 - `--decrypt` drops back to plain relaying for a flow it can't keep up with (unthrottled loopback transfers); the relay itself is unaffected. `--intercept` ignores the peer's `record_size_limit` and `max_fragment_length`.
 - Capture: a TLS flow is held until its secrets arrive (at most 10 s and 1 MiB per flow, 64 MiB in total; past that it is written without keys), so the file is in time order within a flow but not across flows. Packets between two selected local sockets appear twice. With `--plaintext` a gap (a truncated or lost packet) leaves the rest of that flow encrypted, and UDP GSO super-datagrams are not split.
 - `--filter`: no slices, arithmetic, functions or bitwise operators.
+- `decerter ui`: cookies are not kept apart by port, so the token cookie also goes to any other web server on `127.0.0.1` the browser visits, and such a page counts as the same site; the `Origin` and `Sec-Fetch-Site` checks keep it from changing anything, but don't open pages of other local servers you don't trust while the UI runs. `--open` puts the URL with the token on xdg-open's command line while it runs. The held list shows the deadline with the browser's clock.
 - Control API: the event stream has no replay; a client 256 events behind gets an `overflow` event and the stream ends. The history and the rules live only as long as decerter runs. `capture` has no API yet.
 
 ## License

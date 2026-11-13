@@ -1,0 +1,269 @@
+/* SPDX-License-Identifier: AGPL-3.0-only */
+
+:root {
+  color-scheme: light dark;
+  --background: #fdfdfc;
+  --panel: #f3f3f1;
+  --text: #1d1d1b;
+  --muted: #6b6b66;
+  --border: #d6d6d1;
+  --accent: #b7791f;
+  --selected: #fbe8c4;
+  --danger: #b42318;
+  --up: #1f6fb2;
+  --down: #2f7d32;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: #161615;
+    --panel: #20201e;
+    --text: #e8e8e3;
+    --muted: #9a9a93;
+    --border: #3a3a36;
+    --accent: #e0a440;
+    --selected: #4a3a1c;
+    --danger: #f0776c;
+    --up: #6aaee8;
+    --down: #7cc47f;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font: 14px/1.4 system-ui, sans-serif;
+  background: var(--background);
+  color: var(--text);
+}
+
+header {
+  display: flex;
+  gap: 1em;
+  align-items: baseline;
+  padding: 0.5em 1em;
+  border-bottom: 1px solid var(--border);
+}
+
+h1 {
+  margin: 0;
+  font-size: 1.3em;
+  color: var(--accent);
+}
+
+h2 {
+  margin: 0.2em 0 0.5em;
+  font-size: 1.1em;
+}
+
+h3 {
+  margin: 0;
+  font-size: 1em;
+}
+
+main {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 5fr) minmax(0, 3fr);
+  gap: 1em;
+  padding: 1em;
+}
+
+section {
+  min-width: 0;
+}
+
+#intercept-pane {
+  background: var(--panel);
+  padding: 0.8em;
+  border-radius: 6px;
+}
+
+@media (max-width: 1100px) {
+  main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9em;
+}
+
+th,
+td {
+  padding: 0.25em 0.4em;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 16em;
+}
+
+tbody tr {
+  cursor: pointer;
+}
+
+tbody tr:hover,
+.selected {
+  background: var(--selected);
+}
+
+.number {
+  text-align: right;
+}
+
+td.up {
+  color: var(--up);
+}
+
+td.down {
+  color: var(--down);
+}
+
+dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.1em 1em;
+  margin: 0 0 1em;
+}
+
+dt {
+  color: var(--muted);
+}
+
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.row {
+  display: flex;
+  gap: 0.5em;
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 0.4em 0;
+}
+
+.toolbar {
+  margin-top: 1em;
+}
+
+input[type="text"],
+select,
+textarea {
+  font: inherit;
+  color: inherit;
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0.3em 0.4em;
+}
+
+input[type="text"] {
+  flex: 1;
+  min-width: 10em;
+  width: 100%;
+  font-family: ui-monospace, monospace;
+}
+
+button {
+  font: inherit;
+  padding: 0.25em 0.8em;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--panel);
+  color: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+
+button.danger {
+  color: var(--danger);
+}
+
+.payload,
+textarea,
+.preview {
+  font-family: ui-monospace, monospace;
+  font-size: 0.85em;
+}
+
+.payload {
+  margin: 0.5em 0 0;
+  padding: 0.6em;
+  background: var(--panel);
+  border-radius: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 60vh;
+  overflow: auto;
+}
+
+textarea {
+  width: 100%;
+  min-height: 16em;
+  resize: vertical;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.holds {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.holds li {
+  padding: 0.4em;
+  border-bottom: 1px solid var(--border);
+}
+
+.preview {
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.error {
+  margin: 0.5em 1em 0;
+  padding: 0.5em;
+  border: 1px solid var(--danger);
+  border-radius: 4px;
+  color: var(--danger);
+  white-space: pre-wrap;
+}
+
+.badge {
+  margin-left: auto;
+  padding: 0 0.6em;
+  border-radius: 1em;
+  font-size: 0.85em;
+}
+
+.badge.on {
+  background: var(--down);
+  color: var(--background);
+}
+
+.badge.off {
+  background: var(--muted);
+  color: var(--background);
+}
+
+[hidden] {
+  display: none !important;
+}

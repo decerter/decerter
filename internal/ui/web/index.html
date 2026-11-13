@@ -1,0 +1,91 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-only -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>decerter</title>
+<link rel="stylesheet" href="app.css">
+<script type="module" src="app.js"></script>
+</head>
+<body>
+<header>
+  <h1>decerter</h1>
+  <span id="status">connecting…</span>
+  <span id="live" class="badge off">offline</span>
+</header>
+<p id="error" class="error" hidden></p>
+<main>
+  <section id="flows-pane">
+    <form id="flow-filter" class="row">
+      <input id="filter" type="text" spellcheck="false" autocomplete="off" placeholder='filter, e.g. proc.comm == "curl" &amp;&amp; tcp.dstport == 443' aria-label="flow filter">
+      <button type="submit">Filter</button>
+    </form>
+    <table>
+      <thead><tr><th>#</th><th>state</th><th>proto</th><th>process</th><th>destination</th><th>server name</th><th class="number">up</th><th class="number">down</th></tr></thead>
+      <tbody id="flows"></tbody>
+    </table>
+    <p id="no-flows" class="muted">No flows yet.</p>
+    <button id="more-flows" type="button" hidden>More flows</button>
+  </section>
+
+  <section id="detail-pane">
+    <h2 id="flow-title">No flow selected</h2>
+    <dl id="flow-info"></dl>
+    <table id="messages-table" hidden>
+      <thead><tr><th>#</th><th>time</th><th>dir</th><th>layer</th><th class="number">length</th><th>verdict</th></tr></thead>
+      <tbody id="messages"></tbody>
+    </table>
+    <button id="more-messages" type="button" hidden>More messages</button>
+    <div id="message-view" hidden>
+      <div class="row toolbar">
+        <h3 id="message-title"></h3>
+        <label><input type="radio" name="view" value="text" checked> text</label>
+        <label><input type="radio" name="view" value="hex"> hex</label>
+        <label id="original-label"><input id="original" type="checkbox"> original</label>
+        <button id="previous-window" type="button">&lsaquo; previous</button>
+        <span id="window-range" class="muted"></span>
+        <button id="next-window" type="button">next &rsaquo;</button>
+      </div>
+      <pre id="payload" class="payload"></pre>
+    </div>
+  </section>
+
+  <section id="intercept-pane">
+    <h2>Intercept</h2>
+    <form id="intercept-form">
+      <label class="row"><input id="intercept-enabled" type="checkbox"> hold messages</label>
+      <input id="intercept-filter" type="text" spellcheck="false" autocomplete="off" placeholder="filter, empty holds every flow" aria-label="intercept filter">
+      <div class="row">
+        <select id="intercept-direction" aria-label="direction">
+          <option value="up">up (client to server)</option>
+          <option value="down">down (server to client)</option>
+          <option value="both">both</option>
+        </select>
+        <button type="submit">Apply</button>
+      </div>
+    </form>
+    <p id="intercept-state" class="muted"></p>
+
+    <h2>Held <span id="held-count" class="muted"></span></h2>
+    <ul id="holds" class="holds"></ul>
+
+    <div id="editor" hidden>
+      <h3 id="editor-title"></h3>
+      <div class="row">
+        <label><input type="radio" name="edit-mode" value="text" checked> text</label>
+        <label><input type="radio" name="edit-mode" value="hex"> hex</label>
+      </div>
+      <textarea id="editor-text" spellcheck="false" autocomplete="off" aria-label="payload"></textarea>
+      <p id="editor-hint" class="muted"></p>
+      <div class="row">
+        <button id="editor-save" type="button">Save</button>
+        <button id="editor-forward" type="button">Save and forward</button>
+        <button id="editor-drop" type="button" class="danger">Drop</button>
+        <button id="editor-close" type="button">Close</button>
+      </div>
+    </div>
+  </section>
+</main>
+</body>
+</html>
