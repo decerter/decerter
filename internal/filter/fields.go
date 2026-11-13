@@ -38,6 +38,12 @@ const (
 	TLSVersionField  Field = "tls.version"
 	TLSServerField   Field = "tls.sni"
 	TLSProtocolField Field = "tls.alpn"
+	HTTPField        Field = "http"
+	HTTPMethodField  Field = "http.request.method"
+	HTTPURIField     Field = "http.request.uri"
+	HTTPHostField    Field = "http.host"
+	HTTPCodeField    Field = "http.response.code"
+	HTTPAgentField   Field = "http.user_agent"
 )
 
 // what the values of a field are
@@ -61,6 +67,9 @@ const (
 	ProcSourceType SourceType = "proc"
 	// the TLS or DTLS ClientHello the client sends first, known only after it
 	ClientHelloSourceType SourceType = "clienthello"
+	// the HTTP/1 heads the HTTP layer read: a message of layer http has the fields of its request (and a response its code), a flow of the history every value of its exchanges
+	// a flow is in scope or not before any of them is known, so the scope and capture filters refuse them
+	HTTPSourceType SourceType = "http"
 )
 
 // IsMulti fields have more than one value per flow (ip.addr is ip.src and ip.dst), == is true when any value matches, != when every value differs
@@ -108,6 +117,12 @@ var (
 		TLSVersionField:  {Name: TLSVersionField, Type: NumberFieldType, IsMulti: false, Source: ClientHelloSourceType, Pushdown: "", maximum: math.MaxUint16},
 		TLSServerField:   {Name: TLSServerField, Type: StringFieldType, IsMulti: false, Source: ClientHelloSourceType, Pushdown: "", maximum: 0},
 		TLSProtocolField: {Name: TLSProtocolField, Type: StringFieldType, IsMulti: true, Source: ClientHelloSourceType, Pushdown: "", maximum: 0},
+		HTTPField:        {Name: HTTPField, Type: ProtocolFieldType, IsMulti: false, Source: HTTPSourceType, Pushdown: "", maximum: 0},
+		HTTPMethodField:  {Name: HTTPMethodField, Type: StringFieldType, IsMulti: true, Source: HTTPSourceType, Pushdown: "", maximum: 0},
+		HTTPURIField:     {Name: HTTPURIField, Type: StringFieldType, IsMulti: true, Source: HTTPSourceType, Pushdown: "", maximum: 0},
+		HTTPHostField:    {Name: HTTPHostField, Type: StringFieldType, IsMulti: true, Source: HTTPSourceType, Pushdown: "", maximum: 0},
+		HTTPCodeField:    {Name: HTTPCodeField, Type: NumberFieldType, IsMulti: true, Source: HTTPSourceType, Pushdown: "", maximum: 999},
+		HTTPAgentField:   {Name: HTTPAgentField, Type: StringFieldType, IsMulti: true, Source: HTTPSourceType, Pushdown: "", maximum: 0},
 	}
 )
 

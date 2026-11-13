@@ -21,6 +21,10 @@ const state = {
   view: 'text',
   holds: [],
   editing: null,
+  exchanges: [],
+  exchangeId: null,
+  exchangeSide: 'request',
+  exchangeOffset: 0,
 };
 
 const byId = (id) => document.getElementById(id);
@@ -280,7 +284,8 @@ function showIntercept(intercept) {
   byId('intercept-enabled').checked = intercept.enabled;
   byId('intercept-filter').value = intercept.filter;
   byId('intercept-direction').value = intercept.direction;
-  byId('intercept-state').textContent = `${intercept.enabled ? 'On' : 'Off'}; a held message goes on unchanged after ${intercept.hold_timeout_seconds} s.`;
+  byId('intercept-layer').value = intercept.layer || '';
+  byId('intercept-state').textContent = `${intercept.enabled ? 'On' : 'Off'}${intercept.layer === 'http' ? ', whole HTTP messages' : ''}; a held message goes on unchanged after ${intercept.hold_timeout_seconds} s.`;
 }
 
 async function applyIntercept() {
@@ -288,6 +293,7 @@ async function applyIntercept() {
     enabled: byId('intercept-enabled').checked,
     filter: byId('intercept-filter').value.trim(),
     direction: byId('intercept-direction').value,
+    layer: byId('intercept-layer').value,
   });
   showIntercept(intercept);
 }
@@ -379,7 +385,9 @@ function renderFlows() {
 async function selectFlow(id) {
   state.flowId = id;
   state.messageId = null;
+  state.exchangeId = null;
   byId('message-view').hidden = true;
+  byId('exchange-view').hidden = true;
   const flow = await call('GET', `/flows/${id}`);
   state.flows.set(flow.id, flow);
   renderFlowInfo(flow);
@@ -388,6 +396,7 @@ async function selectFlow(id) {
   state.messages = list.messages;
   state.messagesCursor = list.next_cursor || '';
   renderMessages();
+  await loadExchanges();
 }
 
 function renderFlowInfo(flow) {
@@ -467,6 +476,112 @@ function renderPayload() {
   byId('payload').textContent = state.view === 'hex' ? hexDump(bytes, payload.offset) : escapeBytes(bytes);
 }
 
+// the HTTP exchanges of the shown flow: request line, status, body lengths; a click shows the heads and a window of a body
+
+async function loadExchanges() {
+  if (state.flowId === null) {
+    return;
+  }
+
+  const list = await call('GET', `/flows/${state.flowId}/exchanges?limit=1000`);
+  state.exchanges = list.exchanges;
+  renderExchanges();
+
+  if (state.exchangeId !== null) {
+    await selectExchange(state.exchangeId, state.exchangeOffset);
+  }
+}
+
+const refreshExchanges = debounce(loadExchanges, 300);
+
+function onExchange(exchange) {
+  if (exchange.flow_id === state.flowId) {
+    refreshExchanges();
+  }
+}
+
+function bodyLength(message) {
+  if (!message) {
+    return '';
+  }
+
+  const length = message.body_length === message.original_body_length ? formatBytes(message.body_length) : `${formatBytes(message.original_body_length)} → ${formatBytes(message.body_length)}`;
+  return message.state === 'complete' ? length : `${length}, ${message.state}`;
+}
+
+function renderExchanges() {
+  const rows = state.exchanges.map((exchange) => {
+    const request = exchange.request || {};
+    const response = exchange.response || {};
+    const notes = [request.edited || response.edited ? 'edited' : '', request.verdict === 'drop' || response.verdict === 'drop' ? 'dropped' : '', request.note, response.note].filter(Boolean).join('; ');
+    return el('tr', { class: exchange.id === state.exchangeId ? 'selected' : '', onclick: action(() => selectExchange(exchange.id, 0)) },
+      el('td', {}, exchange.id),
+      el('td', {}, request.method || ''),
+      el('td', {}, request.url || request.target || ''),
+      el('td', {}, response.status ? `${response.status} ${response.reason || ''}` : ''),
+      el('td', { class: 'number' }, bodyLength(exchange.request)),
+      el('td', { class: 'number' }, bodyLength(exchange.response)),
+      el('td', {}, notes));
+  });
+  byId('exchanges').replaceChildren(...rows);
+  byId('exchanges-table').hidden = rows.length === 0;
+}
+
+// the start line and fields of a head, one per line as text
+function headText(head, isRequest) {
+  const start = isRequest ? `${head.method} ${head.target} ${head.version}` : `${head.version} ${head.status} ${head.reason || ''}`;
+  return [start, ...(head.headers || []).map((header) => `${header.name}: ${header.value}`)].join('\n');
+}
+
+async function selectExchange(id, offset) {
+  const exchange = await call('GET', `/exchanges/${id}`);
+  const isRequest = state.exchangeSide === 'request';
+  const message = isRequest ? exchange.request : exchange.response;
+  state.exchangeId = id;
+  state.exchangeOffset = offset;
+  renderExchanges();
+  byId('exchange-view').hidden = false;
+  byId('exchange-title').textContent = `Exchange ${id}`;
+  byId('exchange-original-label').hidden = !(message && message.edited);
+
+  if (!message) {
+    byId('exchange-head').textContent = `No ${state.exchangeSide} yet.`;
+    byId('exchange-body').textContent = '';
+    byId('exchange-range').textContent = '';
+    return;
+  }
+
+  const showOriginal = byId('exchange-original').checked && message.edited && message.original;
+  const parts = [];
+
+  if (isRequest) {
+    parts.push(headText(showOriginal ? message.original : message, true));
+  } else {
+    for (const interim of exchange.interim || []) {
+      parts.push(headText(interim, false), '');
+    }
+
+    parts.push(headText(showOriginal ? message.original : message, false));
+  }
+
+  if (message.trailers) {
+    parts.push('', 'trailers:', ...message.trailers.map((header) => `${header.name}: ${header.value}`));
+  }
+
+  if (message.note) {
+    parts.push('', `note: ${message.note}`);
+  }
+
+  byId('exchange-head').textContent = parts.join('\n');
+  const body = await call('GET', `/exchanges/${id}/body?side=${state.exchangeSide}&offset=${offset}&length=${windowLength}`);
+  const payload = showOriginal && body.original ? body.original : body.payload;
+  const bytes = bytesOfHex(payload.hex);
+  byId('exchange-range').textContent = payload.total === 0 ? 'no body kept' : `body bytes ${payload.offset}–${payload.offset + payload.length} of ${payload.total}`;
+  byId('exchange-previous').disabled = payload.offset === 0;
+  byId('exchange-next').disabled = payload.offset + payload.length >= payload.total;
+  byId('exchange-body').textContent = state.view === 'hex' ? hexDump(bytes, payload.offset) : escapeBytes(bytes);
+}
+
 // held messages
 
 async function loadHolds() {
@@ -479,7 +594,7 @@ const refreshHolds = debounce(loadHolds, 100);
 
 function renderHolds() {
   const items = state.holds.map((hold) => el('li', { class: hold.id === (state.editing && state.editing.id) ? 'selected' : '' },
-    el('div', {}, `#${hold.id} flow ${hold.flow_id} ${hold.direction} ${hold.layer}, ${formatBytes(hold.length)}${hold.edited ? ', edited' : ''}, `,
+    el('div', {}, `#${hold.id} flow ${hold.flow_id}${hold.exchange_id ? ` exchange ${hold.exchange_id}` : ''} ${hold.direction} ${hold.layer}, ${formatBytes(hold.length)}${hold.edited ? ', edited' : ''}, `,
       el('span', { class: 'deadline' }, deadlineText(hold))),
     el('div', { class: 'preview' }, escapeBytes(bytesOfHex(hold.payload.hex.slice(0, 160))).split('\n')[0]),
     el('div', { class: 'row' },
@@ -533,7 +648,7 @@ function openEditor(id) {
 
   state.editing = { id, mode: 'text' };
   document.querySelector('input[name="edit-mode"][value="text"]').checked = true;
-  byId('editor-title').textContent = `Edit held message ${id} (flow ${hold.flow_id}, ${hold.direction})`;
+  byId('editor-title').textContent = `Edit held message ${id} (flow ${hold.flow_id}, ${hold.direction}${hold.layer === 'http' ? ', whole HTTP message: Content-Length and chunking are fixed when it goes on' : ''})`;
   byId('editor-text').value = escapeBytes(bytesOfHex(hold.payload.hex));
   byId('editor-hint').textContent = editorHint('text');
 
@@ -602,6 +717,7 @@ function connectEvents() {
     source.addEventListener(type, refreshHolds);
   }
 
+  source.addEventListener('exchange', json((event) => onExchange(event.exchange)));
   source.addEventListener('intercept_changed', json((event) => showIntercept(event.intercept)));
   source.addEventListener('overflow', json((event) => showError(`event stream: ${event.reason}`)));
 }
@@ -631,6 +747,17 @@ function start() {
   }
 
   byId('original').addEventListener('change', renderPayload);
+
+  for (const radio of document.querySelectorAll('input[name="side"]')) {
+    radio.addEventListener('change', action(() => {
+      state.exchangeSide = radio.value;
+      return selectExchange(state.exchangeId, 0);
+    }));
+  }
+
+  byId('exchange-original').addEventListener('change', action(() => selectExchange(state.exchangeId, state.exchangeOffset)));
+  byId('exchange-previous').addEventListener('click', action(() => selectExchange(state.exchangeId, Math.max(0, state.exchangeOffset - windowLength))));
+  byId('exchange-next').addEventListener('click', action(() => selectExchange(state.exchangeId, state.exchangeOffset + windowLength)));
   byId('previous-window').addEventListener('click', action(() => selectMessage(state.messageId, Math.max(0, state.offset - windowLength))));
   byId('next-window').addEventListener('click', action(() => selectMessage(state.messageId, state.offset + windowLength)));
 

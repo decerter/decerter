@@ -20,17 +20,20 @@ import (
 // notify nil publishes nothing
 func New(limits Limits, notify func(event api.Event)) (history *History) {
 	history = &History{
-		mutex:         &sync.RWMutex{},
-		limits:        limits,
-		flows:         map[uint64]*flowRecord{},
-		order:         nil,
-		messages:      map[uint64]*messageRecord{},
-		nextFlowID:    0,
-		nextMessageID: 0,
-		payloadBytes:  0,
-		openFlows:     0,
-		evictedFlows:  0,
-		notify:        notify,
+		mutex:          &sync.RWMutex{},
+		limits:         limits,
+		flows:          map[uint64]*flowRecord{},
+		order:          nil,
+		messages:       map[uint64]*messageRecord{},
+		exchanges:      map[uint64]*exchangeRecord{},
+		nextFlowID:     0,
+		nextMessageID:  0,
+		nextExchangeID: 0,
+		payloadBytes:   0,
+		exchangeBytes:  0,
+		openFlows:      0,
+		evictedFlows:   0,
+		notify:         notify,
 	}
 	return
 }
@@ -61,19 +64,22 @@ func (history *History) openFlow(cookie uint64, values filter.Values, clientRand
 
 	history.nextFlowID++
 	record := &flowRecord{
-		id:           history.nextFlowID,
-		cookie:       cookie,
-		values:       values,
-		clientRandom: clientRandom,
-		session:      tlsrecord.Session{},
-		layer:        "",
-		opened:       time.Now(),
-		closed:       time.Time{},
-		isOpen:       true,
-		traffic:      [2]api.Traffic{},
-		messageIDs:   nil,
-		payloadBytes: 0,
-		isTruncated:  false,
+		id:            history.nextFlowID,
+		cookie:        cookie,
+		values:        values,
+		clientRandom:  clientRandom,
+		session:       tlsrecord.Session{},
+		layer:         "",
+		opened:        time.Now(),
+		closed:        time.Time{},
+		isOpen:        true,
+		traffic:       [2]api.Traffic{},
+		messageIDs:    nil,
+		payloadBytes:  0,
+		isTruncated:   false,
+		exchangeIDs:   nil,
+		exchangeBytes: 0,
+		http:          nil,
 	}
 	history.flows[record.id] = record
 	history.order = append(history.order, record.id)
@@ -256,6 +262,12 @@ func (history *History) evict(except uint64) (isEvicted bool) {
 	for _, messageID := range record.messageIDs {
 		delete(history.messages, messageID)
 	}
+
+	for _, exchangeID := range record.exchangeIDs {
+		delete(history.exchanges, exchangeID)
+	}
+
+	history.exchangeBytes -= record.exchangeBytes
 
 	if record.isOpen {
 		history.openFlows--
@@ -443,26 +455,43 @@ func (history *History) Status() (status api.HistoryStatus) {
 	history.mutex.RLock()
 	defer history.mutex.RUnlock()
 	status = api.HistoryStatus{
-		Flows:        len(history.order),
-		OpenFlows:    history.openFlows,
-		Messages:     len(history.messages),
-		PayloadBytes: history.payloadBytes,
-		EvictedFlows: history.evictedFlows,
+		Flows:         len(history.order),
+		OpenFlows:     history.openFlows,
+		Messages:      len(history.messages),
+		PayloadBytes:  history.payloadBytes,
+		Exchanges:     len(history.exchanges),
+		ExchangeBytes: history.exchangeBytes,
+		EvictedFlows:  history.evictedFlows,
 		Limits: api.HistoryLimits{
-			Flows:            history.limits.Flows,
-			Messages:         history.limits.Messages,
-			FlowMessages:     history.limits.FlowMessages,
-			PayloadBytes:     history.limits.PayloadBytes,
-			FlowPayloadBytes: history.limits.FlowPayloadBytes,
+			Flows:             history.limits.Flows,
+			Messages:          history.limits.Messages,
+			FlowMessages:      history.limits.FlowMessages,
+			PayloadBytes:      history.limits.PayloadBytes,
+			FlowPayloadBytes:  history.limits.FlowPayloadBytes,
+			Exchanges:         history.limits.Exchanges,
+			FlowExchanges:     history.limits.FlowExchanges,
+			ExchangeBytes:     history.limits.ExchangeBytes,
+			FlowExchangeBytes: history.limits.FlowExchangeBytes,
 		},
 	}
 	return
 }
 
 // what a filter sees of a stored flow: a flow is TLS or it is not, never unknown; a session the record layer read counts as a ClientHello the filter did not wait for
+// the http fields are every value of its exchanges, a copy that does not change with later ones
 func flowValues(record *flowRecord) (values filter.Values) {
 	values = record.values
 	session := record.session
+
+	if record.http != nil {
+		values.HTTP = &filter.HTTPValues{
+			Methods:    slices.Clone(record.http.Methods),
+			URIs:       slices.Clone(record.http.URIs),
+			Hosts:      slices.Clone(record.http.Hosts),
+			Codes:      slices.Clone(record.http.Codes),
+			UserAgents: slices.Clone(record.http.UserAgents),
+		}
+	}
 
 	switch {
 	case (values.TLS != filter.PresentTLSState) && (session.Version != 0):

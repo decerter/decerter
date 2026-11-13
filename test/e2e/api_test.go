@@ -418,6 +418,15 @@ func TestAPIDecryptPositive(state *testing.T) {
 		return
 	}
 
+	// the HTTP layer reads the observed records too; the flow may still be closing, the exchange is complete once curl has its answer
+	exchanges := v1.ExchangeList{}
+	_, err = client.call(state.Context(), http.MethodGet, fmt.Sprintf("/flows/%d/exchanges", flows.Flows[0].ID), nil, &exchanges)
+
+	if (err != nil) || (len(exchanges.Exchanges) != 1) || (exchanges.Exchanges[0].Request == nil) || (exchanges.Exchanges[0].Request.Method != "GET") || (exchanges.Exchanges[0].Response == nil) || (exchanges.Exchanges[0].Response.Status != 200) {
+		state.Errorf("Test of the api decrypt history failed, the flow should have its exchange, exchanges: %+v, error: %v", exchanges, err)
+		return
+	}
+
 	for path, request := range map[string]any{"/intercept": v1.InterceptRequest{Enabled: true}, "/rules": v1.RuleRequest{Find: v1.Value{Type: v1.TextValueType, Value: "a"}, Replace: v1.Value{Type: v1.TextValueType, Value: "b"}}} {
 		method := http.MethodPut
 

@@ -161,6 +161,7 @@ func (gate *gate) start(packet capturebpf.Packet, now time.Time) (newFlow *gateF
 		TLSVersion:  0,
 		ServerName:  "",
 		Protocols:   nil,
+		HTTP:        nil,
 	}
 	newFlow.hasValues = true
 

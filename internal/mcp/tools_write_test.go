@@ -204,8 +204,8 @@ func TestWriteToolsListPositive(state *testing.T) {
 		tools[tool.Name] = tool
 	}
 
-	if len(tools) != 12+len(writeTools) {
-		state.Errorf("Test of the tool list failed, there should be 12 read and %d write tools, tools: %d", len(writeTools), len(tools))
+	if len(tools) != 15+len(writeTools) {
+		state.Errorf("Test of the tool list failed, there should be 15 read and %d write tools, tools: %d", len(writeTools), len(tools))
 		return
 	}
 
@@ -228,7 +228,7 @@ func TestWriteToolsListPositive(state *testing.T) {
 
 	schema, _ := json.Marshal(tools["add_rule"].InputSchema)
 
-	if !strings.Contains(string(schema), `"enum":["text","hex","regex"]`) || !strings.Contains(string(schema), `"enum":["text","hex"]`) || !strings.Contains(string(schema), `"enum":["tcp","tls","udp","dtls"]`) {
+	if !strings.Contains(string(schema), `"enum":["text","hex","regex"]`) || !strings.Contains(string(schema), `"enum":["text","hex"]`) || !strings.Contains(string(schema), `"enum":["tcp","tls","udp","dtls","http"]`) {
 		state.Errorf("Test of the tool list failed, add_rule should limit its value types and layers, schema: %s", schema)
 		return
 	}
@@ -361,7 +361,7 @@ func TestWriteToolsNegative(state *testing.T) {
 		{Name: "drop_held", Arguments: nil, Text: "required"},
 		{Name: "add_rule", Arguments: map[string]any{"find": map[string]any{"type": "regex", "value": "("}, "replace": map[string]any{"type": "text", "value": ""}}, Text: "POST /rules: 400 Bad Request: bad request: rule: error parsing regexp"},
 		{Name: "add_rule", Arguments: map[string]any{"find": map[string]any{"type": "text", "value": "a"}, "replace": map[string]any{"type": "regex", "value": "b"}}, Text: "enum"},
-		{Name: "add_rule", Arguments: map[string]any{"layer": "http", "find": map[string]any{"type": "text", "value": "a"}, "replace": map[string]any{"type": "text", "value": "b"}}, Text: "enum"},
+		{Name: "add_rule", Arguments: map[string]any{"layer": "frames", "find": map[string]any{"type": "text", "value": "a"}, "replace": map[string]any{"type": "text", "value": "b"}}, Text: "enum"},
 		{Name: "add_rule", Arguments: map[string]any{"find": map[string]any{"type": "text", "value": "a"}}, Text: "required"},
 		{Name: "delete_rule", Arguments: map[string]any{"id": 6}, Text: "DELETE /rules/6: 404 Not Found: not found: rule 6"},
 		{Name: "start_capture", Arguments: map[string]any{"filter": "run"}, Text: "POST /captures: 409 Conflict: captures need decerter capture"},

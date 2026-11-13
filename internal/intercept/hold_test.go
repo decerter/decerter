@@ -56,7 +56,7 @@ func TestHoldQueuePositive(state *testing.T) {
 	synctest.Test(state, func(state *testing.T) {
 		recorded := &holdEvents{mutex: &sync.Mutex{}, events: nil}
 		queue := intercept.NewHoldQueue(time.Minute, recorded.add)
-		queue.Set(true, nil, intercept.UpDirections)
+		queue.Set(true, nil, intercept.UpDirections, "")
 		flow := tlsTestFlow()
 		message := func(id uint64) (current intercept.Message) {
 			current = intercept.Message{Flow: flow, ID: id, Direction: tlsrecord.ClientDirection, Layer: intercept.TLSLayer, Plain: []byte("GET / HTTP/1.1\r\n\r\n")}
@@ -109,9 +109,9 @@ func TestHoldQueuePositive(state *testing.T) {
 		// intercept off forwards 4, then a flow that ends drops what it had held
 		results[4] = hold(ctx, queue, message(4))
 		synctest.Wait()
-		queue.Set(false, nil, intercept.UpDirections)
+		queue.Set(false, nil, intercept.UpDirections, "")
 		fourth := <-results[4]
-		queue.Set(true, nil, intercept.UpDirections)
+		queue.Set(true, nil, intercept.UpDirections, "")
 		fifth := hold(ctx, queue, message(5))
 		synctest.Wait()
 		cancel()
@@ -153,14 +153,14 @@ func TestHoldQueueNegative(state *testing.T) {
 		state.Fatalf("Test of intercept.HoldQueue failed, cannot parse filter, error: %s", err.Error())
 	}
 
-	queue.Set(true, &scope, intercept.UpDirections)
+	queue.Set(true, &scope, intercept.UpDirections, "")
 
 	if queue.Match(up) || queue.Match(down) || (queue.State().Filter != `tls.sni == "other.example"`) {
 		state.Errorf("Test of intercept.HoldQueue.Match function failed, the filter and the direction should keep both messages out")
 		return
 	}
 
-	queue.Set(true, nil, intercept.BothDirections)
+	queue.Set(true, nil, intercept.BothDirections, "")
 
 	if !queue.Match(up) || !queue.Match(down) {
 		state.Errorf("Test of intercept.HoldQueue.Match function failed, both directions should be held")
@@ -178,7 +178,7 @@ func TestHoldQueueNegative(state *testing.T) {
 	}
 
 	// turned off between Match and Apply the message goes on at once
-	queue.Set(false, nil, intercept.UpDirections)
+	queue.Set(false, nil, intercept.UpDirections, "")
 	plain, verdict, err := queue.Apply(state.Context(), up)
 
 	if (err != nil) || (verdict != intercept.ForwardVerdict) || (string(plain) != "x") {

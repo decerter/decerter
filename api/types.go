@@ -78,6 +78,39 @@ const (
 	UDPLayer Layer = "udp"
 	// the application data of one DTLS record
 	DTLSLayer Layer = "dtls"
+	// one whole HTTP/1 request or response of an exchange: the head as it came and the body without its chunk framing; only rules and holds name it, the messages of a flow are records
+	HTTPLayer Layer = "http"
+)
+
+// which message of an exchange
+type Side string
+
+const (
+	RequestSide  Side = "request"
+	ResponseSide Side = "response"
+)
+
+// how the body of an HTTP message is delimited
+type Framing string
+
+const (
+	NoneFraming    Framing = "none"
+	LengthFraming  Framing = "length"
+	ChunkedFraming Framing = "chunked"
+	// the response body ends with the stream
+	CloseFraming Framing = "close"
+)
+
+// how far an HTTP message came
+type HTTPState string
+
+const (
+	// the head is there, the body is still coming
+	HeadHTTPState HTTPState = "head"
+	// the whole message went on
+	CompleteHTTPState HTTPState = "complete"
+	// the stream ended or stopped being HTTP/1 before the message did
+	IncompleteHTTPState HTTPState = "incomplete"
 )
 
 type FlowState string
@@ -130,6 +163,8 @@ const (
 	RuleAddedEventType        EventType = "rule_added"
 	RuleDeletedEventType      EventType = "rule_deleted"
 	InterceptChangedEventType EventType = "intercept_changed"
+	// an exchange started, got its response, or one of its messages ended or was edited
+	ExchangeEventType EventType = "exchange"
 	// the last event of a stream whose client read too slowly, the server ends the stream after it
 	OverflowEventType EventType = "overflow"
 )
@@ -166,38 +201,48 @@ type CaptureLimits struct {
 }
 
 // what the flow history holds now and its bounds; the oldest flows go first when a bound is reached
+// ExchangeBytes are the header and body bytes the exchanges keep, counted apart from the payload of the messages
 type HistoryStatus struct {
-	Flows        int           `json:"flows"`
-	OpenFlows    int           `json:"open_flows"`
-	Messages     int           `json:"messages"`
-	PayloadBytes int64         `json:"payload_bytes"`
-	EvictedFlows uint64        `json:"evicted_flows"`
-	Limits       HistoryLimits `json:"limits"`
+	Flows         int           `json:"flows"`
+	OpenFlows     int           `json:"open_flows"`
+	Messages      int           `json:"messages"`
+	PayloadBytes  int64         `json:"payload_bytes"`
+	Exchanges     int           `json:"exchanges"`
+	ExchangeBytes int64         `json:"exchange_bytes"`
+	EvictedFlows  uint64        `json:"evicted_flows"`
+	Limits        HistoryLimits `json:"limits"`
 }
 
 type HistoryLimits struct {
-	Flows            int   `json:"flows"`
-	Messages         int   `json:"messages"`
-	FlowMessages     int   `json:"flow_messages"`
-	PayloadBytes     int64 `json:"payload_bytes"`
-	FlowPayloadBytes int64 `json:"flow_payload_bytes"`
+	Flows             int   `json:"flows"`
+	Messages          int   `json:"messages"`
+	FlowMessages      int   `json:"flow_messages"`
+	PayloadBytes      int64 `json:"payload_bytes"`
+	FlowPayloadBytes  int64 `json:"flow_payload_bytes"`
+	Exchanges         int   `json:"exchanges"`
+	FlowExchanges     int   `json:"flow_exchanges"`
+	ExchangeBytes     int64 `json:"exchange_bytes"`
+	FlowExchangeBytes int64 `json:"flow_exchange_bytes"`
 }
 
 // GET /api/v1/status and PUT /api/v1/intercept; Available is false unless decerter runs with --intercept, holding and rules need the intercept pipeline
+// Layer empty holds the messages of every record layer (tcp, tls, udp, dtls), http whole HTTP/1 messages instead
 type InterceptState struct {
 	Available          bool      `json:"available"`
 	Enabled            bool      `json:"enabled"`
 	Filter             string    `json:"filter"`
 	Direction          Direction `json:"direction"`
+	Layer              Layer     `json:"layer,omitzero"`
 	HoldTimeoutSeconds float64   `json:"hold_timeout_seconds"`
 	Held               int       `json:"held"`
 }
 
-// PUT /api/v1/intercept: Filter empty holds every message of the direction, Direction empty is up
+// PUT /api/v1/intercept: Filter empty holds every message of the direction, Direction empty is up, Layer empty every record layer
 type InterceptRequest struct {
 	Enabled   bool      `json:"enabled"`
 	Filter    string    `json:"filter,omitzero"`
 	Direction Direction `json:"direction,omitzero"`
+	Layer     Layer     `json:"layer,omitzero"`
 }
 
 type Process struct {
@@ -292,10 +337,11 @@ type MessageDetail struct {
 }
 
 // a held message waiting for forward, drop or the timeout; its id is the message id
-// Payload is the whole payload that goes on when it is forwarded, left out in events
+// Payload is the whole payload that goes on when it is forwarded, left out in events; a hold of layer http is a whole HTTP message of the exchange ExchangeID
 type Hold struct {
 	ID             uint64    `json:"id"`
 	FlowID         uint64    `json:"flow_id"`
+	ExchangeID     uint64    `json:"exchange_id,omitzero"`
 	Direction      Direction `json:"direction"`
 	Layer          Layer     `json:"layer"`
 	HeldAt         time.Time `json:"held_at"`
@@ -323,7 +369,7 @@ type EditRequest struct {
 }
 
 // POST /api/v1/rules: every occurrence of Find in a message of the direction, layer and filter becomes Replace
-// Direction empty is both, Layer empty is every layer, Filter empty every flow
+// Direction empty is both, Layer empty is every record layer (http has to be named), Filter empty every flow
 type RuleRequest struct {
 	Filter    string    `json:"filter,omitzero"`
 	Direction Direction `json:"direction,omitzero"`
@@ -350,17 +396,80 @@ type RuleList struct {
 }
 
 // one event of GET /api/v1/events, the data of a server-sent event whose event name is Type; Seq counts the events of the server
-// the field of the type is set: Flow for flow_*, Message for message (no payload), Hold for held and hold_* (no payload, Reason for hold_released), Rule for rule_*, Intercept for intercept_changed; Reason for overflow
+// the field of the type is set: Flow for flow_*, Message for message (no payload), Hold for held and hold_* (no payload, Reason for hold_released), Rule for rule_*, Intercept for intercept_changed,
+// Exchange for exchange (no bodies); Reason for overflow
 type Event struct {
 	Seq       uint64          `json:"seq"`
 	Type      EventType       `json:"type"`
 	Time      time.Time       `json:"time"`
 	Flow      *Flow           `json:"flow,omitzero"`
 	Message   *Message        `json:"message,omitzero"`
+	Exchange  *Exchange       `json:"exchange,omitzero"`
 	Hold      *Hold           `json:"hold,omitzero"`
 	Rule      *Rule           `json:"rule,omitzero"`
 	Intercept *InterceptState `json:"intercept,omitzero"`
 	Reason    string          `json:"reason,omitzero"`
+}
+
+// one header field as it came: the name with its case, the value without the white space around it; fields keep their order
+type Header struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// the start line and the fields of an HTTP message: a request has method, target and version, a response version, status and reason
+type HTTPHead struct {
+	Method  string   `json:"method,omitzero"`
+	Target  string   `json:"target,omitzero"`
+	Version string   `json:"version"`
+	Status  int      `json:"status,omitzero"`
+	Reason  string   `json:"reason,omitzero"`
+	Headers []Header `json:"headers"`
+}
+
+// one HTTP message of an exchange as it went on, without its body (read it with GET /api/v1/exchanges/{id}/body)
+// URL is the scheme of the flow, the Host field and the target of a request; BodyLength is the body that went on without its chunk framing, StoredLength what the history kept of it
+// Edited is true when a rule or an edit of layer http changed the message, Original is then its head as it came and OriginalBodyLength its body; Verdict drop is a message that did not go on
+// Note says why the HTTP layer did not take the message as a whole: too large, too slow, or the stream stopped being HTTP/1
+type HTTPMessage struct {
+	HTTPHead
+	URL                string    `json:"url,omitzero"`
+	Time               time.Time `json:"time"`
+	Framing            Framing   `json:"framing"`
+	State              HTTPState `json:"state"`
+	Trailers           []Header  `json:"trailers,omitzero"`
+	BodyLength         int       `json:"body_length"`
+	OriginalBodyLength int       `json:"original_body_length"`
+	StoredLength       int       `json:"stored_length"`
+	Edited             bool      `json:"edited"`
+	Verdict            Verdict   `json:"verdict,omitzero"`
+	Original           *HTTPHead `json:"original,omitzero"`
+	Note               string    `json:"note,omitzero"`
+}
+
+// one HTTP request and its response on a flow, in the order the requests came; Interim are the 1xx responses before the final one
+// a response without a request (the server spoke first) is an exchange of its own
+type Exchange struct {
+	ID       uint64        `json:"id"`
+	FlowID   uint64        `json:"flow_id"`
+	Protocol string        `json:"protocol"`
+	Request  *HTTPMessage  `json:"request,omitzero"`
+	Interim  []HTTPMessage `json:"interim,omitzero"`
+	Response *HTTPMessage  `json:"response,omitzero"`
+}
+
+// GET /api/v1/flows/{id}/exchanges, oldest first
+type ExchangeList struct {
+	Exchanges  []Exchange `json:"exchanges"`
+	NextCursor string     `json:"next_cursor,omitzero"`
+}
+
+// GET /api/v1/exchanges/{id}/body: a window of the body of one side without its chunk framing, Payload what went on, Original what the peer sent when it was edited
+type ExchangeBody struct {
+	ExchangeID uint64   `json:"exchange_id"`
+	Side       Side     `json:"side"`
+	Payload    Payload  `json:"payload"`
+	Original   *Payload `json:"original,omitzero"`
 }
 
 // POST /api/v1/captures: Filter empty captures every flow in scope, Plaintext writes synthesized decrypted packets instead of the packets and their secrets

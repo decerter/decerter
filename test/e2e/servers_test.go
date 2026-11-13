@@ -38,12 +38,14 @@ type serverConfig struct {
 	KeyLog      io.Writer
 }
 
-// what a test server saw of one request
+// what a test server saw of one request; Body and ContentLength only for the paths of the HTTP layer tests, the other tests compare the rest
 type receivedRequest struct {
-	Path        string
-	Proto       string
-	Version     uint16
-	CipherSuite uint16
+	Path          string
+	Proto         string
+	Version       uint16
+	CipherSuite   uint16
+	Body          string
+	ContentLength int64
 }
 
 type testServer struct {
@@ -126,12 +128,15 @@ func startServer(state *testing.T, config serverConfig) (server testServer) {
 }
 
 // the request is recorded before the answer is written, so it is there once curl has the body
+// /echo answers with the Content-Length and the body it got, /chunked with a chunked body whose word "world" is cut over two chunks, any other path with the path
 func (server testServer) handle(writer http.ResponseWriter, request *http.Request) {
 	received := receivedRequest{
-		Path:        request.URL.Path,
-		Proto:       request.Proto,
-		Version:     0,
-		CipherSuite: 0,
+		Path:          request.URL.Path,
+		Proto:         request.Proto,
+		Version:       0,
+		CipherSuite:   0,
+		Body:          "",
+		ContentLength: 0,
 	}
 
 	if request.TLS != nil {
@@ -139,15 +144,42 @@ func (server testServer) handle(writer http.ResponseWriter, request *http.Reques
 		received.CipherSuite = request.TLS.CipherSuite
 	}
 
+	answer := []string{request.URL.Path}
+
+	switch request.URL.Path {
+	case "/echo":
+		body, readErr := io.ReadAll(request.Body)
+
+		if readErr != nil {
+			http.Error(writer, readErr.Error(), http.StatusBadRequest)
+			return
+		}
+
+		received.Body = string(body)
+		received.ContentLength = request.ContentLength
+		answer = []string{fmt.Sprintf("len=%d body=%s", request.ContentLength, body)}
+	case "/chunked":
+		answer = []string{"hello wor", "ld, chunked!"}
+	default:
+	}
+
 	select {
 	case server.requests <- received:
 	default:
 	}
 
-	_, err := writer.Write([]byte(request.URL.Path))
+	// a piece after the first is flushed on its own, so a response of more than one piece is chunked, one of a single piece has a Content-Length
+	for index, piece := range answer {
+		_, err := writer.Write([]byte(piece))
 
-	if err != nil {
-		http.Error(writer, err.Error(), http.StatusInternalServerError)
+		if (err == nil) && (index < len(answer)-1) {
+			err = http.NewResponseController(writer).Flush()
+		}
+
+		if err != nil {
+			http.Error(writer, err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 }
 

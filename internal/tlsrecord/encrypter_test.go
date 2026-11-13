@@ -422,3 +422,121 @@ func holdLimit() (limit int) {
 	limit = 1 << 20
 	return
 }
+
+// Test if tlsrecord.Encrypter.SealData returns with the expected output: records held back and dropped go on later as application data with the keys of another record,
+// before the KeyUpdate that changes the keys and after a dropped record of the next keys, and the receiver reads every byte in order at the sequence numbers it expects.
+func TestSealDataPositive(state *testing.T) {
+	for _, suite := range cipherSuitesTLS13 {
+		session, err := newSynthetic(suite)
+
+		if err != nil {
+			state.Fatalf("Test of tlsrecord.Encrypter.SealData failed, cannot create session, error: %s", err.Error())
+		}
+
+		relayConn := New(holdLimit(), true)
+		receiver := New(holdLimit(), false)
+		encrypters := [2]Encrypter{NewEncrypter(), NewEncrypter()}
+		appCount := [2]int{}
+		kept := [2][]byte{}
+		sent := [2][]byte{}
+		received := [2][]byte{}
+		_, err = receiver.SetSecrets(session.secrets)
+
+		for _, chunk := range session.stream {
+			if err != nil {
+				break
+			}
+
+			records, feedErr := relayConn.Feed(chunk.direction, chunk.data)
+
+			if err = feedErr; (err == nil) && relayConn.Waiting() {
+				released, secretsErr := relayConn.SetSecrets(session.secrets)
+				records = append(records, released...)
+				err = secretsErr
+			}
+
+			for _, record := range records {
+				if (err != nil) || (record.Action == ShowAction) {
+					continue
+				}
+
+				direction := record.Direction
+				encrypter := &encrypters[direction]
+				wire := record.Raw
+
+				if record.Action == SealAction {
+					wire = nil
+					isApplication := record.ContentType == ApplicationDataContentType
+					index := appCount[direction]
+
+					if isApplication {
+						appCount[direction]++
+					}
+
+					switch {
+					// held back before the KeyUpdate, they go on in front of it with its keys
+					case isApplication && ((index == 2) || (index == 3)):
+						kept[direction] = append(kept[direction], record.Payload...)
+						encrypter.Drop(record)
+						continue
+					case !isApplication && (len(kept[direction]) > 0):
+						sealed, _, sealErr := encrypter.SealData(record, kept[direction])
+						wire, err = sealed, sealErr
+						sent[direction] = append(sent[direction], kept[direction]...)
+						kept[direction] = nil
+					// dropped and sealed at once after it, with its own keys
+					case isApplication && (index == 5):
+						encrypter.Drop(record)
+						sealed, _, sealErr := encrypter.SealData(record, record.Payload)
+						sent[direction] = append(sent[direction], record.Payload...)
+						received, err = feedReceiver(&receiver, direction, sealed, received, sealErr)
+						continue
+					default:
+					}
+
+					if isApplication {
+						sent[direction] = append(sent[direction], record.Payload...)
+					}
+
+					sealed, _, sealErr := encrypter.Seal(record, record.Payload)
+					wire = append(wire, sealed...)
+					err = errors.Join(err, sealErr)
+				}
+
+				received, err = feedReceiver(&receiver, direction, wire, received, err)
+			}
+		}
+
+		if err != nil {
+			state.Errorf("Test of tlsrecord.Encrypter.SealData failed, suite: %s, error: %s", suite.name, err.Error())
+			return
+		}
+
+		for direction := range sent {
+			if (len(sent[direction]) == 0) || !bytes.Equal(sent[direction], received[direction]) || (encrypters[direction].Offset() != 0) {
+				state.Errorf("Test of tlsrecord.Encrypter.SealData failed, suite: %s, direction %d: the receiver got %d bytes, the relay sent %d, offset %d", suite.name, direction, len(received[direction]), len(sent[direction]), encrypters[direction].Offset())
+				return
+			}
+		}
+	}
+}
+
+// the receiver reads wire, its application data goes after received; an error before is passed on
+func feedReceiver(receiver *Conn, direction Direction, wire []byte, received [2][]byte, before error) (result [2][]byte, err error) {
+	result = received
+	err = before
+
+	if err != nil {
+		return
+	}
+
+	records, err := receiver.Feed(direction, wire)
+
+	for _, record := range records {
+		if record.Decrypted && (record.ContentType == ApplicationDataContentType) {
+			result[record.Direction] = append(result[record.Direction], record.Payload...)
+		}
+	}
+
+	return
+}

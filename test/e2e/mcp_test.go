@@ -40,7 +40,7 @@ const (
 )
 
 var (
-	readTools  = []string{"download_pcap", "export_keylog", "export_pcap", "get_flow", "get_message", "list_captures", "list_flows", "list_held", "list_messages", "list_rules", "status", "tail_events"}
+	readTools  = []string{"download_pcap", "export_keylog", "export_pcap", "get_exchange", "get_exchange_body", "get_flow", "get_message", "list_captures", "list_exchanges", "list_flows", "list_held", "list_messages", "list_rules", "status", "tail_events"}
 	writeTools = []string{"add_rule", "delete_rule", "drop_held", "edit_held", "forward_held", "set_intercept", "start_capture", "stop_capture"}
 )
 
@@ -121,6 +121,22 @@ func TestMCPPositive(state *testing.T) {
 
 	if !found {
 		state.Fatalf("Test of get_message failed, a message of flow %d should have the escaped hostile body inside its marker", hostile.ID)
+	}
+
+	// the same answer as an HTTP exchange: its body escaped inside the marker of the exchange
+	exchanges := mcp.ExchangeSummaryList{}
+	text, isError = callTool(state, session, "list_exchanges", map[string]any{"flow_id": hostile.ID}, &exchanges)
+
+	if isError || (len(exchanges.Exchanges) != 1) || (exchanges.Exchanges[0].Method != "GET") || (exchanges.Exchanges[0].Status != 200) || (exchanges.Exchanges[0].ResponseBodyLength != len(hostileBody)) {
+		state.Fatalf("Test of list_exchanges failed, the hostile flow should have one exchange, text: %s", text)
+	}
+
+	body := mcp.ExchangeBodyResult{}
+	text, isError = callTool(state, session, "get_exchange_body", map[string]any{"id": exchanges.Exchanges[0].ID, "side": "response"}, &body)
+	marker := fmt.Sprintf("<untrusted-traffic id=\"x%d-response\">\n%s\n</untrusted-traffic>", exchanges.Exchanges[0].ID, escapedBody)
+
+	if isError || (body.Payload.PayloadEscaped != escapedBody) || !strings.Contains(text, marker) || strings.ContainsAny(text, "\x00\x1b") {
+		state.Fatalf("Test of get_exchange_body failed, the body should be escaped inside its marker, text: %q", text)
 	}
 
 	// the key log: a file, nothing of it in the result

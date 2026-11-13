@@ -57,6 +57,12 @@ func startCapture(backend *Backend, writer http.ResponseWriter, request *http.Re
 			return
 		}
 
+		// a capture decides each flow when it starts
+		if scopeErr := parsed.CheckFlowScope(); scopeErr != nil {
+			writeError(writer, http.StatusBadRequest, fmt.Errorf("%w: filter: %w", ErrBadRequest, scopeErr), logger)
+			return
+		}
+
 		scope = parsed
 	}
 

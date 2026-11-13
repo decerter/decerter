@@ -37,6 +37,23 @@
       <tbody id="messages"></tbody>
     </table>
     <button id="more-messages" type="button" hidden>More messages</button>
+    <table id="exchanges-table" hidden>
+      <thead><tr><th>#</th><th>method</th><th>url</th><th>status</th><th class="number">request</th><th class="number">response</th><th>notes</th></tr></thead>
+      <tbody id="exchanges"></tbody>
+    </table>
+    <div id="exchange-view" hidden>
+      <div class="row toolbar">
+        <h3 id="exchange-title"></h3>
+        <label><input type="radio" name="side" value="request" checked> request</label>
+        <label><input type="radio" name="side" value="response"> response</label>
+        <label id="exchange-original-label"><input id="exchange-original" type="checkbox"> original</label>
+        <button id="exchange-previous" type="button">&lsaquo; previous</button>
+        <span id="exchange-range" class="muted"></span>
+        <button id="exchange-next" type="button">next &rsaquo;</button>
+      </div>
+      <pre id="exchange-head" class="payload"></pre>
+      <pre id="exchange-body" class="payload"></pre>
+    </div>
     <div id="message-view" hidden>
       <div class="row toolbar">
         <h3 id="message-title"></h3>
@@ -61,6 +78,10 @@
           <option value="up">up (client to server)</option>
           <option value="down">down (server to client)</option>
           <option value="both">both</option>
+        </select>
+        <select id="intercept-layer" aria-label="layer">
+          <option value="">records (tcp, tls, udp, dtls)</option>
+          <option value="http">whole http messages</option>
         </select>
         <button type="submit">Apply</button>
       </div>

@@ -30,7 +30,21 @@ info:
     Payloads in responses are lowercase hex (`hex`) plus an escaped text form (`escaped`: printable ASCII as it is,
     `\\`, `\n`, `\r`, `\t` and `\xNN` for every other byte). Values in requests are `{"type": "text"|"hex", "value": …}`.
 
-    Holding and rules need `decerter run --intercept`; otherwise those operations answer 409. A held message blocks only
+    The HTTP layer reads the HTTP/1.1 exchanges of every tcp flow in scope (plain, or decrypted TLS whose ALPN is
+    http/1.1 or none) into the history: request and response heads with their fields in order and case, and the
+    bodies without chunk framing, at most 100000 exchanges and 32 MiB of heads and bodies in total, 10000 exchanges
+    and 1 MiB per flow, apart from the message payloads. Upgrade (101) and CONNECT stop it for the rest of the flow.
+    The filter fields `http`, `http.request.method`, `http.request.uri`, `http.host`, `http.response.code` and
+    `http.user_agent` match a flow by any of its exchanges, and a message of layer `http` by its own head (a response
+    with the fields of its request); a capture filter can't use them, a capture decides a flow when it starts.
+
+    Holding and rules need `decerter run --intercept`; otherwise those operations answer 409. Rules and the hold queue
+    with layer `http` take whole HTTP/1 messages after the record rules: the editable form is the head as it came
+    followed by the body without chunk framing. An unchanged message goes on as it came; a changed one keeps its head
+    as written, gets its Content-Length set to the body (or one added when it had a body framing and now has neither
+    field) and a chunked body is sent as one chunk with the original trailers. A message is kept back from its first
+    byte while such a rule or hold may want it; a body over 1 MiB, a message not whole within the hold timeout, or a
+    TLS alert or KeyUpdate in between lets it go on as it came, with a note on its exchange. A held message blocks only
     its own direction of its own flow. Rules run in this order: the rules compiled into decerter (the identity rule of
     `--intercept`), then the API rules in the order they were added, then the hold queue, so a held message shows what
     goes on the wire.
@@ -135,6 +149,89 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "404":
           $ref: "#/components/responses/NotFound"
+  /flows/{id}/exchanges:
+    get:
+      operationId: listExchanges
+      summary: HTTP exchanges of a flow without bodies, oldest first
+      parameters:
+        - $ref: "#/components/parameters/ID"
+        - name: limit
+          in: query
+          description: Exchanges per page.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 1000
+            default: 100
+        - $ref: "#/components/parameters/Cursor"
+      responses:
+        "200":
+          description: One page of exchanges
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExchangeList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /exchanges/{id}:
+    get:
+      operationId: getExchange
+      summary: One HTTP exchange with the heads of its request, interim responses and response
+      parameters:
+        - $ref: "#/components/parameters/ID"
+      responses:
+        "200":
+          description: The exchange
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Exchange"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /exchanges/{id}/body:
+    get:
+      operationId: getExchangeBody
+      summary: A window of the body of the request or the response of an exchange
+      description: |
+        The body without chunk framing: `payload` is what went on, `original` what the peer sent when a rule or an
+        edit of layer http changed it. 404 when the exchange has no message of that side (yet).
+      parameters:
+        - $ref: "#/components/parameters/ID"
+        - name: side
+          in: query
+          description: request (default) or response.
+          schema:
+            $ref: "#/components/schemas/Side"
+        - name: offset
+          in: query
+          description: First byte of the window.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: length
+          in: query
+          description: Bytes in the window.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 65536
+            default: 4096
+      responses:
+        "200":
+          description: The body window
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExchangeBody"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /messages/{id}:
     get:
       operationId: getMessage
@@ -191,10 +288,12 @@ paths:
       operationId: setIntercept
       summary: Turn holding on or off
       description: |
-        With `enabled` the messages of `direction` (default `up`, the client's) whose flow matches `filter` (default
-        every flow) are held until forwarded, dropped or the hold timeout of `decerter run --hold-timeout` (default 60 s)
-        passes, which forwards them as they are then. Turning it off forwards every held message as it is. A new filter
-        or direction applies to the messages that come after it.
+        With `enabled` the messages of `direction` (default `up`, the client's) and `layer` whose flow matches `filter`
+        (default every flow) are held until forwarded, dropped or the hold timeout of `decerter run --hold-timeout`
+        (default 60 s) passes, which forwards them as they are then. `layer` empty holds the messages of every record
+        layer, `http` whole HTTP/1 messages (their hold carries `exchange_id`), another layer only its own. Turning it
+        off forwards every held message as it is. A new filter, direction or layer applies to the messages that come
+        after it.
       requestBody:
         required: true
         content:
@@ -567,7 +666,7 @@ components:
           schema:
             $ref: "#/components/schemas/Error"
     NotFound:
-      description: No such flow, message, held message or rule
+      description: No such flow, message, exchange, held message or rule
       content:
         application/json:
           schema:
@@ -601,8 +700,136 @@ components:
       enum: [up, down, both]
     Layer:
       type: string
-      description: tcp is one read of a plain stream, tls and dtls the application data of one record, udp one datagram
-      enum: [tcp, tls, udp, dtls]
+      description: |
+        tcp is one read of a plain stream, tls and dtls the application data of one record, udp one datagram; http is
+        one whole HTTP/1 message (head as it came, body without chunk framing) and only appears in rules and holds,
+        which take it only when they name it
+      enum: [tcp, tls, udp, dtls, http]
+    Side:
+      type: string
+      enum: [request, response]
+    Header:
+      type: object
+      required: [name, value]
+      properties:
+        name:
+          type: string
+          description: As it came, with its case
+        value:
+          type: string
+          description: Without the white space around it
+    HTTPHead:
+      type: object
+      required: [version, headers]
+      properties:
+        method:
+          type: string
+          description: Requests only
+        target:
+          type: string
+          description: The request-target as it came
+        version:
+          type: string
+        status:
+          type: integer
+          description: Responses only
+        reason:
+          type: string
+        headers:
+          type: array
+          description: The fields in the order they came
+          items:
+            $ref: "#/components/schemas/Header"
+    HTTPMessage:
+      allOf:
+        - $ref: "#/components/schemas/HTTPHead"
+        - type: object
+          required: [time, framing, state, body_length, original_body_length, stored_length, edited]
+          properties:
+            url:
+              type: string
+              description: Scheme of the flow, Host field (or the destination) and the target of a request
+            time:
+              type: string
+              format: date-time
+              description: When the head came
+            framing:
+              type: string
+              description: How the body is delimited
+              enum: [none, length, chunked, close]
+            state:
+              type: string
+              description: head (body still coming), complete, incomplete (the stream ended or stopped being HTTP/1 first)
+              enum: [head, complete, incomplete]
+            trailers:
+              type: array
+              items:
+                $ref: "#/components/schemas/Header"
+            body_length:
+              type: integer
+              description: Body bytes that went on, without chunk framing
+            original_body_length:
+              type: integer
+              description: Body bytes the peer sent
+            stored_length:
+              type: integer
+              description: Body bytes the history kept
+            edited:
+              type: boolean
+              description: A rule or an edit of layer http changed it, or it was dropped
+            verdict:
+              type: string
+              enum: [forward, drop]
+            original:
+              $ref: "#/components/schemas/HTTPHead"
+            note:
+              type: string
+              description: Why the HTTP layer let the message go on as it came (too large, too slow, not HTTP/1 any more)
+    Exchange:
+      type: object
+      required: [id, flow_id, protocol]
+      properties:
+        id:
+          type: integer
+          format: uint64
+        flow_id:
+          type: integer
+          format: uint64
+        protocol:
+          type: string
+          description: HTTP/1.1
+        request:
+          $ref: "#/components/schemas/HTTPMessage"
+        interim:
+          type: array
+          description: 1xx responses before the final one
+          items:
+            $ref: "#/components/schemas/HTTPMessage"
+        response:
+          $ref: "#/components/schemas/HTTPMessage"
+    ExchangeList:
+      type: object
+      required: [exchanges]
+      properties:
+        exchanges:
+          type: array
+          items:
+            $ref: "#/components/schemas/Exchange"
+        next_cursor:
+          type: string
+    ExchangeBody:
+      type: object
+      required: [exchange_id, side, payload]
+      properties:
+        exchange_id:
+          type: integer
+          format: uint64
+        side:
+          $ref: "#/components/schemas/Side"
+        payload:
+          $ref: "#/components/schemas/Payload"
+        original:
+          $ref: "#/components/schemas/Payload"
     ValueType:
       type: string
       description: text (UTF-8 bytes as they are), hex (two digits per byte, white space ignored), regex (only the find value of a rule)
@@ -734,7 +961,7 @@ components:
             $ref: "#/components/schemas/Capture"
     HistoryStatus:
       type: object
-      required: [flows, open_flows, messages, payload_bytes, evicted_flows, limits]
+      required: [flows, open_flows, messages, payload_bytes, exchanges, exchange_bytes, evicted_flows, limits]
       properties:
         flows:
           type: integer
@@ -745,6 +972,12 @@ components:
         payload_bytes:
           type: integer
           format: int64
+        exchanges:
+          type: integer
+        exchange_bytes:
+          type: integer
+          format: int64
+          description: Head and body bytes the exchanges keep
         evicted_flows:
           type: integer
           format: uint64
@@ -752,7 +985,7 @@ components:
           $ref: "#/components/schemas/HistoryLimits"
     HistoryLimits:
       type: object
-      required: [flows, messages, flow_messages, payload_bytes, flow_payload_bytes]
+      required: [flows, messages, flow_messages, payload_bytes, flow_payload_bytes, exchanges, flow_exchanges, exchange_bytes, flow_exchange_bytes]
       properties:
         flows:
           type: integer
@@ -764,6 +997,16 @@ components:
           type: integer
           format: int64
         flow_payload_bytes:
+          type: integer
+          format: int64
+        exchanges:
+          type: integer
+        flow_exchanges:
+          type: integer
+        exchange_bytes:
+          type: integer
+          format: int64
+        flow_exchange_bytes:
           type: integer
           format: int64
     InterceptState:
@@ -779,6 +1022,8 @@ components:
           type: string
         direction:
           $ref: "#/components/schemas/Directions"
+        layer:
+          $ref: "#/components/schemas/Layer"
         hold_timeout_seconds:
           type: number
         held:
@@ -796,6 +1041,8 @@ components:
           description: Hold only the messages of flows this filter takes, empty is every flow
         direction:
           $ref: "#/components/schemas/Directions"
+        layer:
+          $ref: "#/components/schemas/Layer"
     Process:
       type: object
       required: [pid, uid, gid, comm, cmdline, exe]
@@ -995,6 +1242,10 @@ components:
         flow_id:
           type: integer
           format: uint64
+        exchange_id:
+          type: integer
+          format: uint64
+          description: The exchange of a hold of layer http
         direction:
           $ref: "#/components/schemas/Direction"
         layer:
@@ -1079,12 +1330,13 @@ components:
             $ref: "#/components/schemas/Rule"
     EventType:
       type: string
-      enum: [flow_opened, flow_closed, message, held, hold_edited, hold_released, rule_added, rule_deleted, intercept_changed, overflow]
+      enum: [flow_opened, flow_closed, message, held, hold_edited, hold_released, rule_added, rule_deleted, intercept_changed, exchange, overflow]
     Event:
       type: object
       description: |
         flow_* carry flow, message carries message, held and hold_* carry hold (without payload; hold_released also
         reason: forward, drop, timeout, intercept_off or closed), rule_* carry rule, intercept_changed carries intercept,
+        exchange carries exchange (without bodies) when it starts, gets a response head, or a message of it ends,
         overflow carries reason and is the last event of the stream.
       required: [seq, type, time]
       properties:
@@ -1100,6 +1352,8 @@ components:
           $ref: "#/components/schemas/Flow"
         message:
           $ref: "#/components/schemas/Message"
+        exchange:
+          $ref: "#/components/schemas/Exchange"
         hold:
           $ref: "#/components/schemas/Hold"
         rule:

@@ -19,6 +19,8 @@ var (
 	ErrCommLength   = errors.New("proc.comm is at most 15 bytes, the kernel cuts longer process names, use proc.exe or proc.cmdline")
 	ErrRange        = errors.New("number out of range for the field")
 	ErrProcess      = errors.New("could not read process info")
+	// a filter that decides a flow before its first byte can't ask for what the HTTP layer reads later
+	ErrFlowScope = errors.New("the http fields are known only after a flow started, they filter the history, rules and holds but not a scope or a capture")
 )
 
 // a filter that could not be parsed, Column counts characters from 1 and Length the characters that are wrong

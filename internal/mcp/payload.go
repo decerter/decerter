@@ -203,6 +203,69 @@ func escapeEvent(event v1.Event) (escaped v1.Event) {
 		escaped.Hold = &hold
 	}
 
+	if event.Exchange != nil {
+		exchange := escapeExchange(*event.Exchange)
+		escaped.Exchange = &exchange
+	}
+
+	return
+}
+
+// the string fields of an exchange come from its peers, escaped like a payload
+func escapeExchange(exchange v1.Exchange) (escaped v1.Exchange) {
+	escaped = exchange
+	escaped.Protocol = escapeText(exchange.Protocol)
+	escaped.Interim = nil
+
+	if exchange.Request != nil {
+		escaped.Request = new(escapeHTTPMessage(*exchange.Request))
+	}
+
+	if exchange.Response != nil {
+		escaped.Response = new(escapeHTTPMessage(*exchange.Response))
+	}
+
+	for _, interim := range exchange.Interim {
+		escaped.Interim = append(escaped.Interim, escapeHTTPMessage(interim))
+	}
+
+	return
+}
+
+func escapeHTTPMessage(message v1.HTTPMessage) (escaped v1.HTTPMessage) {
+	escaped = message
+	escaped.HTTPHead = escapeHead(message.HTTPHead)
+	escaped.URL = escapeText(message.URL)
+	escaped.Note = escapeText(message.Note)
+	escaped.Trailers = escapeHeaders(message.Trailers)
+
+	if message.Original != nil {
+		escaped.Original = new(escapeHead(*message.Original))
+	}
+
+	return
+}
+
+func escapeHead(head v1.HTTPHead) (escaped v1.HTTPHead) {
+	escaped = head
+	escaped.Method = escapeText(head.Method)
+	escaped.Target = escapeText(head.Target)
+	escaped.Version = escapeText(head.Version)
+	escaped.Reason = escapeText(head.Reason)
+	escaped.Headers = escapeHeaders(head.Headers)
+
+	if escaped.Headers == nil {
+		escaped.Headers = []v1.Header{}
+	}
+
+	return
+}
+
+func escapeHeaders(headers []v1.Header) (escaped []v1.Header) {
+	for _, header := range headers {
+		escaped = append(escaped, v1.Header{Name: escapeText(header.Name), Value: escapeText(header.Value)})
+	}
+
 	return
 }
 

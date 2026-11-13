@@ -18,7 +18,8 @@ import (
 // start_capture startCapture, stop_capture stopCapture
 func addWriteTools(server *sdk.Server, client Client) (err error) {
 	directions := []any{v1.UpDirection, v1.DownDirection, v1.BothDirection}
-	err = addTool(server, writeTool("set_intercept", "Set intercept", "Turn holding on or off. On, the messages of direction (up by default) whose flow the filter takes are held until forward_held, drop_held or decerter's hold timeout (which forwards them as they are); a new filter or direction applies to the messages after it. Off forwards every held message as it is. Needs decerter run --intercept. Returns the new intercept state.", false, true), setIntercept(client), nil, []enumProperty{{Name: "direction", Values: directions}})
+	layers := []any{v1.TCPLayer, v1.TLSLayer, v1.UDPLayer, v1.DTLSLayer, v1.HTTPLayer}
+	err = addTool(server, writeTool("set_intercept", "Set intercept", "Turn holding on or off. On, the messages of direction (up by default) and layer whose flow the filter takes are held until forward_held, drop_held or decerter's hold timeout (which forwards them as they are); with layer http a held message is a whole HTTP/1 request or response, its edit keeps the head as written and decerter fixes Content-Length and chunking. A new filter, direction or layer applies to the messages after it. Off forwards every held message as it is. Needs decerter run --intercept. Returns the new intercept state.", false, true), setIntercept(client), nil, []enumProperty{{Name: "direction", Values: directions}, {Name: "layer", Values: layers}})
 
 	if err != nil {
 		return
@@ -42,7 +43,7 @@ func addWriteTools(server *sdk.Server, client Client) (err error) {
 		return
 	}
 
-	err = addTool(server, writeTool("add_rule", "Add rule", "Add a match-and-replace rule after the existing ones: every occurrence of find in a message of direction, layer and the flows of filter becomes replace. A message is one TLS or DTLS record, one read of a plain TCP stream or one UDP datagram, so a value that spans two messages is not found. text values are the characters as they are (a JSON \\r\\n is CR LF), not the escaped form of the read tools. Needs decerter run --intercept. Returns the rule with its id.", false, false), addRule(client), nil, []enumProperty{{Name: "direction", Values: directions}, {Name: "layer", Values: []any{v1.TCPLayer, v1.TLSLayer, v1.UDPLayer, v1.DTLSLayer}}, {Name: "find.type", Values: []any{v1.TextValueType, v1.HexValueType, v1.RegexValueType}}, {Name: "replace.type", Values: []any{v1.TextValueType, v1.HexValueType}}})
+	err = addTool(server, writeTool("add_rule", "Add rule", "Add a match-and-replace rule after the existing ones: every occurrence of find in a message of direction, layer and the flows of filter becomes replace. A message is one TLS or DTLS record, one read of a plain TCP stream or one UDP datagram, so a value that spans two messages is not found; with layer http it is one whole HTTP/1 request or response (body without chunk framing, Content-Length and chunking fixed after the replace). text values are the characters as they are (a JSON \\r\\n is CR LF), not the escaped form of the read tools. Needs decerter run --intercept. Returns the rule with its id.", false, false), addRule(client), nil, []enumProperty{{Name: "direction", Values: directions}, {Name: "layer", Values: layers}, {Name: "find.type", Values: []any{v1.TextValueType, v1.HexValueType, v1.RegexValueType}}, {Name: "replace.type", Values: []any{v1.TextValueType, v1.HexValueType}}})
 
 	if err != nil {
 		return
@@ -83,7 +84,7 @@ func writeTool(name string, title string, description string, isDestructive bool
 
 func setIntercept(client Client) (handle sdk.ToolHandlerFor[SetInterceptInput, v1.InterceptState]) {
 	handle = func(ctx context.Context, request *sdk.CallToolRequest, input SetInterceptInput) (result *sdk.CallToolResult, state v1.InterceptState, err error) {
-		err = client.sendJSON(ctx, http.MethodPut, "/intercept", v1.InterceptRequest{Enabled: input.Enabled, Filter: input.Filter, Direction: input.Direction}, &state)
+		err = client.sendJSON(ctx, http.MethodPut, "/intercept", v1.InterceptRequest{Enabled: input.Enabled, Filter: input.Filter, Direction: input.Direction, Layer: input.Layer}, &state)
 		return
 	}
 	return
@@ -112,6 +113,7 @@ func editHeld(client Client) (handle sdk.ToolHandlerFor[EditHeldInput, HeldMessa
 		held = HeldMessage{
 			ID:             hold.ID,
 			FlowID:         hold.FlowID,
+			ExchangeID:     hold.ExchangeID,
 			Direction:      hold.Direction,
 			Layer:          hold.Layer,
 			HeldAt:         hold.HeldAt,

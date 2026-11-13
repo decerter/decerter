@@ -70,7 +70,17 @@ var (
 		ServerName:  "",
 		Protocols:   nil,
 	}
+	// a flow of curl with two exchanges: POST /login answered 200 and GET / answered 404
+	httpValues = withHTTP(curlValues, &filter.HTTPValues{Methods: []string{"POST", "GET"}, URIs: []string{"/login?x=1", "/"}, Hosts: []string{"example.com"}, Codes: []uint16{200, 404}, UserAgents: []string{"curl/8.17.0"}})
+	// a request that has no response yet
+	requestValues = withHTTP(curlValues, &filter.HTTPValues{Methods: []string{"GET"}, URIs: []string{"/"}, Hosts: nil, Codes: nil, UserAgents: nil})
 )
+
+func withHTTP(values filter.Values, http *filter.HTTPValues) (result filter.Values) {
+	result = values
+	result.HTTP = http
+	return
+}
 
 // Test if filter.Parse returns with the expected output.
 func TestParsePositive(state *testing.T) {
@@ -198,6 +208,14 @@ func TestEvaluatePositive(state *testing.T) {
 		{Filter: `tls.sni == "a\x62\143d\"\\"`, Values: curlValues.WithClientHello(true, 0x0304, "abcd\"\\", nil), Result: filter.TrueResult},
 		{Filter: `tls.sni matches r"^a\.b$"`, Values: curlValues.WithClientHello(true, 0x0304, "a.b", nil), Result: filter.TrueResult},
 		{Filter: `tls.sni matches r"^a\.b$"`, Values: curlValues.WithClientHello(true, 0x0304, "axb", nil), Result: filter.FalseResult},
+		// the http fields: any exchange of a flow matches, a flow without HTTP has none of them
+		{Filter: `http && http.request.method == "POST" && http.request.uri contains "/login" && http.host == "example.com" && http.response.code in {200..299} && http.user_agent matches "^curl/"`, Values: httpValues, Result: filter.TrueResult},
+		{Filter: `http.request.method == "PUT"`, Values: httpValues, Result: filter.FalseResult},
+		{Filter: `http.request.method != "GET"`, Values: httpValues, Result: filter.FalseResult},
+		{Filter: `http.response.code == 404 && http.response.code == 200`, Values: httpValues, Result: filter.TrueResult},
+		{Filter: `http.response.code`, Values: requestValues, Result: filter.FalseResult},
+		{Filter: `http.request.method == "GET"`, Values: curlValues, Result: filter.FalseResult},
+		{Filter: `!http`, Values: curlValues, Result: filter.TrueResult},
 	}
 
 	for _, positive := range positiveCases {
@@ -337,6 +355,12 @@ func TestFieldsPositive(state *testing.T) {
 		{Name: "udp.dstport", Type: filter.NumberFieldType, IsMulti: false, Source: filter.FlowSourceType, Pushdown: "port_map"},
 		{Name: "tls", Type: filter.ProtocolFieldType, IsMulti: false, Source: filter.ClientHelloSourceType, Pushdown: ""},
 		{Name: "tls.alpn", Type: filter.StringFieldType, IsMulti: true, Source: filter.ClientHelloSourceType, Pushdown: ""},
+		{Name: "http", Type: filter.ProtocolFieldType, IsMulti: false, Source: filter.HTTPSourceType, Pushdown: ""},
+		{Name: "http.request.method", Type: filter.StringFieldType, IsMulti: true, Source: filter.HTTPSourceType, Pushdown: ""},
+		{Name: "http.request.uri", Type: filter.StringFieldType, IsMulti: true, Source: filter.HTTPSourceType, Pushdown: ""},
+		{Name: "http.host", Type: filter.StringFieldType, IsMulti: true, Source: filter.HTTPSourceType, Pushdown: ""},
+		{Name: "http.response.code", Type: filter.NumberFieldType, IsMulti: true, Source: filter.HTTPSourceType, Pushdown: ""},
+		{Name: "http.user_agent", Type: filter.StringFieldType, IsMulti: true, Source: filter.HTTPSourceType, Pushdown: ""},
 	}
 
 	for _, positive := range positiveCases {
@@ -359,7 +383,7 @@ func TestFieldsPositive(state *testing.T) {
 		return cmp.Compare(first.Name, second.Name)
 	})
 
-	if !isSorted || (len(infos) != 26) {
+	if !isSorted || (len(infos) != 32) {
 		state.Errorf("Test of filter.Fields function failed, fields: %d", len(infos))
 		return
 	}
@@ -368,6 +392,21 @@ func TestFieldsPositive(state *testing.T) {
 
 	if (err != nil) || !parsed.Uses(filter.ExeField) || parsed.Uses(filter.CmdlineField) || !parsed.UsesSource(filter.ClientHelloSourceType) || !parsed.UsesSource(filter.ProcSourceType) {
 		state.Errorf("Test of filter.Uses function failed, error: %v", err)
+		return
+	}
+
+	// the http fields come too late for a scope or a capture
+	parsed, err = filter.Parse(`proc.uid == 1001 && http.host == "a"`)
+
+	if (err != nil) || !errors.Is(parsed.CheckFlowScope(), filter.ErrFlowScope) {
+		state.Errorf("Test of filter.CheckFlowScope function failed, an http field should be refused, error: %v", err)
+		return
+	}
+
+	parsed, err = filter.Parse(`proc.uid == 1001 && tls.sni == "a"`)
+
+	if (err != nil) || (parsed.CheckFlowScope() != nil) {
+		state.Errorf("Test of filter.CheckFlowScope function failed, a ClientHello field should be taken, error: %v", err)
 		return
 	}
 }

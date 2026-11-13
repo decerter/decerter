@@ -29,6 +29,9 @@ const (
 	maxFlowLimit        int = 100
 	defaultMessageLimit int = 100
 	maxMessageLimit     int = 1000
+	// exchanges per page
+	defaultExchangeLimit int = 100
+	maxExchangeLimit     int = 1000
 	// a request body: an edit of the largest datagram in hex fits
 	maxRequestBytes int64 = 1 << 20
 	// events a client of the stream may be behind before it is dropped, and the time one write to it may take

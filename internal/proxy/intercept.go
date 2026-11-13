@@ -105,6 +105,7 @@ type interception struct {
 	isPollPending  bool
 	spinGroup      *sync.WaitGroup
 	stats          [2]sendStats
+	http           *httpFlow
 	logger         *slog.Logger
 }
 
@@ -112,7 +113,8 @@ type interception struct {
 // TLS needs secretsBpfMaps, without them a TLS flow is relayed raw; plain tcp goes through the rules either way
 // opening are the bytes read before the scope was decided, they are taken first in the order they came
 // the rules get a context that ends with the flow, so a message held for the API is let go when the flow is aborted
-func interceptTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn, opening []TLSChunk, flow intercept.Flow, pipeline *intercept.Pipeline, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, logger *slog.Logger) (upBytes int64, downBytes int64) {
+// httpFlow is the HTTP layer of the flow after the record rules, nil without one
+func interceptTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn, opening []TLSChunk, flow intercept.Flow, pipeline *intercept.Pipeline, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, httpFlow *httpFlow, logger *slog.Logger) (upBytes int64, downBytes int64) {
 	flowCtx, cancelFlow := context.WithCancel(ctx)
 	defer cancelFlow()
 	mutex := &sync.Mutex{}
@@ -126,6 +128,7 @@ func interceptTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPCon
 		conn:           tlsrecord.New(maxHoldBytes, true),
 		pollPause:      interceptPollStart,
 		spinGroup:      &sync.WaitGroup{},
+		http:           httpFlow,
 		logger:         logger,
 	}
 	interception.pollTimer = time.AfterFunc(time.Hour, interception.poll)
@@ -475,11 +478,27 @@ func (interception *interception) isPending(direction tlsrecord.Direction) (isPe
 }
 
 // the items of a direction, waits for them; isEnd is true when nothing comes after them, isAborted when the flow is aborted
-func (interception *interception) next(direction tlsrecord.Direction) (items []sendItem, isEnd bool, isAborted bool) {
+// deadline is when the HTTP layer gives up on the message it keeps back, isExpired is true when it passed without items; zero waits without one
+func (interception *interception) next(direction tlsrecord.Direction, deadline time.Time) (items []sendItem, isEnd bool, isAborted bool, isExpired bool) {
 	interception.mutex.Lock()
 	defer interception.mutex.Unlock()
 
+	// deadline alarm, wakes the wait below once
+	if !deadline.IsZero() {
+		alarm := time.AfterFunc(time.Until(deadline), func() {
+			interception.mutex.Lock()
+			defer interception.mutex.Unlock()
+			interception.wake.Broadcast()
+		})
+		defer alarm.Stop()
+	}
+
 	for (len(interception.queues[direction]) == 0) && !interception.aborted && (!interception.ended[direction] || interception.isPending(direction)) {
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			isExpired = true
+			return
+		}
+
 		interception.wake.Wait()
 	}
 
@@ -503,11 +522,19 @@ func (interception *interception) sent(direction tlsrecord.Direction, size int) 
 }
 
 // write the queue of one direction in order until its stream ended, an item that can't go on aborts the flow
+// carrier is the last record of a TLS direction the encrypter took, the HTTP layer seals the bytes it kept back with its keys
 func (interception *interception) send(ctx context.Context, destination *net.TCPConn, direction tlsrecord.Direction, abort func(), logger *slog.Logger) (written int64) {
 	encrypter := tlsrecord.NewEncrypter()
+	carrier := (*tlsrecord.Record)(nil)
 
 	for {
-		items, isEnd, isAborted := interception.next(direction)
+		deadline := time.Time{}
+
+		if interception.http != nil {
+			deadline = interception.http.deadline(direction)
+		}
+
+		items, isEnd, isAborted, isExpired := interception.next(direction, deadline)
 
 		if isAborted {
 			return
@@ -516,9 +543,21 @@ func (interception *interception) send(ctx context.Context, destination *net.TCP
 		buffers := net.Buffers{}
 		size := 0
 
+		if isExpired {
+			wire, err := interception.flushHTTP(interception.http.expire(direction, logger), &encrypter, carrier)
+
+			if err != nil {
+				logger.Warn("Could not intercept tcp flow, aborting it", "error", err)
+				abort()
+				return
+			}
+
+			buffers = append(buffers, wire)
+		}
+
 		for _, item := range items {
 			size += itemSize(item)
-			wire, err := interception.prepare(ctx, direction, item, &encrypter, logger)
+			wire, err := interception.prepare(ctx, direction, item, &encrypter, &carrier, logger)
 
 			if err != nil {
 				logger.Warn("Could not intercept tcp flow, aborting it", "error", err)
@@ -529,6 +568,19 @@ func (interception *interception) send(ctx context.Context, destination *net.TCP
 			if len(wire) > 0 {
 				buffers = append(buffers, wire)
 			}
+		}
+
+		// what the HTTP layer still keeps goes on before the end, a body delimited by it is whole now
+		if isEnd && (interception.http != nil) {
+			wire, err := interception.flushHTTP(interception.http.close(ctx, interception.currentFlow(carrier), direction, logger), &encrypter, carrier)
+
+			if err != nil {
+				logger.Warn("Could not intercept tcp flow, aborting it", "error", err)
+				abort()
+				return
+			}
+
+			buffers = append(buffers, wire)
 		}
 
 		count, writeErr := buffers.WriteTo(destination)
@@ -556,13 +608,43 @@ func (interception *interception) send(ctx context.Context, destination *net.TCP
 	}
 }
 
+// the flow as the rules see it, with the TLS session of the last record of the direction
+func (interception *interception) currentFlow(carrier *tlsrecord.Record) (flow intercept.Flow) {
+	flow = interception.flow
+
+	if carrier != nil {
+		interception.mutex.Lock()
+		defer interception.mutex.Unlock()
+		flow.Session = interception.conn.Session()
+	}
+
+	return
+}
+
+// bytes the HTTP layer let go outside of a record: plain on tcp, sealed as application data with the keys of the last record on TLS
+func (interception *interception) flushHTTP(data []byte, encrypter *tlsrecord.Encrypter, carrier *tlsrecord.Record) (wire []byte, err error) {
+	if len(data) == 0 {
+		return
+	}
+
+	if carrier == nil {
+		wire = data
+		return
+	}
+
+	wire, _, err = encrypter.SealData(*carrier, data)
+	return
+}
+
 // what goes on for one item: raw bytes only while the direction kept its record count, plain chunks and held records through the rules
-func (interception *interception) prepare(ctx context.Context, direction tlsrecord.Direction, item sendItem, encrypter *tlsrecord.Encrypter, logger *slog.Logger) (wire []byte, err error) {
+// the HTTP layer takes what the rules forwarded of plain chunks and of the application data of records
+func (interception *interception) prepare(ctx context.Context, direction tlsrecord.Direction, item sendItem, encrypter *tlsrecord.Encrypter, carrier **tlsrecord.Record, logger *slog.Logger) (wire []byte, err error) {
 	stats := &interception.stats[direction]
 
 	switch item.kind {
 	case rawSendKind:
-		if encrypter.Offset() != 0 {
+		// bytes the HTTP layer kept can't go on before raw ones, they would need a record of their own
+		if (encrypter.Offset() != 0) || ((interception.http != nil) && interception.http.isKeeping(direction)) {
 			err = fmt.Errorf("%w: offset %d", ErrChangedStream, encrypter.Offset())
 			return
 		}
@@ -571,26 +653,36 @@ func (interception *interception) prepare(ctx context.Context, direction tlsreco
 	case chunkSendKind:
 		result := interception.pipeline.Process(ctx, interception.pipeline.Message(interception.flow, direction, intercept.TCPLayer, item.data), logger)
 
-		if result.Verdict == intercept.ForwardVerdict {
-			wire = result.Plain
+		if result.Verdict != intercept.ForwardVerdict {
+			return
+		}
+
+		wire = result.Plain
+
+		if interception.http != nil {
+			wire = interception.http.feed(ctx, interception.flow, direction, result.Plain, true, logger).output
 		}
 	case recordSendKind:
-		wire, err = interception.prepareRecord(ctx, direction, item, encrypter, stats, logger)
+		wire, err = interception.prepareRecord(ctx, direction, item, encrypter, carrier, stats, logger)
 	}
 
 	return
 }
 
-func (interception *interception) prepareRecord(ctx context.Context, direction tlsrecord.Direction, item sendItem, encrypter *tlsrecord.Encrypter, stats *sendStats, logger *slog.Logger) (wire []byte, err error) {
+func (interception *interception) prepareRecord(ctx context.Context, direction tlsrecord.Direction, item sendItem, encrypter *tlsrecord.Encrypter, carrier **tlsrecord.Record, stats *sendStats, logger *slog.Logger) (wire []byte, err error) {
 	record := item.record
 	flow := interception.flow
 	flow.Session = item.session
 
 	switch record.Action {
 	case tlsrecord.ShowAction:
-		// application data that went on raw before the secrets came, the rules never saw it
+		// application data that went on raw before the secrets came, the rules never saw it; the HTTP layer reads it but can't keep it
 		stats.passed++
 		interception.pipeline.Show(interception.pipeline.Message(flow, direction, intercept.TLSLayer, record.Payload))
+
+		if interception.http != nil {
+			interception.http.feed(ctx, flow, direction, record.Payload, false, logger)
+		}
 	case tlsrecord.ForwardAction:
 		if encrypter.Offset() != 0 {
 			err = fmt.Errorf("%w: offset %d", ErrChangedStream, encrypter.Offset())
@@ -602,6 +694,23 @@ func (interception *interception) prepareRecord(ctx context.Context, direction t
 	case tlsrecord.SealAction:
 		plain := record.Payload
 
+		// what the HTTP layer keeps goes on before an alert, which ends the stream, and before a KeyUpdate, which changes the keys; a session ticket changes nothing
+		if (record.ContentType != tlsrecord.ApplicationDataContentType) && (interception.http != nil) && !isTicketRecord(record) {
+			kept := []byte(nil)
+
+			if record.ContentType == tlsrecord.AlertContentType {
+				kept = interception.http.close(ctx, flow, direction, logger)
+			} else {
+				kept = interception.http.expireNow(direction, "a TLS handshake message came in between, it went on as it came", logger)
+			}
+
+			wire, err = interception.flushHTTP(kept, encrypter, &record)
+
+			if err != nil {
+				return
+			}
+		}
+
 		// only application data goes through the rules, handshake messages and alerts are sealed again as they came
 		if record.ContentType == tlsrecord.ApplicationDataContentType {
 			result := interception.pipeline.Process(ctx, interception.pipeline.Message(flow, direction, intercept.TLSLayer, record.Payload), logger)
@@ -609,6 +718,7 @@ func (interception *interception) prepareRecord(ctx context.Context, direction t
 			if result.Verdict == intercept.DropVerdict {
 				stats.dropped++
 				encrypter.Drop(record)
+				*carrier = &record
 				return
 			}
 
@@ -617,6 +727,19 @@ func (interception *interception) prepareRecord(ctx context.Context, direction t
 			}
 
 			plain = result.Plain
+
+			if interception.http != nil {
+				output := interception.http.feed(ctx, flow, direction, plain, true, logger)
+
+				// everything was kept back: the record leaves its sequence number to the next one
+				if !output.isWhole && (len(output.output) == 0) {
+					encrypter.Drop(record)
+					*carrier = &record
+					return
+				}
+
+				plain = output.output
+			}
 		}
 
 		sealed, count, sealErr := encrypter.Seal(record, plain)
@@ -627,6 +750,7 @@ func (interception *interception) prepareRecord(ctx context.Context, direction t
 
 		stats.sealed++
 		stats.written += count
+		*carrier = &record
 
 		if count > 1 {
 			stats.split++
@@ -636,7 +760,7 @@ func (interception *interception) prepareRecord(ctx context.Context, direction t
 			stats.identical++
 		}
 
-		wire = sealed
+		wire = append(wire, sealed...)
 	}
 
 	return

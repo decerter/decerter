@@ -404,6 +404,13 @@ func TestInterceptTCPPositive(state *testing.T) {
 
 // the app sends request and closes its side, the server reads all of it, answers with response and closes; what each end read
 func relay(state *testing.T, request []byte, response []byte) (upstream []byte, client []byte, err error) {
+	pipeline := intercept.New([]intercept.Rule{replaceRule{old: []byte("GET / "), new: []byte("GET /test ")}}, nil, nil)
+	upstream, client, err = relayWith(state, request, response, pipeline, nil)
+	return
+}
+
+// relay through pipeline and the HTTP layer of flow 1 of recorder, nil for none
+func relayWith(state *testing.T, request []byte, response []byte, pipeline *intercept.Pipeline, flowHTTP *httpFlow) (upstream []byte, client []byte, err error) {
 	app, proxyClient, err := tcpPair()
 
 	if err != nil {
@@ -421,15 +428,14 @@ func relay(state *testing.T, request []byte, response []byte) (upstream []byte, 
 		err = errors.Join(err, app.Close(), proxyClient.Close(), proxyUpstream.Close(), server.Close())
 	}()
 
-	pipeline := intercept.New([]intercept.Rule{replaceRule{old: []byte("GET / "), new: []byte("GET /test ")}}, nil, nil)
-	flow := intercept.FlowOf(0, 1, testFlow, testClient, filter.Values{})
+	flow := intercept.FlowOf(1, 1, testFlow, testClient, filter.Values{})
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	doneChannel := make(chan [2]int64, 1)
 	serverErrChannel := make(chan error, 1)
 
 	// the proxy in the middle
 	go func() {
-		upBytes, downBytes := interceptTCP(state.Context(), proxyClient, proxyUpstream, nil, flow, pipeline, nil, logger)
+		upBytes, downBytes := interceptTCP(state.Context(), proxyClient, proxyUpstream, nil, flow, pipeline, nil, flowHTTP, logger)
 		doneChannel <- [2]int64{upBytes, downBytes}
 	}()
 

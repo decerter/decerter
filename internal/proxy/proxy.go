@@ -43,6 +43,7 @@ func scopeValues(flow redirect.Flow, cmdline string, client netip.AddrPort, scop
 		TLSVersion:  0,
 		ServerName:  "",
 		Protocols:   nil,
+		HTTP:        nil,
 	}
 
 	if isRecorded || ((scope != nil) && scope.Uses(filter.ExeField)) {

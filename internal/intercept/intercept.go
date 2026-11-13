@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/netip"
+	"slices"
 	"sync/atomic"
 
 	"github.com/decerter/decerter/internal/bpf/redirect"
@@ -27,6 +28,8 @@ const (
 	UDPLayer Layer = "udp"
 	// the application data of one decrypted DTLS record, a datagram can carry several
 	DTLSLayer Layer = "dtls"
+	// one whole HTTP/1 request or response, assembled from the messages of a tcp or TLS flow after their rules: the head as it came and the body without its chunk framing
+	HTTPLayer Layer = "http"
 )
 
 // the intercepted connection a message belongs to: the redirected socket of the app and the original destination
@@ -48,12 +51,14 @@ type Flow struct {
 // one piece of a flow on its way through the proxy, Plain is what the peer sent, decrypted for TLS
 // ID counts the messages of the flow in both directions in the order the proxy took them, so a held message can be named (stage 23)
 // a message goes on in its direction only after every message before it in that direction, a rule that holds one holds the direction
+// Exchange is the exchange of the history an HTTPLayer message belongs to, 0 for any other layer or without a history
 type Message struct {
 	Flow      Flow
 	ID        uint64
 	Direction tlsrecord.Direction
 	Layer     Layer
 	Plain     []byte
+	Exchange  uint64
 }
 
 // how a message reached the recorder of a pipeline
@@ -97,6 +102,34 @@ func New(rules []Rule, output io.Writer, recorder Recorder) (pipeline *Pipeline)
 	return
 }
 
+// a pipeline for the HTTP layer of the same flows: other rules, nothing printed or recorded, the message ids from the same counter, so a hold id names one message of either pipeline
+func (pipeline *Pipeline) Derive(rules []Rule) (derived *Pipeline) {
+	derived = &Pipeline{
+		rules:    rules,
+		output:   nil,
+		recorder: nil,
+		counter:  pipeline.counter,
+	}
+	return
+}
+
+// whether a rule of the pipeline may take messages of the layer; a rule that can't tell is asked by its Match
+func (pipeline *Pipeline) Wants(layer Layer) (isWanted bool) {
+	isWanted = slices.ContainsFunc(pipeline.rules, func(rule Rule) bool {
+		layerRule, isLayerRule := rule.(LayerRule)
+		return !isLayerRule || layerRule.Takes(layer)
+	})
+	return
+}
+
+// whether a rule of the pipeline matches the message, before it runs
+func (pipeline *Pipeline) Matches(message Message) (isMatch bool) {
+	isMatch = slices.ContainsFunc(pipeline.rules, func(rule Rule) bool {
+		return rule.Match(message)
+	})
+	return
+}
+
 // the flow of a redirected socket, the TLS session is added once it is known; id is the flow of the API's history, 0 without one
 func FlowOf(id uint64, cookie uint64, flow redirect.Flow, client netip.AddrPort, values filter.Values) (interceptFlow Flow) {
 	interceptFlow = Flow{
@@ -122,6 +155,7 @@ func (pipeline *Pipeline) Message(flow Flow, direction tlsrecord.Direction, laye
 		Direction: direction,
 		Layer:     layer,
 		Plain:     plain,
+		Exchange:  0,
 	}
 	return
 }

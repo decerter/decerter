@@ -59,6 +59,7 @@ type InterceptState struct {
 	IsEnabled  bool
 	Filter     string
 	Directions Directions
+	Layer      Layer
 	Timeout    time.Duration
 	HeldCount  int
 }
@@ -77,11 +78,13 @@ type heldEntry struct {
 // the last rule of the pipeline while the API runs: with intercept on, each message of its directions and filter waits for forward, drop or the timeout
 // Apply blocks in the sending goroutine of the message's direction, so only that direction of that flow waits (4 MiB backpressure on tcp, datagrams are dropped past it on udp)
 // notify gets every change, it must not block; it is called without the mutex
+// layer empty holds the messages of every record layer, http whole HTTP messages instead
 type HoldQueue struct {
 	mutex      *sync.Mutex
 	isEnabled  bool
 	filter     *filter.Filter
 	directions Directions
+	layer      Layer
 	timeout    time.Duration
 	held       map[uint64]*heldEntry
 	notify     func(event HoldEvent)
@@ -94,6 +97,7 @@ func NewHoldQueue(timeout time.Duration, notify func(event HoldEvent)) (queue *H
 		isEnabled:  false,
 		filter:     nil,
 		directions: UpDirections,
+		layer:      "",
 		timeout:    timeout,
 		held:       map[uint64]*heldEntry{},
 		notify:     notify,
@@ -104,7 +108,14 @@ func NewHoldQueue(timeout time.Duration, notify func(event HoldEvent)) (queue *H
 func (queue *HoldQueue) Match(message Message) (isMatch bool) {
 	queue.mutex.Lock()
 	defer queue.mutex.Unlock()
-	isMatch = queue.isEnabled && queue.directions.has(message.Direction) && matchesFilter(queue.filter, message)
+	isMatch = queue.isEnabled && queue.directions.has(message.Direction) && takesLayer(queue.layer, message.Layer) && matchesFilter(queue.filter, message)
+	return
+}
+
+func (queue *HoldQueue) Takes(layer Layer) (isTaken bool) {
+	queue.mutex.Lock()
+	defer queue.mutex.Unlock()
+	isTaken = queue.isEnabled && takesLayer(queue.layer, layer)
 	return
 }
 
@@ -269,14 +280,15 @@ func (queue *HoldQueue) List() (helds []Held) {
 	return
 }
 
-// turn holding on or off; off forwards every held message as it is, a new filter or direction only decides the messages that come after it
-// scope nil holds every message of the directions
-func (queue *HoldQueue) Set(isEnabled bool, scope *filter.Filter, directions Directions) (state InterceptState) {
+// turn holding on or off; off forwards every held message as it is, a new filter, direction or layer only decides the messages that come after it
+// scope nil holds every message of the directions, layer empty every message of a record layer
+func (queue *HoldQueue) Set(isEnabled bool, scope *filter.Filter, directions Directions, layer Layer) (state InterceptState) {
 	queue.mutex.Lock()
 	defer queue.mutex.Unlock()
 	queue.isEnabled = isEnabled
 	queue.filter = scope
 	queue.directions = directions
+	queue.layer = layer
 
 	if !isEnabled {
 		for id, entry := range queue.held {
@@ -301,6 +313,7 @@ func (queue *HoldQueue) state() (state InterceptState) {
 		IsEnabled:  queue.isEnabled,
 		Filter:     "",
 		Directions: queue.directions,
+		Layer:      queue.layer,
 		Timeout:    queue.timeout,
 		HeldCount:  len(queue.held),
 	}

@@ -25,6 +25,22 @@ type Rule interface {
 	Apply(ctx context.Context, message Message) (plain []byte, verdict Verdict, err error)
 }
 
+// a rule that knows before a message comes whether it takes messages of a layer at all, so the HTTP layer only waits for whole messages when a rule may want them
+type LayerRule interface {
+	Takes(layer Layer) (isTaken bool)
+}
+
+// a layer a rule or the hold queue asks for and the layer of a message: empty is every record layer (tcp, tls, udp, dtls), http is only taken when it is named
+func takesLayer(wanted Layer, layer Layer) (isTaken bool) {
+	if wanted == "" {
+		isTaken = layer != HTTPLayer
+		return
+	}
+
+	isTaken = wanted == layer
+	return
+}
+
 // matches every message and changes nothing, the --intercept flag runs it: every TLS record is still decrypted and sealed again
 type IdentityRule struct{}
 

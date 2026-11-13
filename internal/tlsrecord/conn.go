@@ -812,6 +812,16 @@ func (encrypter *Encrypter) Seal(record Record, plaintext []byte) (wire []byte, 
 	return
 }
 
+// seal plaintext as application data with the keys of a record that came with SealAction, at the write sequence number: bytes a layer above kept back from records it dropped go on with it
+// the record may be one that went on already, or one that follows, sealed after this; either way the keys must be the ones of the next record the receiver expects
+func (encrypter *Encrypter) SealData(record Record, plaintext []byte) (wire []byte, count int, err error) {
+	carrier := record
+	carrier.ContentType = ApplicationDataContentType
+	carrier.padding = 0
+	wire, count, err = encrypter.Seal(carrier, plaintext)
+	return
+}
+
 // a record that came with SealAction does not go on: the later records of its keys take its sequence number
 func (encrypter *Encrypter) Drop(record Record) {
 	encrypter.sync(record)

@@ -399,9 +399,20 @@ func (app *App) StartProxy() (err error) {
 	default:
 	}
 
+	// the API's history gets the HTTP/1 exchanges of the tcp flows; when the proxy intercepts, the API's rules and hold queue of layer http run on whole messages, after the record rules
+	var httpLayer *proxy.HTTPLayer
+
+	if recorder != nil {
+		httpLayer = &proxy.HTTPLayer{Pipeline: nil, Timeout: app.holdTimeout}
+
+		if pipeline != nil {
+			httpLayer.Pipeline = pipeline.Derive([]intercept.Rule{app.backend.Rules, app.backend.Holds})
+		}
+	}
+
 	// tcp proxy, closes the listener when the context is cancelled
 	app.waitGroup.Go(func() {
-		proxy.ServeTCP(app.ctx, app.tcpListener, app.redirectBpfMaps, secretsBpfMaps, app.captureBpfMaps, pipeline, app.scope, recorder, app.waitGroup, app.logger)
+		proxy.ServeTCP(app.ctx, app.tcpListener, app.redirectBpfMaps, secretsBpfMaps, app.captureBpfMaps, pipeline, httpLayer, app.scope, recorder, app.waitGroup, app.logger)
 	})
 
 	connection, udpListenErr := proxy.ListenUDP(app.ctx, app.proxyPort)

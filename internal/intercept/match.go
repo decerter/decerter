@@ -42,7 +42,7 @@ const (
 )
 
 // a match-and-replace rule as the API gives it, the values as they were written
-// Filter is in the language of --filter, empty is every message; Layer empty is every layer
+// Filter is in the language of --filter, empty is every message; Layer empty is every record layer, http has to be named
 type MatchSpec struct {
 	Filter      string
 	Directions  Directions
@@ -54,7 +54,7 @@ type MatchSpec struct {
 }
 
 // a declarative rule: every occurrence of find in a message of its directions, layer and filter becomes replace
-// a find that spans two messages is not found, a message is one TLS record, one read of a tcp stream or one datagram
+// a find that spans two messages is not found, a message is one TLS record, one read of a tcp stream or one datagram, or with layer http one whole HTTP/1 message
 // ID and Created are given by the rule set, hits counts the messages the rule changed
 type MatchRule struct {
 	ID      uint64
@@ -108,9 +108,10 @@ func NewMatchRule(spec MatchSpec) (rule *MatchRule, err error) {
 		TCPLayer,
 		TLSLayer,
 		UDPLayer,
-		DTLSLayer:
+		DTLSLayer,
+		HTTPLayer:
 	default:
-		err = fmt.Errorf("%w: %q, valid values: tcp, tls, udp, dtls", ErrLayer, spec.Layer)
+		err = fmt.Errorf("%w: %q, valid values: tcp, tls, udp, dtls, http", ErrLayer, spec.Layer)
 		return
 	}
 
@@ -201,12 +202,12 @@ func (directions Directions) has(direction tlsrecord.Direction) (isIncluded bool
 	return
 }
 
-// what a filter of an API rule or of the hold queue sees of a message: the values of its flow, a TLS or DTLS message is TLS with the fields of its session where the ClientHello was not read
+// what a filter of an API rule or of the hold queue sees of a message: the values of its flow, a TLS or DTLS message (and an HTTP one over TLS) is TLS with the fields of its session where the ClientHello was not read
 // a message of any other layer has no TLS fields, so no filter of the API waits for a ClientHello that will not come
 func FilterValues(message Message) (values filter.Values) {
 	values = message.Flow.Values
 	session := message.Flow.Session
-	isTLS := (message.Layer == TLSLayer) || (message.Layer == DTLSLayer)
+	isTLS := (message.Layer == TLSLayer) || (message.Layer == DTLSLayer) || ((message.Layer == HTTPLayer) && (session.Version != 0))
 
 	switch {
 	case isTLS && (values.TLS != filter.PresentTLSState):
@@ -226,7 +227,12 @@ func matchesFilter(scope *filter.Filter, message Message) (isMatch bool) {
 }
 
 func (rule *MatchRule) Match(message Message) (isMatch bool) {
-	isMatch = rule.Spec.Directions.has(message.Direction) && ((rule.Spec.Layer == "") || (rule.Spec.Layer == message.Layer)) && matchesFilter(rule.filter, message)
+	isMatch = rule.Spec.Directions.has(message.Direction) && takesLayer(rule.Spec.Layer, message.Layer) && matchesFilter(rule.filter, message)
+	return
+}
+
+func (rule *MatchRule) Takes(layer Layer) (isTaken bool) {
+	isTaken = takesLayer(rule.Spec.Layer, layer)
 	return
 }
 
@@ -301,6 +307,13 @@ func (ruleSet *RuleSet) List() (rules []*MatchRule) {
 	ruleSet.mutex.RLock()
 	defer ruleSet.mutex.RUnlock()
 	rules = ruleSet.rules
+	return
+}
+
+func (ruleSet *RuleSet) Takes(layer Layer) (isTaken bool) {
+	isTaken = slices.ContainsFunc(ruleSet.List(), func(rule *MatchRule) bool {
+		return rule.Takes(layer)
+	})
 	return
 }
 

@@ -273,3 +273,95 @@ func TestExportPositive(state *testing.T) {
 		return
 	}
 }
+
+// a request head of an exchange, as the HTTP layer gives it
+func testRequest(method string, target string) (message api.HTTPMessage) {
+	message = api.HTTPMessage{HTTPHead: api.HTTPHead{Method: method, Target: target, Version: "HTTP/1.1", Headers: []api.Header{{Name: "Host", Value: "example.com"}, {Name: "User-Agent", Value: "curl/8"}}}, URL: "http://example.com" + target, Framing: api.NoneFraming, State: api.HeadHTTPState}
+	return
+}
+
+// Test if the exchanges of history.History return with the expected output: heads, bodies and their edit, paging, the http fields of a flow for the filter, and the limits.
+func TestExchangesPositive(state *testing.T) {
+	recorded := []api.Event{}
+	limits := history.DefaultLimits()
+	limits.FlowExchanges = 3
+	limits.FlowExchangeBytes = 1000
+	flows := history.New(limits, func(event api.Event) {
+		recorded = append(recorded, event)
+	})
+	flowID := flows.OpenFlow(1, testValues(80, filter.AbsentTLSState), [32]byte{})
+	first := flows.OpenExchange(flowID, "HTTP/1.1", api.RequestSide, testRequest("POST", "/login"))
+	flows.AppendBody(first, api.RequestSide, []byte("user=a"))
+	flows.EndMessage(first, api.RequestSide, history.HTTPEnd{State: api.CompleteHTTPState, Trailers: nil, Note: "", Edit: &history.HTTPEdit{Head: testRequest("POST", "/login").HTTPHead, URL: "", Body: []byte("user=admin"), Verdict: api.ForwardVerdict}})
+	flows.AddHead(first, api.ResponseSide, api.HTTPMessage{HTTPHead: api.HTTPHead{Version: "HTTP/1.1", Status: 100, Reason: "Continue"}, State: api.CompleteHTTPState}, true)
+	flows.AddHead(first, api.ResponseSide, api.HTTPMessage{HTTPHead: api.HTTPHead{Version: "HTTP/1.1", Status: 302, Reason: "Found"}, Framing: api.CloseFraming, State: api.HeadHTTPState}, false)
+	flows.AppendBody(first, api.ResponseSide, bytes.Repeat([]byte("x"), 2000))
+	flows.EndMessage(first, api.ResponseSide, history.HTTPEnd{State: api.IncompleteHTTPState, Trailers: nil, Note: "the stream ended before the message", Edit: nil})
+	second := flows.OpenExchange(flowID, "HTTP/1.1", api.RequestSide, testRequest("GET", "/"))
+	third := flows.OpenExchange(flowID, "HTTP/1.1", api.ResponseSide, api.HTTPMessage{HTTPHead: api.HTTPHead{Version: "HTTP/1.1", Status: 408}, State: api.HeadHTTPState})
+	// over the flow's exchanges
+	fourth := flows.OpenExchange(flowID, "HTTP/1.1", api.RequestSide, testRequest("GET", "/x"))
+	exchange, found := flows.Exchange(first)
+	body, original, isEdited, hasSide, _ := flows.ExchangeBody(first, api.RequestSide)
+	responseBody, _, _, _, _ := flows.ExchangeBody(first, api.ResponseSide)
+
+	if !found || (second == 0) || (third == 0) || (fourth != 0) || (len(exchange.Interim) != 1) || (exchange.Response.Status != 302) || (exchange.Response.State != api.IncompleteHTTPState) || (exchange.Response.BodyLength != 2000) || (exchange.Response.StoredLength >= 2000) ||
+		!exchange.Request.Edited || (exchange.Request.Original == nil) || (exchange.Request.BodyLength != 10) || (exchange.Request.OriginalBodyLength != 6) || !isEdited || !hasSide || (string(body) != "user=admin") || (string(original) != "user=a") || (len(responseBody) != exchange.Response.StoredLength) {
+		state.Errorf("Test of history.History exchanges failed, exchange: %+v, body: %q, original: %q, ids: %d %d %d %d", exchange, body, original, first, second, third, fourth)
+		return
+	}
+
+	page, next, _ := flows.Exchanges(flowID, 0, 2)
+	rest, last, _ := flows.Exchanges(flowID, next, 2)
+	flow, _ := flows.Flow(flowID)
+
+	if (len(page) != 2) || (next != second) || (len(rest) != 1) || (rest[0].Response.Status != 408) || (last != 0) || !flow.Truncated {
+		state.Errorf("Test of history.History.Exchanges function failed, pages: %+v %+v, next: %d, flow: %+v", page, rest, next, flow)
+		return
+	}
+
+	positiveCases := []struct {
+		Filter   string
+		Expected int
+	}{
+		{Filter: `http.request.method == "POST" && http.response.code == 302 && http.host == "example.com" && http.user_agent contains "curl"`, Expected: 1},
+		{Filter: `http.request.uri in {"/" "/nothing"} && http.response.code == 408`, Expected: 1},
+		{Filter: `http.request.method == "PUT"`, Expected: 0},
+	}
+
+	for _, positive := range positiveCases {
+		parsed, err := filter.Parse(positive.Filter)
+		matched, _ := flows.Flows(&parsed, 0, 10)
+
+		if (err != nil) || (len(matched) != positive.Expected) {
+			state.Errorf("Test of history.History.Flows function failed, %s should take %d flows, flows: %d, error: %v", positive.Filter, positive.Expected, len(matched), err)
+			return
+		}
+	}
+
+	exchangeEvents := 0
+
+	for _, event := range recorded {
+		if event.Type == api.ExchangeEventType {
+			exchangeEvents++
+		}
+	}
+
+	status := flows.Status()
+
+	if (exchangeEvents != 7) || (status.Exchanges != 3) || (status.ExchangeBytes == 0) {
+		state.Errorf("Test of history.History exchanges failed, there should be 7 exchange events and 3 exchanges, events: %d, status: %+v", exchangeEvents, status)
+		return
+	}
+
+	// a closed flow evicted by a newer one takes its exchanges and their bytes along
+	limits.Flows = 1
+	flows = history.New(limits, nil)
+	flowID = flows.OpenFlow(1, testValues(80, filter.AbsentTLSState), [32]byte{})
+	first = flows.OpenExchange(flowID, "HTTP/1.1", api.RequestSide, testRequest("GET", "/"))
+	flows.OpenFlow(2, testValues(81, filter.AbsentTLSState), [32]byte{})
+
+	if _, found = flows.Exchange(first); found || (flows.Status().ExchangeBytes != 0) || (flows.Status().Exchanges != 0) {
+		state.Errorf("Test of history.History exchanges failed, an evicted flow should take its exchanges, status: %+v", flows.Status())
+	}
+}

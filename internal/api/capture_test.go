@@ -80,6 +80,8 @@ func TestCaptureHandlerPositive(state *testing.T) {
 		{Method: http.MethodPost, Path: "/captures", Status: http.StatusCreated},
 		{Method: http.MethodPost, Path: "/captures", Body: `{"filter": "tcp.dstport == 443", "plaintext": true}`, Status: http.StatusCreated},
 		{Method: http.MethodPost, Path: "/captures", Body: `{"filter": "tcp.port =="}`, Status: http.StatusBadRequest},
+		// a capture decides a flow when it starts, before its HTTP layer read anything
+		{Method: http.MethodPost, Path: "/captures", Body: `{"filter": "http.host == \"a\""}`, Status: http.StatusBadRequest},
 		{Method: http.MethodPost, Path: "/captures", Body: `{"format": "dsb"}`, Status: http.StatusBadRequest, IsInvalid: true},
 		{Method: http.MethodGet, Path: "/captures", Status: http.StatusOK},
 		{Method: http.MethodGet, Path: "/captures/1/pcap", Status: http.StatusConflict},

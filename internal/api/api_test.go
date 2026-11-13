@@ -68,6 +68,7 @@ type testBackend struct {
 	heldID   uint64
 	dropID   uint64
 	ruleID   uint64
+	exchange uint64
 	stop     func()
 	pipeline *intercept.Pipeline
 }
@@ -117,6 +118,7 @@ func TestTypesPositive(state *testing.T) {
 		"Traffic": v1.Traffic{}, "Flow": v1.Flow{}, "FlowList": v1.FlowList{}, "Message": v1.Message{}, "MessageList": v1.MessageList{},
 		"Payload": v1.Payload{}, "MessageDetail": v1.MessageDetail{}, "Hold": v1.Hold{}, "HoldList": v1.HoldList{}, "EditRequest": v1.EditRequest{},
 		"RuleRequest": v1.RuleRequest{}, "Rule": v1.Rule{}, "RuleList": v1.RuleList{}, "Event": v1.Event{},
+		"Header": v1.Header{}, "HTTPHead": v1.HTTPHead{}, "HTTPMessage": v1.HTTPMessage{}, "Exchange": v1.Exchange{}, "ExchangeList": v1.ExchangeList{}, "ExchangeBody": v1.ExchangeBody{},
 		"CaptureStatus": v1.CaptureStatus{}, "CaptureLimits": v1.CaptureLimits{}, "CaptureRequest": v1.CaptureRequest{}, "Capture": v1.Capture{}, "CaptureList": v1.CaptureList{},
 	}
 
@@ -178,6 +180,15 @@ func TestHandlerPositive(state *testing.T) {
 		{Method: http.MethodGet, Path: fmt.Sprintf("/messages/%d?offset=4&length=6", test.request), Status: http.StatusOK},
 		{Method: http.MethodGet, Path: fmt.Sprintf("/messages/%d", test.dropped), Status: http.StatusOK},
 		{Method: http.MethodGet, Path: "/messages/999", Status: http.StatusNotFound},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/exchanges", test.tlsFlow), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/exchanges?limit=1", test.udpFlow), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: "/flows/999/exchanges", Status: http.StatusNotFound},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/exchanges/%d", test.exchange), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: "/exchanges/999", Status: http.StatusNotFound},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/exchanges/%d/body?side=response&offset=6", test.exchange), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/exchanges/%d/body", test.exchange), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/exchanges/%d/body?side=trailer", test.exchange), Status: http.StatusBadRequest, IsInvalid: true},
+		{Method: http.MethodGet, Path: "/flows?filter=http.request.method+%3D%3D+%22GET%22+%26%26+http.response.code+%3D%3D+200", Status: http.StatusOK},
 		{Method: http.MethodGet, Path: "/messages/1?length=70000", Status: http.StatusBadRequest, IsInvalid: true},
 		{Method: http.MethodGet, Path: "/holds", Status: http.StatusOK},
 		{Method: http.MethodPut, Path: fmt.Sprintf("/holds/%d", test.heldID), Body: `{"payload": {"type": "text", "value": "GET /test HTTP/1.1\r\n\r\n"}}`, Status: http.StatusOK},
@@ -197,6 +208,8 @@ func TestHandlerPositive(state *testing.T) {
 		{Method: http.MethodGet, Path: "/keylog?filter=udp", Status: http.StatusOK},
 		{Method: http.MethodPut, Path: "/intercept", Body: `{"enabled": true, "filter": "tls", "direction": "both"}`, Status: http.StatusOK},
 		{Method: http.MethodPut, Path: "/intercept", Body: `{"enabled": true, "direction": "sideways"}`, Status: http.StatusBadRequest, IsInvalid: true},
+		{Method: http.MethodPut, Path: "/intercept", Body: `{"enabled": true, "layer": "frames"}`, Status: http.StatusBadRequest, IsInvalid: true},
+		{Method: http.MethodPost, Path: "/rules", Body: `{"layer": "http", "direction": "down", "filter": "http.host == \"example.com\"", "find": {"type": "text", "value": "world"}, "replace": {"type": "text", "value": "planet"}}`, Status: http.StatusCreated},
 		{Method: http.MethodPost, Path: fmt.Sprintf("/holds/%d/forward", test.heldID), Status: http.StatusNoContent},
 		{Method: http.MethodPost, Path: fmt.Sprintf("/holds/%d/drop", test.heldID), Status: http.StatusNotFound},
 		{Method: http.MethodPost, Path: fmt.Sprintf("/holds/%d/drop", test.dropID), Status: http.StatusNoContent},
@@ -750,6 +763,15 @@ func newTestBackend(ctx context.Context) (test testBackend, err error) {
 	dropped := test.pipeline.Message(flow, tlsrecord.ServerDirection, intercept.TLSLayer, []byte("x"))
 	test.dropped = dropped.ID
 	backend.History.Record(dropped, intercept.Result{Plain: nil, Verdict: intercept.DropVerdict, Changed: true}, intercept.RulesOrigin)
+	// an exchange of the TLS flow whose chunked response a rule of layer http edited
+	head := v1.HTTPMessage{HTTPHead: v1.HTTPHead{Method: "GET", Target: "/", Version: "HTTP/1.1", Headers: []v1.Header{{Name: "Host", Value: "example.com"}, {Name: "User-Agent", Value: "curl/8"}}}, URL: "https://example.com/", Time: time.Now(), Framing: v1.NoneFraming, State: v1.HeadHTTPState}
+	test.exchange = backend.History.OpenExchange(test.tlsFlow, "HTTP/1.1", v1.RequestSide, head)
+	backend.History.EndMessage(test.exchange, v1.RequestSide, history.HTTPEnd{State: v1.CompleteHTTPState, Trailers: nil, Note: "", Edit: nil})
+	response := v1.HTTPMessage{HTTPHead: v1.HTTPHead{Version: "HTTP/1.1", Status: 200, Reason: "OK", Headers: []v1.Header{{Name: "Transfer-Encoding", Value: "chunked"}}}, Time: time.Now(), Framing: v1.ChunkedFraming, State: v1.HeadHTTPState}
+	backend.History.AddHead(test.exchange, v1.ResponseSide, response, false)
+	backend.History.AppendBody(test.exchange, v1.ResponseSide, []byte("hello world"))
+	edit := history.HTTPEdit{Head: response.HTTPHead, URL: "", Body: []byte("hello planet"), Verdict: v1.ForwardVerdict}
+	backend.History.EndMessage(test.exchange, v1.ResponseSide, history.HTTPEnd{State: v1.CompleteHTTPState, Trailers: []v1.Header{{Name: "X-Sum", Value: "1"}}, Note: "", Edit: &edit})
 	backend.History.CloseFlow(test.tlsFlow, history.Counters{Bytes: 100, Datagrams: 0}, history.Counters{Bytes: 200, Datagrams: 0})
 	// an open udp flow whose TLS state was never read
 	udpValues := filter.Values{PID: 43, UID: 1001, GID: 1001, Comm: "dig", IPProtocol: syscall.IPPROTO_UDP, Source: netip.MustParseAddrPort("[::ffff:127.0.0.1]:5353"), Destination: netip.MustParseAddrPort("127.0.0.1:53"), TLS: filter.UnknownTLSState}
@@ -778,7 +800,7 @@ func newTestBackend(ctx context.Context) (test testBackend, err error) {
 func holdOne(ctx context.Context, backend *Backend, pipeline *intercept.Pipeline, flow intercept.Flow) (release func()) {
 	current := backend.Bus.subscribe()
 	defer backend.Bus.unsubscribe(current)
-	backend.Holds.Set(true, nil, intercept.UpDirections)
+	backend.Holds.Set(true, nil, intercept.UpDirections, "")
 	message := pipeline.Message(flow, tlsrecord.ClientDirection, intercept.UDPLayer, []byte("query"))
 	waitGroup := sync.WaitGroup{}
 
@@ -794,7 +816,7 @@ func holdOne(ctx context.Context, backend *Backend, pipeline *intercept.Pipeline
 	}
 
 	release = func() {
-		backend.Holds.Set(false, nil, intercept.UpDirections)
+		backend.Holds.Set(false, nil, intercept.UpDirections, "")
 		waitGroup.Wait()
 	}
 	return

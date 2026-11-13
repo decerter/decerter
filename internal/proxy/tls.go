@@ -58,6 +58,16 @@ func watchTLS(ctx context.Context, observer *TLSObserver, logger *slog.Logger) {
 					stopOrPrint(&conn, observer, records, err, &isSessionPrinted, logger)
 				}
 
+				// bodies delimited by the end of the stream are whole now
+				if observer.http != nil && observer.Active() {
+					flow := observer.interceptFlow
+					flow.Session = conn.Session()
+
+					for _, direction := range []tlsrecord.Direction{tlsrecord.ClientDirection, tlsrecord.ServerDirection} {
+						observer.http.close(ctx, flow, direction, logger)
+					}
+				}
+
 				return
 			}
 
@@ -155,6 +165,11 @@ func stopOrPrint(conn *tlsrecord.Conn, observer *TLSObserver, records []tlsrecor
 		flow := observer.interceptFlow
 		flow.Session = session
 		observer.recorder.Observe(flow, record.Direction, intercept.TLSLayer, record.Payload)
+
+		// the exchanges of what went on, the observer never keeps anything back
+		if observer.http != nil {
+			observer.http.feed(context.Background(), flow, record.Direction, record.Payload, false, logger)
+		}
 	}
 
 	if err != nil {

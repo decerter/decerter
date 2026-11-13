@@ -192,6 +192,13 @@ func parseFilter(value string) (err error) {
 		return
 	}
 
+	err = parsed.CheckFlowScope()
+
+	if err != nil {
+		err = fmt.Errorf("invalid filter: %w", err)
+		return
+	}
+
 	scopeFilter = &parsed
 	return
 }

@@ -48,6 +48,17 @@ type Values struct {
 	TLSVersion  uint16
 	ServerName  string
 	Protocols   []string
+	HTTP        *HTTPValues
+}
+
+// what the HTTP layer read: every value a field had, in the order they came; nil in Values is a flow or message without HTTP
+// Codes are the status codes of the responses, a request has none
+type HTTPValues struct {
+	Methods    []string
+	URIs       []string
+	Hosts      []string
+	Codes      []uint16
+	UserAgents []string
 }
 
 // the values with the ClientHello fields: isTLS is false when the first client bytes were no ClientHello or the server spoke first, a ClientHello that could not be read is TLS without its fields
@@ -333,10 +344,54 @@ func valuesOf(field Field, values Values) (fieldValues []value, fieldPresence pr
 		fieldValues, fieldPresence = portValues(isUDP, values.Destination.Port())
 	case UDPPortField:
 		fieldValues, fieldPresence = portValues(isUDP, values.Source.Port(), values.Destination.Port())
+	case
+		HTTPField,
+		HTTPMethodField,
+		HTTPURIField,
+		HTTPHostField,
+		HTTPCodeField,
+		HTTPAgentField:
+		fieldValues, fieldPresence = httpValues(field, values.HTTP)
 	default:
 		fieldValues, fieldPresence = tlsValues(field, values)
 	}
 
+	return
+}
+
+// the HTTP fields: absent without HTTP, a field without a value is absent too
+func httpValues(field Field, http *HTTPValues) (fieldValues []value, fieldPresence presence) {
+	fieldPresence = present(http != nil)
+
+	if http == nil {
+		return
+	}
+
+	texts := []string(nil)
+
+	switch field {
+	case HTTPField:
+		return
+	case HTTPMethodField:
+		texts = http.Methods
+	case HTTPURIField:
+		texts = http.URIs
+	case HTTPHostField:
+		texts = http.Hosts
+	case HTTPAgentField:
+		texts = http.UserAgents
+	case HTTPCodeField:
+		for _, code := range http.Codes {
+			fieldValues = append(fieldValues, numberValue(uint64(code)))
+		}
+	default:
+	}
+
+	for _, text := range texts {
+		fieldValues = append(fieldValues, value{text: text})
+	}
+
+	fieldPresence = present(len(fieldValues) > 0)
 	return
 }
 

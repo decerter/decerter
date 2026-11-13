@@ -14,6 +14,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -67,6 +68,19 @@ func TestRewritePositive(state *testing.T) {
 		if err != nil {
 			state.Errorf("Test of the rewrite failed, error: %s", err.Error())
 		}
+	}
+
+	// the Conscrypt requests of --package as exchanges of the HTTP layer, after the record rule
+	flows := v1.FlowList{}
+	_, err = client.call(state.Context(), http.MethodGet, "/flows?filter="+url.QueryEscape(`http.request.method == "GET" && http.request.uri == "/test" && http.response.code == 200`), nil, &flows)
+	exchanges := v1.ExchangeList{}
+
+	if (err == nil) && (len(flows.Flows) > 0) {
+		_, err = client.call(state.Context(), http.MethodGet, fmt.Sprintf("/flows/%d/exchanges", flows.Flows[0].ID), nil, &exchanges)
+	}
+
+	if (err != nil) || (len(flows.Flows) != len(servers)) || (len(exchanges.Exchanges) != 1) || (exchanges.Exchanges[0].Request == nil) || !strings.HasPrefix(exchanges.Exchanges[0].Request.URL, "https://") {
+		state.Errorf("Test of the rewrite failed, the dex's requests should be exchanges, flows: %d, exchanges: %+v, error: %v", len(flows.Flows), exchanges, err)
 	}
 
 	status, err = client.call(state.Context(), http.MethodDelete, fmt.Sprintf("/rules/%d", rule.ID), nil, nil)

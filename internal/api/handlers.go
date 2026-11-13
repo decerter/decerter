@@ -167,6 +167,114 @@ func getMessage(backend *Backend, writer http.ResponseWriter, request *http.Requ
 	writeJSON(writer, http.StatusOK, detail, logger)
 }
 
+func listExchanges(backend *Backend, writer http.ResponseWriter, request *http.Request, logger *slog.Logger) {
+	id, err := pathID(request)
+
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err, logger)
+		return
+	}
+
+	limit, err := queryNumber(request, "limit", defaultExchangeLimit, 1, maxExchangeLimit)
+
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err, logger)
+		return
+	}
+
+	cursor, err := queryCursor(request)
+
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err, logger)
+		return
+	}
+
+	exchanges, next, found := backend.History.Exchanges(id, cursor, limit)
+
+	if !found {
+		writeError(writer, http.StatusNotFound, fmt.Errorf("%w: flow %d", ErrNotFound, id), logger)
+		return
+	}
+
+	writeJSON(writer, http.StatusOK, v1.ExchangeList{Exchanges: exchanges, NextCursor: cursorOf(next)}, logger)
+}
+
+func getExchange(backend *Backend, writer http.ResponseWriter, request *http.Request, logger *slog.Logger) {
+	id, err := pathID(request)
+
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err, logger)
+		return
+	}
+
+	exchange, found := backend.History.Exchange(id)
+
+	if !found {
+		writeError(writer, http.StatusNotFound, fmt.Errorf("%w: exchange %d", ErrNotFound, id), logger)
+		return
+	}
+
+	writeJSON(writer, http.StatusOK, exchange, logger)
+}
+
+// a window of the body of the request or the response, without its chunk framing
+func getExchangeBody(backend *Backend, writer http.ResponseWriter, request *http.Request, logger *slog.Logger) {
+	id, err := pathID(request)
+
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err, logger)
+		return
+	}
+
+	side := v1.Side(request.URL.Query().Get("side"))
+
+	switch side {
+	case "":
+		side = v1.RequestSide
+	case
+		v1.RequestSide,
+		v1.ResponseSide:
+	default:
+		writeError(writer, http.StatusBadRequest, fmt.Errorf("%w: side %q, valid values: request, response", ErrBadRequest, side), logger)
+		return
+	}
+
+	offset, err := queryNumber(request, "offset", 0, 0, maxPayloadOffset)
+
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err, logger)
+		return
+	}
+
+	length, err := queryNumber(request, "length", defaultPayloadLength, 0, maxPayloadLength)
+
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err, logger)
+		return
+	}
+
+	body, original, isEdited, hasSide, found := backend.History.ExchangeBody(id, side)
+
+	if !found || !hasSide {
+		writeError(writer, http.StatusNotFound, fmt.Errorf("%w: %s of exchange %d", ErrNotFound, side, id), logger)
+		return
+	}
+
+	detail := v1.ExchangeBody{
+		ExchangeID: id,
+		Side:       side,
+		Payload:    payloadWindow(body, offset, length),
+		Original:   nil,
+	}
+
+	if isEdited {
+		window := payloadWindow(original, offset, length)
+		detail.Original = &window
+	}
+
+	writeJSON(writer, http.StatusOK, detail, logger)
+}
+
 func setIntercept(backend *Backend, writer http.ResponseWriter, request *http.Request, logger *slog.Logger) {
 	if backend.Holds == nil {
 		writeError(writer, http.StatusConflict, ErrNoInterception, logger)
@@ -188,6 +296,13 @@ func setIntercept(backend *Backend, writer http.ResponseWriter, request *http.Re
 		return
 	}
 
+	layer, err := layerOf(interceptRequest.Layer)
+
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err, logger)
+		return
+	}
+
 	var scope *filter.Filter
 
 	if interceptRequest.Filter != "" {
@@ -199,9 +314,9 @@ func setIntercept(backend *Backend, writer http.ResponseWriter, request *http.Re
 		}
 	}
 
-	backend.Holds.Set(interceptRequest.Enabled, scope, directions)
+	backend.Holds.Set(interceptRequest.Enabled, scope, directions, layer)
 	state := interceptView(backend)
-	logger.Info("Intercept changed over the api", "enabled", state.Enabled, "filter", state.Filter, "direction", state.Direction)
+	logger.Info("Intercept changed over the api", "enabled", state.Enabled, "filter", state.Filter, "direction", state.Direction, "layer", state.Layer)
 	backend.Bus.Publish(v1.Event{Type: v1.InterceptChangedEventType, Intercept: &state})
 	writeJSON(writer, http.StatusOK, state, logger)
 }
@@ -447,6 +562,7 @@ func interceptView(backend *Backend) (state v1.InterceptState) {
 	state.Enabled = current.IsEnabled
 	state.Filter = current.Filter
 	state.Direction = v1.Direction(current.Directions)
+	state.Layer = v1.Layer(current.Layer)
 	state.HoldTimeoutSeconds = current.Timeout.Seconds()
 	state.Held = current.HeldCount
 	return
@@ -457,6 +573,7 @@ func holdView(held intercept.Held, withPayload bool) (hold v1.Hold) {
 	hold = v1.Hold{
 		ID:             held.Message.ID,
 		FlowID:         held.Message.Flow.ID,
+		ExchangeID:     held.Message.Exchange,
 		Direction:      v1.Direction(intercept.DirectionName(held.Message.Direction)),
 		Layer:          v1.Layer(held.Message.Layer),
 		HeldAt:         held.HeldAt,
@@ -543,6 +660,24 @@ func escape(data []byte) (text string) {
 	}
 
 	text = builder.String()
+	return
+}
+
+// the layer of the hold queue, empty is every record layer
+func layerOf(layer v1.Layer) (interceptLayer intercept.Layer, err error) {
+	switch layer {
+	case
+		"",
+		v1.TCPLayer,
+		v1.TLSLayer,
+		v1.UDPLayer,
+		v1.DTLSLayer,
+		v1.HTTPLayer:
+		interceptLayer = intercept.Layer(layer)
+	default:
+		err = fmt.Errorf("%w: layer %q, valid values: tcp, tls, udp, dtls, http", ErrBadRequest, layer)
+	}
+
 	return
 }
 

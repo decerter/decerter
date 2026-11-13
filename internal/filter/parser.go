@@ -159,6 +159,15 @@ func (filter Filter) UsesSource(source SourceType) (isUsed bool) {
 	return
 }
 
+// a filter that decides a flow when it starts: the scope of run and capture, a capture of the API; the http fields come too late for it
+func (filter Filter) CheckFlowScope() (err error) {
+	if filter.UsesSource(HTTPSourceType) {
+		err = ErrFlowScope
+	}
+
+	return
+}
+
 func (currentParser *parser) peek() (next token) {
 	next = currentParser.tokens[currentParser.position]
 	return

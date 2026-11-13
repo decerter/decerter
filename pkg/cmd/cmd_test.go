@@ -157,7 +157,7 @@ func TestExecutePositive(state *testing.T) {
 		Text []string
 	}{
 		{Args: []string{"--version"}, Text: []string{"decerter ", "(commit "}},
-		{Args: []string{"help", "filter"}, Text: []string{"subset of Wireshark's display filter language", "  proc.comm      string, flow, comm_map\n", "  tls.alpn       string, several values, clienthello\n"}},
+		{Args: []string{"help", "filter"}, Text: []string{"subset of Wireshark's display filter language", "  proc.comm           string, flow, comm_map\n", "  tls.alpn            string, several values, clienthello\n", "  http.request.method string, several values, http\n", "--filter and the filter of a capture refuse them"}},
 		{Args: []string{"run", "--help"}, Text: []string{"--decrypt", "--udp-idle-timeout duration", "--api-socket path", "--hold-timeout duration", "--log-level level"}},
 		{Args: []string{"capture", "--help"}, Text: []string{"-w, --write file", "--snaplen bytes", "--package name"}},
 		{Args: []string{"android", "--help"}, Text: []string{"setup", "restore", "adb forward tcp:8080 localabstract:decerter-api", "/data/local/tmp/decerter.d"}},
