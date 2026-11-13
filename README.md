@@ -13,13 +13,13 @@ Requires Linux ≥ 6.6.
 - `decerter capture -w <file>|-`: write the selected flows to pcapng without redirecting anything, with a Decryption Secrets Block per TLS session, so Wireshark and tshark decrypt the file by themselves; `--plaintext` writes synthesized decrypted packets for tcpdump and other tools; `-w -` streams live into Wireshark or tshark.
 - `decerter keylog`: print the TLS secrets of the selected processes in NSS key log format (`SSLKEYLOGFILE`).
 - `--filter`: a subset of Wireshark's display filter language over process, address, port and TLS ClientHello fields (`decerter help filter`); the parts the kernel can check go into BPF maps.
-- TLS secrets from OpenSSL 3 (Linux, amd64) and from Conscrypt's BoringSSL (Android 15 and later); TLS 1.2, TLS 1.3 and DTLS 1.2.
+- TLS secrets from OpenSSL 3, every release from 3.0.0 to 3.6.5 (Linux, amd64 and arm64), and from Conscrypt's BoringSSL (Android 15 and later); TLS 1.2, TLS 1.3 and DTLS 1.2.
 - Android: rooted devices with a GKI kernel from android15-6.6 on; decerter shares netd's cgroup hooks while it runs and `decerter android restore` puts them back after a crash.
 
 ## Requirements
 - Linux 6.6 or newer with BTF (`/sys/kernel/btf/vmlinux`) and cgroup v2 mounted at `/sys/fs/cgroup`.
 - root: decerter loads and attaches BPF programs.
-- TLS secrets on Linux: OpenSSL's `libssl.so.3` on amd64. The offsets are generated for OpenSSL 3.6.2; another version needs `make generate-openssl-offsets OPENSSL_VERSIONS=openssl-X.Y.Z` and a rebuild, and is refused with a clear error until then. Without the secrets uprobe (another architecture, or Android without Conscrypt) `run` and `capture` still work, without decryption.
+- TLS secrets on Linux: OpenSSL 3's `libssl.so.3`, every 3.x release from 3.0.0 to 3.6.5, on amd64 and arm64 (arm64 is built from the same probe but was not run on an arm64 machine). The version comes from the `OpenSSL x.y.z` string of the `libcrypto.so.3` next to `libssl.so.3`; a version the table doesn't have, such as a newer release, is refused before anything is attached, with the nearest known version and the command that adds it. The distribution libraries of Ubuntu 24.04 (3.0.13), Debian 13 (3.5.7), Fedora 45's `openssl3-libs` (3.5.9) and AlmaLinux 10 (3.5.8, with its FIPS patches) have the upstream layout and are checked by `make test-e2e`. OpenSSL 4 (`libssl.so.4`, Fedora 45's default) is not supported. Without the secrets uprobe (another architecture, or Android without Conscrypt) `run` and `capture` still work, without decryption.
 - Android: Android 15 or newer with a GKI kernel android15-6.6 or newer, rooted. Only the x86_64 Android 15 emulator was tested; arm64 devices, Magisk and KernelSU are not verified.
 
 ## Build
@@ -32,7 +32,9 @@ make help           # every target
 
 Building needs Go 1.26 or newer. The BPF objects are committed; regenerating them (`make generate-bpf-objects`) needs clang-21, llvm-strip-21 and `make generate-vmlinux` (bpftool).
 
-Other targets: `make lint` (golangci-lint), `make test-unit`, `make test-e2e` (root, the local users `test` and `nobody`), `make test-e2e-android` (root, the Android SDK with the AVD `decerter-a15` or a running x86_64 emulator, a JDK and tshark; decerter runs only on the emulator), `make license-check` (go-licenses on the dependencies plus an SPDX check of every source file), `make install-golangci-lint`, `make install-go-licenses`.
+A new OpenSSL release: `make generate-openssl-offsets` (`OPENSSL_VERSIONS=all`, the default; a list of tags like `OPENSSL_VERSIONS="openssl-3.6.2"` writes a table of only those) takes every final 3.x release tag of github.com/openssl/openssl (pre-releases are skipped), downloads each release tarball once into `~/.cache/decerter-openssl` (`OPENSSL_CACHE`), checks it against the published SHA-256, compiles `tools/offsetgen/openssl_offset.c` against the release's own `ssl/ssl_local.h` with clang for `linux-x86_64` and `linux-aarch64`, and rewrites `internal/tls/openssl/offsets_gen.go`, which groups equal offsets into version ranges per architecture. Nothing is run for the other architecture, but arm64 needs the aarch64 glibc headers: `ARM64_SYSROOT` (default `/usr/aarch64-linux-gnu`, Debian's `libc6-dev-arm64-cross`). `all` takes about 2.5 minutes with the tarballs cached. Then rebuild, and run `make test-e2e`, which checks the distribution libraries above.
+
+Other targets: `make lint` (golangci-lint), `make test-unit`, `make test-e2e` (root, the local users `test` and `nobody`; the distro OpenSSL cases need docker, a C compiler and the images `ubuntu:24.04`, `debian:13`, `fedora` and `almalinux:10`, and are skipped without them), `make test-e2e-android` (root, the Android SDK with the AVD `decerter-a15` or a running x86_64 emulator, a JDK and tshark; decerter runs only on the emulator), `make license-check` (go-licenses on the dependencies plus an SPDX check of every source file), `make install-golangci-lint`, `make install-go-licenses`.
 
 ## Usage
 ```

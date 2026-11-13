@@ -61,8 +61,15 @@ func LoadBpfObjects(opensslOffset openssl.Offset, boringsslOffset boringssl.Offs
 		versionInS3 = 1
 	}
 
+	hasType := uint32(0)
+
+	if opensslOffset.HasType {
+		hasType = 1
+	}
+
 	variables := map[string]any{
 		bpfVarOwnTgid:                      ownTgid,
+		bpfVarHasType:                      hasType,
 		bpfVarTypeOffset:                   opensslOffset.Type,
 		bpfVarSslConnectionOffset:          opensslOffset.SSLConnection,
 		bpfVarVersionOffset:                opensslOffset.Version,

@@ -48,6 +48,8 @@ const (
 	udpIdleTimeout time.Duration = 30 * time.Second
 	// a message held over the API that nobody decides goes on after this
 	apiHoldTimeout time.Duration = 3 * time.Second
+	// the test binary runs as decerter with its arguments when this is 1
+	decerterCommandEnvironment string = "DECERTER_E2E_COMMAND"
 )
 
 // how decerter runs in a test
@@ -88,8 +90,8 @@ var (
 )
 
 func TestMain(main *testing.M) {
-	// the test binary is decerter mcp for the stdio cases, its arguments are decerter's
-	if os.Getenv(mcpServerEnvironment) == "1" {
+	// the test binary is decerter for the mcp stdio and the distro OpenSSL cases, its arguments are decerter's
+	if os.Getenv(decerterCommandEnvironment) == "1" {
 		decertercmd.Execute()
 		os.Exit(0)
 	}

@@ -856,12 +856,6 @@ func (app *App) LoadSecretsBpfObjects() (err error) {
 		libsslPath = boringsslPath
 		library = "BoringSSL of Android " + app.platform.Release
 	} else {
-		// the OpenSSL offsets come from a probe run on the amd64 build host, an arm64 table is not generated yet
-		if runtime.GOARCH != "amd64" {
-			err = app.withoutSecrets(fmt.Errorf("%w: OpenSSL offsets are generated for amd64 only, %s", secrets.ErrUnsupportedArchitecture, runtime.GOARCH))
-			return
-		}
-
 		opensslPath, libcryptoPath, findErr := openssl.FindLibssl(app.libssl)
 
 		if err = findErr; err != nil {
@@ -876,10 +870,10 @@ func (app *App) LoadSecretsBpfObjects() (err error) {
 			return
 		}
 
-		offset, offsetErr := openssl.GetOffset(version)
+		offset, offsetErr := openssl.GetOffset(version, runtime.GOARCH)
 
 		if err = offsetErr; err != nil {
-			app.logger.Error("Could not get OpenSSL offsets", "error", err, "version", version)
+			app.logger.Error("Could not get OpenSSL offsets", "error", err, "version", version, "libcrypto", libcryptoPath)
 			return
 		}
 

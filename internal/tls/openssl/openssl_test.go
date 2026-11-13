@@ -127,8 +127,10 @@ func TestDetectVersionNegative(state *testing.T) {
 // Test if openssl.GetOffset returns with the expected output.
 func TestGetOffsetPositive(state *testing.T) {
 	// the 3.6.2 offsets were checked against Debian's libssl and SSLKEYLOGFILE in stages 7 to 9
-	expected := openssl.Offset{
+	offset362 := openssl.Offset{
+		HasType:                true,
 		Type:                   0x0,
+		SSLConnection:          0x0,
 		Version:                0x48,
 		ClientRandom:           0x188,
 		Session:                0x900,
@@ -140,26 +142,90 @@ func TestGetOffsetPositive(state *testing.T) {
 		HandshakeTrafficHash:   0x73c,
 		SessionCipher:          0x2f8,
 		CipherId:               0x18,
-		SSLConnection:          0x0,
 	}
-	offset, err := openssl.GetOffset("3.6.2")
+	// up to 3.1 the SSL is the connection and has no type field, checked against Ubuntu 24.04's 3.0.13 in stage 29
+	offset30 := openssl.Offset{
+		HasType:                false,
+		Type:                   0x0,
+		SSLConnection:          0x0,
+		Version:                0x0,
+		ClientRandom:           0x160,
+		Session:                0x918,
+		MasterKey:              0x50,
+		MasterKeyLength:        0x8,
+		ClientAppTrafficSecret: 0x744,
+		ServerAppTrafficSecret: 0x784,
+		HandshakeSecret:        0x584,
+		HandshakeTrafficHash:   0x704,
+		SessionCipher:          0x2f8,
+		CipherId:               0x18,
+	}
+	positiveCases := []struct {
+		Version      string
+		Architecture string
+		Expected     openssl.Offset
+	}{
+		{Version: "3.6.2", Architecture: "amd64", Expected: offset362},
+		{Version: "3.6.2", Architecture: "arm64", Expected: offset362},
+		// 3.5.x and 3.6.x share one layout
+		{Version: "3.5.0", Architecture: "amd64", Expected: offset362},
+		// the first and the last release of a range, and the withdrawn 3.0.6 inside one
+		{Version: "3.0.0", Architecture: "amd64", Expected: offset30},
+		{Version: "3.0.6", Architecture: "amd64", Expected: offset30},
+		{Version: "3.0.13", Architecture: "arm64", Expected: offset30},
+		{Version: "3.1.8", Architecture: "amd64", Expected: offset30},
+	}
 
-	if (err != nil) || (offset != expected) {
-		state.Errorf("Test of openssl.GetOffset function failed, offset should be %+v, offset: %+v, error: %v", expected, offset, err)
-		return
+	for _, positive := range positiveCases {
+		offset, err := openssl.GetOffset(positive.Version, positive.Architecture)
+
+		if (err != nil) || (offset != positive.Expected) {
+			state.Errorf("Test of openssl.GetOffset function failed, version: %s %s, offset should be %+v, offset: %+v, error: %v", positive.Version, positive.Architecture, positive.Expected, offset, err)
+			return
+		}
+	}
+
+	// 3.2.3 moved SSL_SESSION.cipher back and 3.2.4 grew the connection, so 3.2.2 to 3.2.4 are three ranges
+	previous := openssl.Offset{}
+
+	for _, version := range []string{"3.2.2", "3.2.3", "3.2.4"} {
+		offset, err := openssl.GetOffset(version, "amd64")
+
+		if (err != nil) || (offset == previous) || !offset.HasType {
+			state.Errorf("Test of openssl.GetOffset function failed, version: %s, offset should differ from the release before, offset: %+v, error: %v", version, offset, err)
+			return
+		}
+
+		previous = offset
 	}
 }
 
 // Test if openssl.GetOffset returns with the expected errors.
 func TestGetOffsetNegative(state *testing.T) {
-	negativeCases := []string{"3.0.13", "3.6", "", "1.1.1"}
+	negativeCases := []struct {
+		Version      string
+		Architecture string
+		Err          error
+		Message      string
+	}{
+		// a patch release after the table, a series and a major after it, one before it
+		{Version: "3.6.99", Architecture: "amd64", Err: openssl.ErrUnknownVersion, Message: "nearest known version is 3.6.5"},
+		{Version: "3.7.0", Architecture: "arm64", Err: openssl.ErrUnknownVersion, Message: "nearest known version is 3.6.5"},
+		{Version: "4.0.3", Architecture: "amd64", Err: openssl.ErrUnknownVersion, Message: "nearest known version is 3.6.5"},
+		{Version: "1.1.1", Architecture: "amd64", Err: openssl.ErrUnknownVersion, Message: "nearest known version is 3.0.0"},
+		{Version: "3.0.23", Architecture: "amd64", Err: openssl.ErrUnknownVersion, Message: "3.0.23 on amd64, the nearest known version is 3.0.22, run make generate-openssl-offsets"},
+		// not x.y.z, no nearest version
+		{Version: "3.6", Architecture: "amd64", Err: openssl.ErrVersionFormat, Message: `"3.6" on amd64`},
+		{Version: "", Architecture: "amd64", Err: openssl.ErrVersionFormat, Message: `""`},
+		{Version: "3.6.x", Architecture: "amd64", Err: openssl.ErrVersionFormat, Message: `"3.6.x"`},
+		{Version: "3.6.2", Architecture: "riscv64", Err: openssl.ErrUnknownArchitecture, Message: "riscv64"},
+	}
 
 	for _, negative := range negativeCases {
-		_, err := openssl.GetOffset(negative)
-		command := "make generate-openssl-offsets OPENSSL_VERSIONS=openssl-" + negative
+		_, err := openssl.GetOffset(negative.Version, negative.Architecture)
 
-		if !errors.Is(err, openssl.ErrUnknownVersion) || !strings.Contains(err.Error(), command) {
-			state.Errorf("Test of openssl.GetOffset function failed, version: %q, error should be %v naming %q, error: %v", negative, openssl.ErrUnknownVersion, command, err)
+		if !errors.Is(err, negative.Err) || !strings.Contains(err.Error(), negative.Message) {
+			state.Errorf("Test of openssl.GetOffset function failed, version: %q %s, error should be %v naming %q, error: %v", negative.Version, negative.Architecture, negative.Err, negative.Message, err)
 			return
 		}
 	}

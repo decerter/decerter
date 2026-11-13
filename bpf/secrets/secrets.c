@@ -42,12 +42,15 @@ int store_secrets(struct pt_regs *ctx)
 
 	bpf_map_delete_elem(&ssl_map, &pid_tgid);
 
-	//a QUIC SSL object reaches the same functions with a different layout, reading it at these offsets would be garbage
-	int32_t type = 0;
-
-	if (bpf_probe_read_user(&type, sizeof(type), (void *)(ssl_address + type_offset)) || (type != SSL_TYPE_SSL_CONNECTION))
+	//a QUIC SSL object reaches the same functions with a different layout, reading it at these offsets would be garbage; up to OpenSSL 3.1 there is no QUIC and no type field
+	if (has_type)
 	{
-		return 0;
+		int32_t type = 0;
+
+		if (bpf_probe_read_user(&type, sizeof(type), (void *)(ssl_address + type_offset)) || (type != SSL_TYPE_SSL_CONNECTION))
+		{
+			return 0;
+		}
 	}
 
 	uint32_t key = 0;

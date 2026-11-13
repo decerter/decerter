@@ -67,6 +67,7 @@ const (
 	bpfVarClientRandomOffset           = "client_random_offset"
 	bpfVarHandshakeSecretOffset        = "handshake_secret_offset"
 	bpfVarHandshakeTrafficHashOffset   = "handshake_traffic_hash_offset"
+	bpfVarHasType                      = "has_type"
 	bpfVarMasterKeyLengthOffset        = "master_key_length_offset"
 	bpfVarMasterKeyOffset              = "master_key_offset"
 	bpfVarOwnTgid                      = "own_tgid"
@@ -152,6 +153,7 @@ type bpfVariableSpecs struct {
 	ClientRandomOffset           *ebpf.VariableSpec `ebpf:"client_random_offset"`
 	HandshakeSecretOffset        *ebpf.VariableSpec `ebpf:"handshake_secret_offset"`
 	HandshakeTrafficHashOffset   *ebpf.VariableSpec `ebpf:"handshake_traffic_hash_offset"`
+	HasType                      *ebpf.VariableSpec `ebpf:"has_type"`
 	MasterKeyLengthOffset        *ebpf.VariableSpec `ebpf:"master_key_length_offset"`
 	MasterKeyOffset              *ebpf.VariableSpec `ebpf:"master_key_offset"`
 	OwnTgid                      *ebpf.VariableSpec `ebpf:"own_tgid"`
@@ -219,6 +221,7 @@ type bpfVariables struct {
 	ClientRandomOffset           *ebpf.Variable `ebpf:"client_random_offset"`
 	HandshakeSecretOffset        *ebpf.Variable `ebpf:"handshake_secret_offset"`
 	HandshakeTrafficHashOffset   *ebpf.Variable `ebpf:"handshake_traffic_hash_offset"`
+	HasType                      *ebpf.Variable `ebpf:"has_type"`
 	MasterKeyLengthOffset        *ebpf.Variable `ebpf:"master_key_length_offset"`
 	MasterKeyOffset              *ebpf.Variable `ebpf:"master_key_offset"`
 	OwnTgid                      *ebpf.Variable `ebpf:"own_tgid"`

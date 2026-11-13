@@ -16,7 +16,11 @@ CLANG ?= clang-21
 LLVM_STRIP ?= llvm-strip-21
 LIBBPF_VERSION ?= v1.8.0
 LIBBPF_HEADERS ?= bpf_helpers.h bpf_helper_defs.h bpf_endian.h bpf_tracing.h bpf_core_read.h
-OPENSSL_VERSIONS ?= openssl-3.6.2
+OPENSSL_VERSIONS ?= all
+# empty: the script's defaults (~/.cache/decerter-openssl, /usr/aarch64-linux-gnu, the host headers for amd64)
+OPENSSL_CACHE ?=
+ARM64_SYSROOT ?=
+AMD64_SYSROOT ?=
 BORINGSSL_RELEASES ?= 15 16 17
 # the newest NDK of the SDK, the BoringSSL probe is compiled for x86_64 and aarch64 Android with its clang
 ANDROID_NDK ?= $(lastword $(sort $(wildcard $(HOME)/Android/Sdk/ndk/*)))
@@ -82,9 +86,9 @@ generate-bpf-capture-objects: ## Generate bpf capture object files
 generate-bpf-objects: generate-bpf-redirect-objects generate-bpf-secrets-objects generate-bpf-capture-objects ## Generate all bpf object files
 
 .PHONY: generate-openssl-offsets
-generate-openssl-offsets: ## Generate OpenSSL struct offsets for OPENSSL_VERSIONS (default is openssl-3.6.2)
+generate-openssl-offsets: ## Generate OpenSSL struct offsets of amd64 and arm64 for OPENSSL_VERSIONS (default is all, every 3.x release, or tags like openssl-3.6.2), tarballs are cached in OPENSSL_CACHE (default is ~/.cache/decerter-openssl), arm64 needs the aarch64 glibc headers in ARM64_SYSROOT (default is /usr/aarch64-linux-gnu)
 	tmp="$$(mktemp)"; \
-	./tools/offsetgen/offsetgen.sh $(OPENSSL_VERSIONS) > "$$tmp" && gofmt -w "$$tmp" && mv "$$tmp" internal/tls/openssl/offsets_gen.go || { rm -f "$$tmp"; exit 1; }
+	OPENSSL_CACHE="$(OPENSSL_CACHE)" ARM64_SYSROOT="$(ARM64_SYSROOT)" AMD64_SYSROOT="$(AMD64_SYSROOT)" CLANG="$(CLANG)" ./tools/offsetgen/offsetgen.sh $(OPENSSL_VERSIONS) > "$$tmp" && gofmt -w "$$tmp" && mv "$$tmp" internal/tls/openssl/offsets_gen.go || { rm -f "$$tmp"; exit 1; }
 
 # the offsets are read from the probe's assembly, nothing is run, so both architectures come from one host
 .PHONY: generate-boringssl-offsets

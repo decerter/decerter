@@ -54,10 +54,13 @@ char __license[] SEC("license") = "Dual MIT/GPL";
 //Value: tgid of decerter, decerter does not use libssl so it is never read, excluded for parity with the redirect, set from Go before load
 volatile const uint32_t own_tgid = 0;
 
+//Value: 1 if the SSL object has a type field (OpenSSL >= 3.2), 0 up to 3.1, which has neither the field nor QUIC objects, set from Go before load
+volatile const uint32_t has_type = 0;
+
 //Value: offsetof(ssl_st, type), the SSL object type, read before the other offsets to skip QUIC objects, set from Go before load
 volatile const uint64_t type_offset = 0;
 
-//Value: delta from the SSL * the public API hands out to the SSL_CONNECTION, subtracted first, 0 for OpenSSL >= 3.2, set from Go before load
+//Value: delta from the SSL * the public API hands out to the SSL_CONNECTION, subtracted first, 0 for every OpenSSL 3.x, set from Go before load
 volatile const uint64_t ssl_connection_offset = 0;
 
 //Value: offsetof(SSL_CONNECTION, version), set from Go before load
