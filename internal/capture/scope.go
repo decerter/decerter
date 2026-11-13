@@ -127,18 +127,19 @@ func (gate *gate) start(packet capturebpf.Packet, now time.Time) (newFlow *gateF
 		return
 	}
 
-	kernelFlow, lookupErr := gate.lookup(packet.Cookie)
+	// in run mode the socket is an upstream socket of the proxy, the process and the original destination are the ones of the app's flow it carries
+	kernelFlow, lookupErr := gate.lookup(packet.FlowCookie)
 
 	if lookupErr != nil {
 		if gate.scope != nil {
-			gate.logger.Debug("Could not find flow to decide its scope, it is not written", "error", lookupErr, "cookie", packet.Cookie)
+			gate.logger.Debug("Could not find flow to decide its scope, it is not written", "error", lookupErr, "cookie", packet.Cookie, "flowCookie", packet.FlowCookie)
 			newFlow.scope = outScopeState
 		}
 
 		return
 	}
 
-	// the local end of the socket: the source of what it sends, the destination of what it gets
+	// the local end of the socket: the source of what it sends, the destination of what it gets; in run mode the proxy's end on the wire
 	header, _ := parsePacket(packet.Data)
 	local := header.source
 

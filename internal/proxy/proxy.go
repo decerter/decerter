@@ -3,14 +3,20 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"net"
 	"net/netip"
 	"syscall"
 	"time"
 
+	"github.com/decerter/decerter/internal/bpf"
+	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/filter"
+	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
 )
 
@@ -99,4 +105,83 @@ func markControl(mark uint32) (control func(network string, address string, rawC
 		return
 	}
 	return
+}
+
+// dial the original destination of the app's flow from a socket with the mark of the app's socket
+// with captureBpfMaps the cookie of the socket goes into upstream_map with flowCookie, the cookie of the app's flow, before it connects, so the capture programs copy the packets on the wire from its first SYN on
+// upstreamCookie is the cookie of the socket then, releaseUpstream needs it after the close; 0 when nothing is captured: no capture, or a cookie that could not be written, which only costs the capture of this flow
+func dialUpstream(ctx context.Context, network string, flow redirect.Flow, flowCookie uint64, timeout time.Duration, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, logger *slog.Logger) (connection net.Conn, upstreamCookie uint64, err error) {
+	mark := markControl(flow.Mark)
+	dialer := net.Dialer{
+		Timeout: timeout,
+		Control: func(network string, address string, rawConnection syscall.RawConn) (controlErr error) {
+			if mark != nil {
+				controlErr = mark(network, address, rawConnection)
+
+				if controlErr != nil {
+					return
+				}
+			}
+
+			if captureBpfMaps == nil {
+				return
+			}
+
+			// a dial that tries a second socket leaves the first one's entry released
+			releaseUpstream(upstreamCookie, captureBpfMaps, logger)
+			cookie, addErr := addUpstream(rawConnection, flowCookie, captureBpfMaps)
+			upstreamCookie = cookie
+
+			if addErr != nil {
+				logger.Warn("Could not add upstream socket to the capture, its packets are not captured", "error", addErr)
+			}
+
+			return
+		},
+	}
+	connection, err = dialer.DialContext(ctx, network, flow.OriginalDestination.String())
+
+	if err != nil {
+		releaseUpstream(upstreamCookie, captureBpfMaps, logger)
+		upstreamCookie = 0
+	}
+
+	return
+}
+
+// SO_COOKIE is the socket cookie bpf_get_socket_cookie gives the capture programs for its packets
+func addUpstream(rawConnection syscall.RawConn, flowCookie uint64, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map) (upstreamCookie uint64, err error) {
+	var cookieErr error
+
+	controlErr := rawConnection.Control(func(fileDescriptor uintptr) {
+		upstreamCookie, cookieErr = unix.GetsockoptUint64(int(fileDescriptor), unix.SOL_SOCKET, unix.SO_COOKIE)
+	})
+	err = errors.Join(cookieErr, controlErr)
+
+	if err != nil {
+		upstreamCookie = 0
+		err = fmt.Errorf("%w: %w", ErrCookie, err)
+		return
+	}
+
+	err = capturebpf.AddUpstream(upstreamCookie, flowCookie, captureBpfMaps)
+
+	if err != nil {
+		upstreamCookie = 0
+	}
+
+	return
+}
+
+// the upstream socket is closed, its last packets are still captured for a grace time; 0 is a socket that is not captured
+func releaseUpstream(upstreamCookie uint64, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, logger *slog.Logger) {
+	if (upstreamCookie == 0) || (captureBpfMaps == nil) {
+		return
+	}
+
+	releaseErr := capturebpf.ReleaseUpstream(upstreamCookie, captureBpfMaps)
+
+	if releaseErr != nil {
+		logger.Debug("Could not release upstream socket of the capture", "error", releaseErr, "upstreamCookie", upstreamCookie)
+	}
 }

@@ -132,7 +132,7 @@ func downloadCapture(backend *Backend, writer http.ResponseWriter, request *http
 	http.ServeContent(writer, request, name, view.Stopped, file)
 }
 
-// the flows of the history as pcapng: run mode synthesizes packets from the messages of its proxy, capture mode writes the packets it still keeps
+// the flows of the history as pcapng: plaintext on run mode synthesizes packets from the messages of its proxy, the app's side; capture mode, and dsb on run mode, write the packets the capture still keeps, on run mode the wire side of the proxy's upstream sockets
 func exportPcap(backend *Backend, writer http.ResponseWriter, request *http.Request, logger *slog.Logger) {
 	scope, err := queryFilter(request)
 
@@ -154,8 +154,10 @@ func exportPcap(backend *Backend, writer http.ResponseWriter, request *http.Requ
 		return
 	}
 
-	if (backend.Captures == nil) && (format == v1.DSBCaptureFormat) {
-		writeError(writer, http.StatusConflict, ErrDSBRunMode, logger)
+	isHistory := (backend.Info.Mode == v1.RunMode) && (format == v1.PlaintextCaptureFormat)
+
+	if (backend.Captures == nil) && !isHistory {
+		writeError(writer, http.StatusConflict, ErrNoCaptures, logger)
 		return
 	}
 
@@ -164,7 +166,7 @@ func exportPcap(backend *Backend, writer http.ResponseWriter, request *http.Requ
 	writer.Header().Set("Content-Disposition", `attachment; filename="decerter-flows.pcapng"`)
 	writer.WriteHeader(http.StatusOK)
 
-	if backend.Captures == nil {
+	if isHistory {
 		err = capture.WriteHistory(writer, flows)
 	} else {
 		cookies := map[uint64][32]byte{}

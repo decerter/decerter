@@ -33,6 +33,8 @@ const (
 	holdPoll time.Duration = 100 * time.Millisecond
 	// what decerter logs for every client of the api socket, with its uid
 	apiClientLog string = `"msg":"Api client connected"`
+	// the port of decerter's proxy, the app's sockets talk to it over loopback
+	proxyPort string = "15001"
 )
 
 // the control API of the decerter on the device through adb forward tcp:<port> localabstract:decerter-api
@@ -340,6 +342,163 @@ func TestCaptureAPIPositive(state *testing.T) {
 	stream.stop()
 	checkAPIClient(state, decerter)
 	stopDeviceDecerter(state, decerter, true)
+}
+
+// Test if decerter run --intercept --api-socket captures the wire side through adb forward: with a rule rewriting GET / to GET /test, a capture started over the API and the live stream show the edited request to the server's real address 10.0.2.2, decrypted by tshark on the host, for the app's TLS 1.3 and TLS 1.2 calls.
+func TestRunCaptureAPIPositive(state *testing.T) {
+	requireDex(state)
+
+	if tsharkSkipReason != "" {
+		state.Skip(tsharkSkipReason)
+	}
+
+	servers := startHTTPSServers(state, nil)
+	decerter := startDeviceDecerter(state, decerterBinary, "run-capture", apiArguments(), redirectReady)
+	client := forwardAPI(state)
+	status, err := client.call(state.Context(), http.MethodPost, "/rules", v1.RuleRequest{Filter: "tls", Direction: v1.UpDirection, Layer: v1.TLSLayer, Find: v1.Value{Type: v1.TextValueType, Value: "GET / "}, Replace: v1.Value{Type: v1.TextValueType, Value: "GET /test "}}, nil)
+
+	if (err != nil) || (status != http.StatusCreated) {
+		state.Fatalf("Test of the run mode capture failed, cannot add the rule over adb forward, status: %d, error: %v", status, err)
+	}
+
+	started := v1.Capture{}
+	status, err = client.call(state.Context(), http.MethodPost, "/captures", v1.CaptureRequest{Filter: "tls", Plaintext: false}, &started)
+
+	if (err != nil) || (status != http.StatusCreated) {
+		state.Fatalf("Test of the run mode capture failed, cannot start a capture over adb forward, status: %d, error: %v", status, err)
+	}
+
+	stream := client.startStream(state, servers)
+
+	for _, server := range servers {
+		err = testDex(state.Context(), appUID, server, "/", "/test")
+
+		if err != nil {
+			state.Errorf("Test of the run mode capture failed, error: %s", err.Error())
+		}
+	}
+
+	hasRequests := func(output string) (isFound bool) {
+		isFound = true
+
+		for _, server := range servers {
+			isFound = isFound && slices.Contains(strings.Split(output, "\n"), server.Port+"\tGET\t/test")
+		}
+
+		return
+	}
+	output, err := stream.wait(state.Context(), hasRequests)
+
+	if err != nil {
+		state.Errorf("Test of the run mode capture failed, tshark should find GET /test to ports %s and %s in the stream, output:\n%s\nerrors:\n%s", servers[0].Port, servers[1].Port, output, stream.errors.String())
+	}
+
+	capturePath := client.stopAndDownload(state, started)
+	fileOutput, err := runTshark(state.Context(), capturePath, servers, "http.request", "tcp.dstport", "http.request.method", "http.request.uri")
+
+	if (err != nil) || !hasRequests(fileOutput) {
+		state.Errorf("Test of the run mode capture failed, tshark should find GET /test to ports %s and %s in the downloaded file, output:\n%s\nerror: %v", servers[0].Port, servers[1].Port, fileOutput, err)
+	}
+
+	// the wire side: the connections go to the server's address, nothing of the app's loopback connection to the proxy
+	syns, err := runTshark(state.Context(), capturePath, servers, "tcp.flags.syn == 1 && tcp.flags.ack == 0", "ip.dst", "tcp.dstport")
+	proxied, proxiedErr := runTshark(state.Context(), capturePath, servers, "tcp.port == "+proxyPort, "tcp.stream")
+
+	for _, server := range servers {
+		if (errors.Join(err, proxiedErr) != nil) || !slices.Contains(strings.Split(syns, "\n"), hostAddress+"\t"+server.Port) || (proxied != "") {
+			state.Errorf("Test of the run mode capture failed, the file should have the SYN to %s port %s and no packet of the proxy port %s, syns:\n%s\nproxy packets:\n%s\nerror: %v", hostAddress, server.Port, proxyPort, syns, proxied, errors.Join(err, proxiedErr))
+		}
+	}
+
+	stream.stop()
+	checkAPIClient(state, decerter)
+	stopDeviceDecerter(state, decerter, true)
+}
+
+// Test if the capture of decerter run leaves out what it must not have: the HTTPS call of a uid decerter does not select, and with a filter that takes no flow even the app's call.
+func TestRunCaptureAPINegative(state *testing.T) {
+	requireDex(state)
+
+	if tsharkSkipReason != "" {
+		state.Skip(tsharkSkipReason)
+	}
+
+	servers := startHTTPSServers(state, nil)
+	decerter := startDeviceDecerter(state, decerterBinary, "run-capture-negative", apiArguments(), redirectReady)
+	client := forwardAPI(state)
+	captures := map[string]v1.CaptureRequest{"all": {Filter: "", Plaintext: false}, "none": {Filter: "proc.comm == \"nothing\"", Plaintext: false}}
+	started := map[string]v1.Capture{}
+
+	for name, request := range captures {
+		capture := v1.Capture{}
+		status, err := client.call(state.Context(), http.MethodPost, "/captures", request, &capture)
+
+		if (err != nil) || (status != http.StatusCreated) {
+			state.Fatalf("Test of the run mode capture failed, cannot start the %s capture, status: %d, error: %v", name, status, err)
+		}
+
+		started[name] = capture
+	}
+
+	// the app calls the first server through the proxy, the shell uid the second one directly
+	err := errors.Join(testDex(state.Context(), appUID, servers[0], "/negative", "/negative"), testDex(state.Context(), shellUID, servers[1], "/negative", "/negative"))
+
+	if err != nil {
+		state.Errorf("Test of the run mode capture failed, error: %s", err.Error())
+	}
+
+	for name, capture := range started {
+		capturePath := client.stopAndDownload(state, capture)
+		syns, tsharkErr := runTshark(state.Context(), capturePath, servers, "tcp.flags.syn == 1 && tcp.flags.ack == 0", "tcp.dstport")
+		expected := servers[0].Port + "\n"
+
+		if name == "none" {
+			expected = ""
+		}
+
+		if (tsharkErr != nil) || (syns != expected) {
+			state.Errorf("Test of the run mode capture failed, the %s capture should have the SYNs %q, syns: %q, error: %v", name, expected, syns, tsharkErr)
+		}
+	}
+
+	stopDeviceDecerter(state, decerter, true)
+}
+
+// stop a capture of the API and download its file
+func (client apiClient) stopAndDownload(state *testing.T, capture v1.Capture) (capturePath string) {
+	status, err := client.call(state.Context(), http.MethodPost, fmt.Sprintf("/captures/%d/stop", capture.ID), nil, nil)
+
+	if (err != nil) || (status != http.StatusOK) {
+		state.Fatalf("Could not stop capture %d, status: %d, error: %v", capture.ID, status, err)
+	}
+
+	capturePath = filepath.Join(state.TempDir(), fmt.Sprintf("capture-%d.pcapng", capture.ID))
+	err = client.download(state.Context(), fmt.Sprintf("/captures/%d/pcap", capture.ID), capturePath)
+
+	if err != nil {
+		state.Fatalf("Could not download capture %d, error: %s", capture.ID, err.Error())
+	}
+
+	return
+}
+
+// the fields of the packets of a capture file the display filter takes, tab separated, the servers' ports decoded as TLS
+func runTshark(ctx context.Context, capturePath string, servers []httpsServer, displayFilter string, fields ...string) (output string, err error) {
+	arguments := []string{"-n", "-r", capturePath}
+
+	for _, server := range servers {
+		arguments = append(arguments, "-d", "tcp.port=="+server.Port+",tls")
+	}
+
+	arguments = append(arguments, "-Y", displayFilter, "-T", "fields", "-E", "separator=/t")
+
+	for _, field := range fields {
+		arguments = append(arguments, "-e", field)
+	}
+
+	outputBytes, err := exec.CommandContext(ctx, tsharkPath, arguments...).Output()
+	output = string(outputBytes)
+	return
 }
 
 // tshark on the host reading GET /api/v1/captures/stream through adb forward

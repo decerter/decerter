@@ -42,8 +42,13 @@ info:
     1 GiB; the oldest stopped capture is removed to make room, and a running capture that would go over the size stops
     with a reason. The files are in the captures directory of decerter's data directory (`/run/decerter/captures` on Linux,
     `/data/local/tmp/decerter.d/captures` on Android) with mode 0600 for root and are removed when decerter stops.
-    streamCapture serves the live pcapng stream for Wireshark. On `decerter run` the capture operations answer 409
-    (listCaptures an empty list): its proxy terminates the flows, there is nothing on the wire to record yet.
+    streamCapture serves the live pcapng stream for Wireshark.
+
+    On `decerter run` the captures, the stream and `format=dsb` record the wire side: the app's sockets only talk to the
+    proxy over loopback, so decerter captures the packets of the proxy's upstream sockets, after the rules and edits, with
+    the real server address. Each packet belongs to the app's flow its upstream socket carries, so the process fields
+    and filters work as in capture mode. The proxy seals edited records with the session's own keys, so the DSB
+    decrypts them too. The app's side is in the messages of the history and in `exportPcap` with `format=plaintext`.
 
     pcapng responses use `application/x-pcapng`: pcapng has no registered media type, `application/vnd.tcpdump.pcap`
     is the classic pcap format. A capture with secrets (format `dsb`) holds the key log lines of its TLS and DTLS
@@ -370,14 +375,16 @@ paths:
       operationId: exportPcap
       summary: The flows of the history as pcapng
       description: |
-        The flows of the history the filter takes, oldest first. On `decerter run` only `format=plaintext` (the default):
-        synthesized packets with the real addresses and ports, a handshake when the flow opened, the payload of every
+        The flows of the history the filter takes, oldest first. On `decerter run` `format=plaintext` (the default) is
+        synthesized from the history: packets with the real addresses and ports, a handshake when the flow opened, the payload of every
         message as it went on the wire (an edit included), seq/ack moving with the payload, and a FIN from both sides
         when it closed; the first packet of a flow has a comment with its id, process and TLS session, a dropped or
         changed message is named in a comment (the original is at getMessage), and bytes the history did not keep are a
-        gap in the sequence numbers. On `decerter capture` the packets decerter still keeps of the flows (the latest 64 MiB):
-        `format=dsb` as they were captured with a DSB in front of each TLS and DTLS session whose secrets are still
-        there, `format=plaintext` synthesized and decrypted like a plaintext capture.
+        gap in the sequence numbers. `format=dsb` on `decerter run` is the packets decerter still keeps of the proxy's upstream
+        sockets of the flows (the latest 64 MiB), the wire side with the edits, with a DSB in front of each TLS and DTLS
+        session whose secrets are still there. On `decerter capture` the packets decerter still keeps of the flows (the latest
+        64 MiB): `format=dsb` as they were captured with a DSB in front of each TLS and DTLS session whose secrets are
+        still there, `format=plaintext` synthesized and decrypted like a plaintext capture.
       parameters:
         - $ref: "#/components/parameters/Filter"
         - name: format
@@ -407,16 +414,17 @@ paths:
       summary: The captures of the API, oldest first
       responses:
         "200":
-          description: The captures, empty on decerter run
+          description: The captures
           content:
             application/json:
               schema:
                 $ref: "#/components/schemas/CaptureList"
     post:
       operationId: startCapture
-      summary: Start a capture into a file, decerter capture only
+      summary: Start a capture into a file
       description: |
-        The capture gets the packets of the flows in scope the filter takes: a filter is decided once per flow, within
+        The capture gets the packets of the flows in scope the filter takes (on `decerter run` the packets of the proxy's
+        upstream sockets, as the server sees them): a filter is decided once per flow, within
         the kernel selection and the `--filter` of decerter (a filter that takes none of those flows just gives an empty
         file). A flow that is open already starts with the packets decerter kept of it (the latest 64 MiB of all flows), so
         its TLS session is whole and decryptable; a session whose start is no longer kept still gets its DSB, and is
@@ -495,7 +503,7 @@ paths:
   /captures/stream:
     get:
       operationId: streamCapture
-      summary: The live pcapng stream for Wireshark, decerter capture only
+      summary: The live pcapng stream for Wireshark
       description: |
         An endless pcapng stream of the flows in scope the filter takes: a section and an interface block at once, then
         the packets, every block flushed when it is written. Flows that are open already come first with the packets
@@ -567,7 +575,8 @@ components:
     Conflict:
       description: |
         Not possible in this mode or state: holding and rules need decerter run --intercept, the key log needs TLS secrets,
-        captures, the stream and format=dsb need decerter capture, a running capture can't be downloaded, too many captures
+        captures, the stream and format=dsb need the capture programs, a running capture can't be downloaded, too many
+        captures
       content:
         application/json:
           schema:
@@ -644,7 +653,7 @@ components:
       properties:
         available:
           type: boolean
-          description: false on decerter run
+          description: true when decerter captures packets, decerter capture and decerter run with the API
         running:
           type: integer
         stored:

@@ -29,14 +29,34 @@ char __license[] SEC("license") = "Dual MIT/GPL";
 //Value: most bytes of a packet that are copied, counted from the IP header, at most MAX_SNAPLEN, set from Go before load
 volatile const uint32_t snaplen = 0;
 
+//Value: 1 in run mode: only the packets of the proxy's upstream sockets in upstream_map are copied, the app's sockets only talk to the proxy over loopback; 0 in capture mode: the packets of the sockets in flow_map, set from Go before load
+volatile const uint8_t upstream_only = 0;
+
+//cookie: socket cookie of the app's flow the upstream socket carries, the key of flow_map
+//released_ns: CLOCK_MONOTONIC when the proxy closed the upstream socket, 0 while it is open, Go removes the entry a grace time later so its last packets are still copied
+struct upstream {
+	uint64_t cookie;
+	uint64_t released_ns;
+};
+
+//Key: socket cookie of an upstream socket of the proxy, Value: the app's flow it carries, written by the proxy before the socket connects, read in run mode
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__uint(max_entries, 65535);
+	__type(key, uint64_t);
+	__type(value, struct upstream);
+} upstream_map SEC(".maps");
+
 //start of a packet_map record, captured_length bytes of the packet follow it
-//cookie: socket cookie, the key of flow_map
+//cookie: socket cookie of the socket that sent or got the packet
+//flow_cookie: socket cookie of the flow the packet belongs to, the key of flow_map: the same as cookie in capture mode, the app's socket in run mode
 //timestamp_ns: bpf_ktime_get_boot_ns() (CLOCK_BOOTTIME) when the program saw the packet
 //length: bytes of the packet from the IP header on, a GSO or GRO packet is one packet with its whole length
 //captured_length: bytes that follow the header, length cut to snaplen
 //direction: EGRESS or INGRESS
 struct packet_header {
 	uint64_t cookie;
+	uint64_t flow_cookie;
 	uint64_t timestamp_ns;
 	uint32_t length;
 	uint32_t captured_length;
@@ -85,15 +105,28 @@ uint16_t capture_packet(struct __sk_buff *skb, uint8_t direction)
 	}
 
 	uint64_t cookie = bpf_get_socket_cookie(skb);
+	uint64_t flow_cookie = cookie;
 
 	//every packet of every socket of the system gets here, only the ones of recorded sockets go further
-	if (!bpf_map_lookup_elem(&flow_map, &cookie))
+	if (upstream_only)
+	{
+		struct upstream *upstream = bpf_map_lookup_elem(&upstream_map, &cookie);
+
+		if (!upstream)
+		{
+			return OK;
+		}
+
+		flow_cookie = upstream->cookie;
+	}
+	else if (!bpf_map_lookup_elem(&flow_map, &cookie))
 	{
 		return OK;
 	}
 
 	struct packet_header header = {
 		.cookie = cookie,
+		.flow_cookie = flow_cookie,
 		.timestamp_ns = bpf_ktime_get_boot_ns(),
 		.length = skb->len,
 		.captured_length = skb->len,

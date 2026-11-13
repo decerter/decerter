@@ -65,7 +65,8 @@ func controlUDP(network, address string, rawConnection syscall.RawConn) (err err
 // a session whose first datagram has a DTLS ClientHello is read by the DTLS record layer with the secrets of secretsBpfMaps: intercepted with a pipeline, observed and printed without one
 // scope decides each session when it starts, with the DTLS ClientHello of its first datagram: one out of scope is relayed as it is, without the record layer, rules or a flow line; nil is every session in scope
 // recorder is the API's history, every session in scope goes into it; nil records nothing
-func ServeUDP(ctx context.Context, connection *net.UDPConn, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, scope *filter.Filter, recorder *history.History, waitGroup *sync.WaitGroup, logger *slog.Logger) {
+// captureBpfMaps are the maps of the capture object: every upstream socket goes into its upstream_map, so the API captures what goes on the wire; nil captures nothing
+func ServeUDP(ctx context.Context, connection *net.UDPConn, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, scope *filter.Filter, recorder *history.History, waitGroup *sync.WaitGroup, logger *slog.Logger) {
 	// socket closer
 	stop := context.AfterFunc(ctx, func() {
 		closeErr := connection.Close()
@@ -107,7 +108,7 @@ func ServeUDP(ctx context.Context, connection *net.UDPConn, idleTimeout time.Dur
 			continue
 		}
 
-		session, sessionErr := udpSessionOf(ctx, connection, client, local, buffer[:datagramSize], &sessions, idleTimeout, bpfMaps, secretsBpfMaps, pipeline, scope, recorder, waitGroup, logger)
+		session, sessionErr := udpSessionOf(ctx, connection, client, local, buffer[:datagramSize], &sessions, idleTimeout, bpfMaps, secretsBpfMaps, captureBpfMaps, pipeline, scope, recorder, waitGroup, logger)
 
 		if sessionErr != nil {
 			continue
@@ -178,7 +179,7 @@ func datagramDestination(controlMessage []byte) (local netip.Addr, err error) {
 
 // the flow is looked up for every datagram: a new socket on the same client port or a new destination of an unconnected socket gets its own session
 // the datagram that starts a session tells if it is DTLS
-func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.AddrPort, local netip.Addr, datagram []byte, sessions *UDPSessions, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, scope *filter.Filter, recorder *history.History, waitGroup *sync.WaitGroup, logger *slog.Logger) (session *UDPSession, err error) {
+func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.AddrPort, local netip.Addr, datagram []byte, sessions *UDPSessions, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, scope *filter.Filter, recorder *history.History, waitGroup *sync.WaitGroup, logger *slog.Logger) (session *UDPSession, err error) {
 	cookie, flow, lookupErr := redirect.FlowByClient(client, syscall.IPPROTO_UDP, bpfMaps)
 
 	if err = lookupErr; err != nil {
@@ -223,10 +224,7 @@ func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.Add
 	}
 
 	// the own tgid is excluded in connect4/6, so this socket is not redirected again
-	dialer := net.Dialer{
-		Control: markControl(flow.Mark),
-	}
-	upstreamConnection, dialErr := dialer.DialContext(ctx, "udp", flow.OriginalDestination.String())
+	upstreamConnection, upstreamCookie, dialErr := dialUpstream(ctx, "udp", flow, cookie, 0, captureBpfMaps, logger)
 
 	if err = dialErr; err != nil {
 		logger.Warn("Could not dial original destination", "error", err)
@@ -241,6 +239,7 @@ func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.Add
 		flow:                flow,
 		cmdline:             cmdline,
 		upstream:            upstream,
+		upstreamCookie:      upstreamCookie,
 		replyControlMessage: unix.PktInfo6(&unix.Inet6Pktinfo{Addr: local.As16(), Ifindex: 0}),
 		startTime:           time.Now(),
 		isInScope:           result == filter.TrueResult,
@@ -271,14 +270,14 @@ func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.Add
 
 	// udp reply relay
 	waitGroup.Go(func() {
-		relayUDP(ctx, connection, session, sessions, idleTimeout, pipeline, recorder, logger)
+		relayUDP(ctx, connection, session, sessions, idleTimeout, captureBpfMaps, pipeline, recorder, logger)
 	})
 
 	return
 }
 
 // copy replies from upstream to the client until the session is idle for idleTimeout or the context is cancelled
-func relayUDP(ctx context.Context, connection *net.UDPConn, session *UDPSession, sessions *UDPSessions, idleTimeout time.Duration, pipeline *intercept.Pipeline, recorder *history.History, logger *slog.Logger) {
+func relayUDP(ctx context.Context, connection *net.UDPConn, session *UDPSession, sessions *UDPSessions, idleTimeout time.Duration, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, recorder *history.History, logger *slog.Logger) {
 	// a deadline in the past unblocks the upstream read
 	stop := context.AfterFunc(ctx, func() {
 		deadlineErr := session.upstream.SetReadDeadline(time.Unix(1, 0))
@@ -306,6 +305,8 @@ func relayUDP(ctx context.Context, connection *net.UDPConn, session *UDPSession,
 		if closeErr != nil {
 			logger.Error("Could not close upstream socket", "error", closeErr)
 		}
+
+		releaseUpstream(session.upstreamCookie, captureBpfMaps, logger)
 
 		up := strconv.FormatInt(session.upDatagrams.Load(), 10) + "dgram/" + strconv.FormatInt(session.upBytes.Load(), 10) + "B"
 		down := strconv.FormatInt(session.downDatagrams.Load(), 10) + "dgram/" + strconv.FormatInt(session.downBytes.Load(), 10) + "B"

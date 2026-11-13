@@ -219,7 +219,7 @@ func TestMCPStdioPositive(state *testing.T) {
 	}
 }
 
-// Test if the write tools of decerter mcp --allow-write drive decerter run --intercept: set_intercept holds the test user's curl request, list_held shows it escaped inside its marker, edit_held changes the path to /test and forward_held sends it on to the server; drop_held keeps another from the server; add_rule rewrites the next request and delete_rule stops that; start_capture is refused on decerter run.
+// Test if the write tools of decerter mcp --allow-write drive decerter run --intercept: set_intercept holds the test user's curl request, list_held shows it escaped inside its marker, edit_held changes the path to /test and forward_held sends it on to the server; drop_held keeps another from the server; add_rule rewrites the next request and delete_rule stops that; start_capture starts a capture of the upstream sockets on decerter run.
 func TestMCPWritePositive(state *testing.T) {
 	client := startAPIDecerter(state, InterceptDecerterMode, []intercept.Rule{intercept.IdentityRule{}})
 	session := startMCP(state, client.socket, state.TempDir(), true)
@@ -307,10 +307,18 @@ func TestMCPWritePositive(state *testing.T) {
 		state.Fatalf("Test of delete_rule failed, a deleted rule should be not found, text: %s", text)
 	}
 
-	text, isError = callTool(state, session, "start_capture", nil, nil)
+	// decerter run captures the wire side of its proxy too
+	capture := v1.Capture{}
+	text, isError = callTool(state, session, "start_capture", nil, &capture)
 
-	if !isError || !strings.Contains(text, "409 Conflict") {
-		state.Fatalf("Test of start_capture failed, decerter run should refuse a capture, text: %s", text)
+	if isError || (capture.State != v1.RunningCaptureState) {
+		state.Fatalf("Test of start_capture failed, decerter run should start a capture of its upstream sockets, text: %s", text)
+	}
+
+	text, isError = callTool(state, session, "stop_capture", map[string]any{"id": capture.ID + 1}, nil)
+
+	if !isError || !strings.Contains(text, "404 Not Found") {
+		state.Fatalf("Test of stop_capture failed, a capture that does not exist should be not found, text: %s", text)
 	}
 }
 

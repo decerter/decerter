@@ -57,7 +57,7 @@ type Info struct {
 
 // what the server serves: the history of the run, the hold queue and the rules; Holds and Rules are nil without --intercept
 // KeyLog looks up the NSS key log lines of a session, nil without the secrets uprobe; Bus carries the events of everything
-// Captures are the captures, the stream and the packets of decerter capture, nil on decerter run
+// Captures are the captures, the stream and the captured packets: on decerter capture the packets of the recorded sockets, on decerter run the ones of the proxy's upstream sockets; nil without capture programs
 type Backend struct {
 	Info     Info
 	History  *history.History

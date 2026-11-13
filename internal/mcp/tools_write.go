@@ -54,7 +54,7 @@ func addWriteTools(server *sdk.Server, client Client) (err error) {
 		return
 	}
 
-	err = addTool(server, writeTool("start_capture", "Start capture", "Start a capture into a file on decerter capture (decerter run answers 409): the packets of the flows in scope the filter takes, with their TLS secrets, or synthesized decrypted packets with plaintext. Stop it with stop_capture, then download_pcap writes the file into the output directory. Returns the running capture.", false, false), startCapture(client), nil, nil)
+	err = addTool(server, writeTool("start_capture", "Start capture", "Start a capture into a file: the packets of the flows in scope the filter takes (on decerter run the proxy's upstream packets, the wire side after the edits), with their TLS secrets, or synthesized decrypted packets with plaintext. Stop it with stop_capture, then download_pcap writes the file into the output directory. Returns the running capture.", false, false), startCapture(client), nil, nil)
 
 	if err != nil {
 		return

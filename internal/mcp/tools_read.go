@@ -80,13 +80,13 @@ func addReadTools(server *sdk.Server, client Client, output Output) (err error) 
 		return
 	}
 
-	err = addTool(server, readTool("export_pcap", "Export pcap", "Write the flows of the history the filter takes as pcapng into a new file in decerter mcp's output directory: format plaintext (synthesized decrypted packets) on decerter run and decerter capture, dsb (packets as captured with their TLS secrets) on decerter capture only. Returns only the path, size and SHA-256."), exportPcap(client, output), nil, []enumProperty{{Name: "format", Values: []any{v1.PlaintextCaptureFormat, v1.DSBCaptureFormat}}})
+	err = addTool(server, readTool("export_pcap", "Export pcap", "Write the flows of the history the filter takes as pcapng into a new file in decerter mcp's output directory: format plaintext (synthesized decrypted packets; on decerter run from the history, the app's side) or dsb (packets as captured with their TLS secrets; on decerter run the proxy's upstream packets, the wire side after the edits). Returns only the path, size and SHA-256."), exportPcap(client, output), nil, []enumProperty{{Name: "format", Values: []any{v1.PlaintextCaptureFormat, v1.DSBCaptureFormat}}})
 
 	if err != nil {
 		return
 	}
 
-	err = addTool(server, readTool("list_captures", "List captures", "The captures started over the API (decerter capture only), oldest first: id, filter, format, state, size, dropped packets."), listCaptures(client), nil, nil)
+	err = addTool(server, readTool("list_captures", "List captures", "The captures started over the API, oldest first: id, filter, format, state, size, dropped packets."), listCaptures(client), nil, nil)
 
 	if err != nil {
 		return

@@ -38,11 +38,18 @@ type bpfFlow struct {
 type bpfPacketHeader struct {
 	_              structs.HostLayout
 	Cookie         uint64
+	FlowCookie     uint64
 	TimestampNs    uint64
 	Length         uint32
 	CapturedLength uint32
 	Direction      uint8
 	Padding        [7]uint8
+}
+
+type bpfUpstream struct {
+	_          structs.HostLayout
+	Cookie     uint64
+	ReleasedNs uint64
 }
 
 // Names of all BPF objects in the ELF.
@@ -54,9 +61,11 @@ const (
 	bpfMapPacketMap       = "packet_map"
 	bpfMapTgidMap         = "tgid_map"
 	bpfMapUidMap          = "uid_map"
+	bpfMapUpstreamMap     = "upstream_map"
 	bpfProgCaptureEgress  = "capture_egress"
 	bpfProgCaptureIngress = "capture_ingress"
 	bpfVarSnaplen         = "snaplen"
+	bpfVarUpstreamOnly    = "upstream_only"
 )
 
 // loadBpf returns the embedded CollectionSpec for bpf.
@@ -109,18 +118,20 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	DropMap   *ebpf.MapSpec `ebpf:"drop_map"`
-	FlowMap   *ebpf.MapSpec `ebpf:"flow_map"`
-	PacketMap *ebpf.MapSpec `ebpf:"packet_map"`
-	TgidMap   *ebpf.MapSpec `ebpf:"tgid_map"`
-	UidMap    *ebpf.MapSpec `ebpf:"uid_map"`
+	DropMap     *ebpf.MapSpec `ebpf:"drop_map"`
+	FlowMap     *ebpf.MapSpec `ebpf:"flow_map"`
+	PacketMap   *ebpf.MapSpec `ebpf:"packet_map"`
+	TgidMap     *ebpf.MapSpec `ebpf:"tgid_map"`
+	UidMap      *ebpf.MapSpec `ebpf:"uid_map"`
+	UpstreamMap *ebpf.MapSpec `ebpf:"upstream_map"`
 }
 
 // bpfVariableSpecs contains global variables before they are loaded into the kernel.
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfVariableSpecs struct {
-	Snaplen *ebpf.VariableSpec `ebpf:"snaplen"`
+	Snaplen      *ebpf.VariableSpec `ebpf:"snaplen"`
+	UpstreamOnly *ebpf.VariableSpec `ebpf:"upstream_only"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -143,11 +154,12 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	DropMap   *ebpf.Map `ebpf:"drop_map"`
-	FlowMap   *ebpf.Map `ebpf:"flow_map"`
-	PacketMap *ebpf.Map `ebpf:"packet_map"`
-	TgidMap   *ebpf.Map `ebpf:"tgid_map"`
-	UidMap    *ebpf.Map `ebpf:"uid_map"`
+	DropMap     *ebpf.Map `ebpf:"drop_map"`
+	FlowMap     *ebpf.Map `ebpf:"flow_map"`
+	PacketMap   *ebpf.Map `ebpf:"packet_map"`
+	TgidMap     *ebpf.Map `ebpf:"tgid_map"`
+	UidMap      *ebpf.Map `ebpf:"uid_map"`
+	UpstreamMap *ebpf.Map `ebpf:"upstream_map"`
 }
 
 func (m *bpfMaps) Close() error {
@@ -157,6 +169,7 @@ func (m *bpfMaps) Close() error {
 		m.PacketMap,
 		m.TgidMap,
 		m.UidMap,
+		m.UpstreamMap,
 	)
 }
 
@@ -164,7 +177,8 @@ func (m *bpfMaps) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfVariables struct {
-	Snaplen *ebpf.Variable `ebpf:"snaplen"`
+	Snaplen      *ebpf.Variable `ebpf:"snaplen"`
+	UpstreamOnly *ebpf.Variable `ebpf:"upstream_only"`
 }
 
 // bpfPrograms contains all programs after they have been loaded into the kernel.

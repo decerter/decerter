@@ -179,7 +179,7 @@ func TestSynthesizeTCPPositive(state *testing.T) {
 			data = TCPPacket(nil, server, client, sequence, acknowledgment, flags, payload)
 		}
 
-		packet = capturebpf.Packet{Cookie: 1, TimestampNs: 0, Length: uint32(len(data)), IsIngress: isIngress, Data: data}
+		packet = capturebpf.Packet{Cookie: 1, FlowCookie: 1, TimestampNs: 0, Length: uint32(len(data)), IsIngress: isIngress, Data: data}
 		return
 	}
 	clientData := clientISN + 1
@@ -249,11 +249,11 @@ func TestSynthesizeTCPResetPositive(state *testing.T) {
 	client := Endpoint{Address: netip.MustParseAddr("2001:db8::10"), Port: 40000}
 	server := Endpoint{Address: netip.MustParseAddr("2001:db8::20"), Port: 6379}
 	packets := []capturebpf.Packet{
-		{Cookie: 2, TimestampNs: 1000, IsIngress: false, Data: TCPPacket(nil, client, server, 5000, 7000, ACKFlag|PSHFlag, []byte("PING\r\n"))},
-		{Cookie: 2, TimestampNs: 2000, IsIngress: true, Data: TCPPacket(nil, server, client, 7000, 5006, ACKFlag|PSHFlag, []byte("+PONG\r\n"))},
-		{Cookie: 2, TimestampNs: 3000, IsIngress: true, Data: TCPPacket(nil, server, client, 7007, 0, RSTFlag, nil)},
+		{Cookie: 2, FlowCookie: 2, TimestampNs: 1000, IsIngress: false, Data: TCPPacket(nil, client, server, 5000, 7000, ACKFlag|PSHFlag, []byte("PING\r\n"))},
+		{Cookie: 2, FlowCookie: 2, TimestampNs: 2000, IsIngress: true, Data: TCPPacket(nil, server, client, 7000, 5006, ACKFlag|PSHFlag, []byte("+PONG\r\n"))},
+		{Cookie: 2, FlowCookie: 2, TimestampNs: 3000, IsIngress: true, Data: TCPPacket(nil, server, client, 7007, 0, RSTFlag, nil)},
 		// nothing of a closed connection is written
-		{Cookie: 2, TimestampNs: 4000, IsIngress: false, Data: TCPPacket(nil, client, server, 5006, 7007, ACKFlag, []byte("late"))},
+		{Cookie: 2, FlowCookie: 2, TimestampNs: 4000, IsIngress: false, Data: TCPPacket(nil, client, server, 5006, 7007, ACKFlag, []byte("late"))},
 	}
 	output := bytes.Buffer{}
 	writer, err := pcapng.New(&output, 1<<18, false)

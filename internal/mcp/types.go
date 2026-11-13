@@ -206,7 +206,7 @@ type ExportKeylogInput struct {
 
 type ExportPcapInput struct {
 	Filter string           `json:"filter,omitzero" jsonschema:"a filter in the language of decerter --filter; empty takes every flow"`
-	Format v1.CaptureFormat `json:"format,omitzero" jsonschema:"plaintext (default, synthesized decrypted packets) or dsb (decerter capture only: the packets as captured with their TLS secrets)"`
+	Format v1.CaptureFormat `json:"format,omitzero" jsonschema:"plaintext (default, synthesized decrypted packets) or dsb (the packets as captured with their TLS secrets; on decerter run the proxy's upstream packets, the wire side after the edits)"`
 }
 
 type DownloadPcapInput struct {

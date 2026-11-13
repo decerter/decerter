@@ -15,13 +15,18 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"syscall"
 	"testing"
 	"time"
 
 	v1 "github.com/decerter/decerter/api"
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
 	"github.com/decerter/decerter/internal/capture"
+	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/history"
+	"github.com/decerter/decerter/internal/intercept"
+	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/getkin/kin-openapi/openapi3"
 	"github.com/getkin/kin-openapi/routers/legacy"
 )
@@ -43,7 +48,7 @@ func TestCaptureHandlerPositive(state *testing.T) {
 	info := Info{Mode: v1.CaptureMode, Processing: v1.RecordProcessing, Platform: "linux", Scope: "", Started: time.Now(), HoldTimeout: 0, HasTLSSecrets: false, IsInterceptCapable: false}
 	backend := NewBackend(info, history.DefaultLimits(), nil)
 	// a hub that is never run: the captures get no packets and are valid empty files
-	hub, err := capture.NewHub(capturebpf.MaxSnaplen, nil, nil, nil, backend.History, logger)
+	hub, err := capture.NewHub(capturebpf.MaxSnaplen, nil, nil, nil, backend.History, false, logger)
 
 	if err != nil {
 		state.Fatalf("Test of the capture handlers failed, cannot make the hub, error: %s", err.Error())
@@ -130,12 +135,92 @@ func TestCaptureHandlerPositive(state *testing.T) {
 	}
 }
 
+// Test if the capture operations answer as api/openapi.yaml says in run mode with the capture of the proxy's upstream sockets: captures start, format=dsb writes the captured packets and format=plaintext still the history.
+func TestCaptureHandlerRunModePositive(state *testing.T) {
+	document, err := loadSpec(state.Context())
+
+	if err != nil {
+		state.Fatalf("Test of the capture handlers failed, cannot load the spec, error: %s", err.Error())
+	}
+
+	logger := slog.New(slog.DiscardHandler)
+	info := Info{Mode: v1.RunMode, Processing: v1.InterceptProcessing, Platform: "linux", Scope: "", Started: time.Now(), HoldTimeout: 0, HasTLSSecrets: false, IsInterceptCapable: true}
+	backend := NewBackend(info, history.DefaultLimits(), nil)
+	hub, err := capture.NewHub(capturebpf.MaxSnaplen, nil, nil, nil, backend.History, true, logger)
+
+	if err != nil {
+		state.Fatalf("Test of the capture handlers failed, cannot make the hub, error: %s", err.Error())
+	}
+
+	backend.Captures, err = capture.NewCaptures(hub, state.TempDir(), logger)
+
+	if err != nil {
+		state.Fatalf("Test of the capture handlers failed, cannot make the captures, error: %s", err.Error())
+	}
+
+	defer func() {
+		if closeErr := backend.Captures.Close(); closeErr != nil {
+			state.Errorf("Test of the capture handlers failed, cannot remove the captures, error: %s", closeErr.Error())
+		}
+	}()
+
+	// a message of the proxy in the history: the app's side, which only the plaintext export has
+	values := filter.Values{PID: 1, UID: 1001, IPProtocol: syscall.IPPROTO_UDP, Source: netip.MustParseAddrPort("[::ffff:127.0.0.1]:5000"), Destination: netip.MustParseAddrPort("127.0.0.1:53"), TLS: filter.AbsentTLSState}
+	flowID := backend.History.OpenFlow(1, values, [32]byte{})
+	flow := intercept.FlowOf(flowID, 1, redirectFlow(values), values.Source, values)
+	backend.History.Record(intercept.Message{Flow: flow, ID: 100, Direction: tlsrecord.ClientDirection, Layer: intercept.UDPLayer, Plain: []byte("query")}, intercept.Result{Plain: []byte("query"), Verdict: intercept.ForwardVerdict, Changed: false}, intercept.RulesOrigin)
+	server := httptest.NewServer(Handler(backend, logger))
+	defer server.Close()
+	document.Servers = openapi3.Servers{{URL: server.URL + v1.BasePath}}
+	router, err := legacy.NewRouter(document)
+
+	if err != nil {
+		state.Fatalf("Test of the capture handlers failed, cannot build the router, error: %s", err.Error())
+	}
+
+	positiveCases := []apiCase{
+		{Method: http.MethodPost, Path: "/captures", Body: `{"filter": "tls"}`, Status: http.StatusCreated},
+		{Method: http.MethodGet, Path: "/captures/1/pcap", Status: http.StatusConflict},
+		{Method: http.MethodPost, Path: "/captures/1/stop", Status: http.StatusOK},
+		{Method: http.MethodGet, Path: "/captures/1/pcap", Status: http.StatusOK},
+		{Method: http.MethodGet, Path: "/captures/2/pcap", Status: http.StatusNotFound},
+		{Method: http.MethodGet, Path: "/flows/pcap?format=dsb", Status: http.StatusOK},
+		{Method: http.MethodGet, Path: "/flows/pcap?format=plaintext", Status: http.StatusOK},
+	}
+
+	for _, positive := range positiveCases {
+		_, body, caseErr := checkCase(state.Context(), server, router, positive)
+
+		if caseErr != nil {
+			state.Fatalf("Test of the capture handlers failed, %s %s, error: %s, body: %s", positive.Method, positive.Path, caseErr.Error(), body)
+		}
+	}
+
+	status := v1.Status{}
+	_, err = getJSON(server, "/status", &status)
+
+	if (err != nil) || !status.Captures.Available || (status.Mode != v1.RunMode) {
+		state.Errorf("Test of the capture handlers failed, run mode with the capture should have captures available, status: %+v, error: %v", status, err)
+		return
+	}
+
+	// the plaintext export is synthesized from the history, the dsb export has the captured packets, none in this test
+	for path, hasMessage := range map[string]bool{"/flows/pcap": true, "/flows/pcap?format=dsb": false} {
+		_, _, body, sendErr := send(state.Context(), server, http.MethodGet, v1.BasePath+path, "")
+
+		if (sendErr != nil) || (bytes.Contains(body, []byte("query")) != hasMessage) {
+			state.Errorf("Test of the capture handlers failed, GET %s should have the message of the history: %v, body: %x, error: %v", path, hasMessage, body, sendErr)
+			return
+		}
+	}
+}
+
 // Test if the capture stream of api.Handler starts with the section and interface blocks at once and ends when the client goes away.
 func TestStreamCapturePositive(state *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	info := Info{Mode: v1.CaptureMode, Processing: v1.RecordProcessing, Platform: "linux", Scope: "", Started: time.Now(), HoldTimeout: 0, HasTLSSecrets: false, IsInterceptCapable: false}
 	backend := NewBackend(info, history.DefaultLimits(), nil)
-	hub, err := capture.NewHub(capturebpf.MaxSnaplen, nil, nil, nil, backend.History, logger)
+	hub, err := capture.NewHub(capturebpf.MaxSnaplen, nil, nil, nil, backend.History, false, logger)
 
 	if err != nil {
 		state.Fatalf("Test of api.streamCapture failed, cannot make the hub, error: %s", err.Error())

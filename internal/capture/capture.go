@@ -184,7 +184,8 @@ type hubFlow struct {
 
 // secretsBpfMaps is nil without the secrets uprobe, the packets are written without keys then
 // recorder is the history of the API, nil without it: then the flows are decided as early as the scope allows and no packet is kept
-func NewHub(snaplen uint32, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, scope *filter.Filter, recorder *history.History, logger *slog.Logger) (hub *Hub, err error) {
+// isProxied is run mode: the packets are the ones of the proxy's upstream sockets, the proxy keeps the flows in the history, the hub only keeps their packets
+func NewHub(snaplen uint32, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, scope *filter.Filter, recorder *history.History, isProxied bool, logger *slog.Logger) (hub *Hub, err error) {
 	bootOffset, offsetErr := bootTimeOffset()
 
 	if err = offsetErr; err != nil {
@@ -210,6 +211,11 @@ func NewHub(snaplen uint32, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, secrets
 
 	if recorder != nil {
 		hub.ring = newPacketRing(historyPacketBytes)
+	}
+
+	// the proxy opened and closes the flows of run mode in the history itself
+	if isProxied {
+		hub.history = nil
 	}
 
 	return
@@ -374,8 +380,8 @@ func (hub *Hub) emit(cookie uint64, packet capturebpf.Packet, decided *gateFlow,
 	return
 }
 
-// a flow whose socket left flow_map is closed: the history gets its counters, the next packet of its cookie starts a new flow
-// hasFlow looks the socket up in flow_map
+// a flow whose socket left flow_map, or upstream_map in run mode, is closed: the history gets its counters, the next packet of its cookie starts a new flow
+// hasFlow looks the socket up in both
 func (hub *Hub) forgetFlows(hasFlow func(cookie uint64) (isOpen bool, err error)) {
 	for cookie, tracked := range hub.flows {
 		isOpen, lookupErr := hasFlow(cookie)

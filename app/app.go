@@ -402,7 +402,7 @@ func (app *App) StartProxy() (err error) {
 
 	// tcp proxy, closes the listener when the context is cancelled
 	app.waitGroup.Go(func() {
-		proxy.ServeTCP(app.ctx, app.tcpListener, app.redirectBpfMaps, secretsBpfMaps, pipeline, app.scope, recorder, app.waitGroup, app.logger)
+		proxy.ServeTCP(app.ctx, app.tcpListener, app.redirectBpfMaps, secretsBpfMaps, app.captureBpfMaps, pipeline, app.scope, recorder, app.waitGroup, app.logger)
 	})
 
 	connection, udpListenErr := proxy.ListenUDP(app.ctx, app.proxyPort)
@@ -417,7 +417,7 @@ func (app *App) StartProxy() (err error) {
 
 	// udp proxy, closes the socket when the context is cancelled
 	app.waitGroup.Go(func() {
-		proxy.ServeUDP(app.ctx, app.udpConnection, app.udpIdleTimeout, app.redirectBpfMaps, secretsBpfMaps, pipeline, app.scope, recorder, app.waitGroup, app.logger)
+		proxy.ServeUDP(app.ctx, app.udpConnection, app.udpIdleTimeout, app.redirectBpfMaps, secretsBpfMaps, app.captureBpfMaps, pipeline, app.scope, recorder, app.waitGroup, app.logger)
 	})
 
 	return
@@ -516,9 +516,9 @@ func (app *App) redirectAttachments() (attachments []cgroupAttachment) {
 	return
 }
 
-// only capture mode copies packets
+// capture mode copies the packets of the recorded sockets, run mode with the API the ones of the proxy's upstream sockets
 func (app *App) captureAttachments() (attachments []cgroupAttachment) {
-	if !app.isCapture {
+	if !app.hasCapture() {
 		return
 	}
 
@@ -550,9 +550,17 @@ func (app *App) AttachRedirect() (err error) {
 	return
 }
 
+// capture mode, and run mode with the API: its captures and its stream record what the proxy's upstream sockets send and get, the wire side after the rules
+// the app's sockets of run mode only talk to the proxy over loopback, their packets are not captured: the history and the plaintext export have that side
+func (app *App) hasCapture() (hasCapture bool) {
+	hasCapture = app.isCapture || ((app.apiSocket != "") && !app.keylog)
+	return
+}
+
 // the redirect object has to be loaded already, the capture object shares its flow_map
+// in run mode the programs only copy the packets of the proxy's upstream sockets, the proxy writes them into upstream_map
 func (app *App) LoadCaptureObjects() (err error) {
-	bpfMaps, bpfPrograms, closeFunction, loadErr := capturebpf.LoadBpfObjects(app.snaplen, app.redirectBpfMaps[redirect.FlowMap], app.redirectBpfMaps[redirect.UidMap], app.redirectBpfMaps[redirect.TgidMap])
+	bpfMaps, bpfPrograms, closeFunction, loadErr := capturebpf.LoadBpfObjects(app.snaplen, !app.isCapture, app.redirectBpfMaps[redirect.FlowMap], app.redirectBpfMaps[redirect.UidMap], app.redirectBpfMaps[redirect.TgidMap])
 
 	if err = loadErr; err != nil {
 		app.logger.Error("Could not load capture bpf objects", "error", err)
@@ -567,6 +575,7 @@ func (app *App) LoadCaptureObjects() (err error) {
 
 // the capture file is created and the hub with its writers started before AttachCapture, so a path that can't be written fails before anything is attached and no packet waits in packet_map for a reader
 // with the API the hub keeps a history of the flows and their latest packets, and the API starts captures and streams behind it
+// in run mode StartProxy made the API's backend and the proxy keeps its history, the hub only keeps the packets; there is no file
 func (app *App) StartCapture() (err error) {
 	var file *os.File
 
@@ -581,8 +590,9 @@ func (app *App) StartCapture() (err error) {
 		file = opened
 	}
 
-	// the one warning about missing secrets in capture mode, with the reason from LoadSecretsBpfObjects
+	// the one warning about missing secrets in capture mode, with the reason from LoadSecretsBpfObjects; run mode warned already
 	switch {
+	case !app.isCapture:
 	case (app.secretsBpfMaps == nil) && app.plaintext:
 		app.logger.Warn("Capturing without TLS secrets, TLS flows will be written encrypted", "reason", app.secretsErr)
 	case app.secretsBpfMaps == nil:
@@ -592,12 +602,15 @@ func (app *App) StartCapture() (err error) {
 
 	var recorder *history.History
 
-	if app.apiSocket != "" {
+	if (app.apiSocket != "") && app.isCapture {
 		app.backend = app.newBackend(v1.CaptureMode, v1.RecordProcessing)
+	}
+
+	if app.backend != nil {
 		recorder = app.backend.History
 	}
 
-	hub, hubErr := capture.NewHub(app.snaplen, app.captureBpfMaps, app.secretsBpfMaps, app.scope, recorder, app.logger)
+	hub, hubErr := capture.NewHub(app.snaplen, app.captureBpfMaps, app.secretsBpfMaps, app.scope, recorder, !app.isCapture, app.logger)
 
 	if err = hubErr; err != nil {
 		app.logger.Error("Could not start capture", "error", err)
@@ -715,6 +728,10 @@ func closeCaptureFile(file *os.File) (err error) {
 
 // both programs see every packet of every socket and copy the ones of recorded sockets, they are attached before AttachRedirect records the first flow
 func (app *App) AttachCapture() (err error) {
+	if !app.hasCapture() {
+		return
+	}
+
 	for _, attachment := range app.captureAttachments() {
 		closeFunction, attachErr := attach.AddCgroup(attach.CgroupRoot, app.captureBpfPrograms[attachment.program], attachment.attachType)
 
@@ -724,6 +741,11 @@ func (app *App) AttachCapture() (err error) {
 		}
 
 		app.closeFunctions = append(app.closeFunctions, closeFunction)
+	}
+
+	if !app.isCapture {
+		app.logger.Info("Capturing the packets of the proxy's upstream sockets for the api", "cgroup", attach.CgroupRoot, "snaplen", app.snaplen)
+		return
 	}
 
 	app.logger.Info("Capturing packets", "cgroup", attach.CgroupRoot, "fileName", app.capturePath, "api", app.apiSocket != "", "snaplen", app.snaplen, "plaintext", app.plaintext)
@@ -738,6 +760,7 @@ func (app *App) Done() (done <-chan struct{}) {
 
 // sock_release only marks a released redirected UDP flow, this removes it and its client_map entry releaseDelay later
 // in capture mode sock_release and sockops mark every recorded flow, nothing is removed in the kernel
+// in run mode with the capture the proxy marks the upstream sockets it closed in upstream_map, they go the same way
 // started before AttachRedirect, so no released flow is missed
 func (app *App) StartReleaseSweep() {
 	// released flow remover
@@ -761,6 +784,16 @@ func (app *App) watchReleasedFlows() {
 
 			if forgetErr != nil {
 				app.logger.Warn("Could not remove released flows", "error", forgetErr)
+			}
+
+			if app.isCapture || (app.captureBpfMaps == nil) {
+				continue
+			}
+
+			forgetErr = capturebpf.ForgetReleasedUpstreams(releaseDelay, app.captureBpfMaps)
+
+			if forgetErr != nil {
+				app.logger.Warn("Could not remove released upstream sockets", "error", forgetErr)
 			}
 		}
 	}
@@ -1397,6 +1430,15 @@ func (app *App) startRunMode() (err error) {
 		return
 	}
 
+	// with the API the proxy writes its upstream sockets into upstream_map of the capture object from its first connection on
+	if app.hasCapture() {
+		err = app.LoadCaptureObjects()
+
+		if err != nil {
+			return
+		}
+	}
+
 	err = app.StartRouteSync()
 
 	if err != nil {
@@ -1409,6 +1451,15 @@ func (app *App) startRunMode() (err error) {
 		return
 	}
 
+	// the hub reads the packets of the upstream sockets for the captures and the stream of the API, which StartProxy made
+	if app.hasCapture() {
+		err = app.StartCapture()
+
+		if err != nil {
+			return
+		}
+	}
+
 	// the uprobe is attached first, so the first redirected connection already leaves its secrets in secrets_map
 	err = app.AttachSecrets()
 
@@ -1417,6 +1468,13 @@ func (app *App) startRunMode() (err error) {
 	}
 
 	err = app.ShareNetdHooks()
+
+	if err != nil {
+		return
+	}
+
+	// the packet programs copy nothing until the proxy dials its first upstream socket
+	err = app.AttachCapture()
 
 	if err != nil {
 		return

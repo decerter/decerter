@@ -18,6 +18,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -239,7 +241,7 @@ func TestCaptureAPIStreamPositive(state *testing.T) {
 	}
 }
 
-// Test if GET /flows/pcap?format=plaintext of decerter run shows the request as a rule edited it, GET /test, and the capture operations answer 409 there.
+// Test if GET /flows/pcap?format=plaintext of decerter run shows the request as a rule edited it, GET /test, from the history: the app's side, with a comment on the change.
 func TestAPIExportPcapPositive(state *testing.T) {
 	tsharkPath, lookErr := exec.LookPath("tshark")
 
@@ -247,13 +249,7 @@ func TestAPIExportPcapPositive(state *testing.T) {
 		state.Skipf("tshark is not installed, error: %s", lookErr.Error())
 	}
 
-	client := startAPIDecerter(state, InterceptDecerterMode, []intercept.Rule{intercept.IdentityRule{}})
-	status, err := client.call(state.Context(), http.MethodPost, "/rules", v1.RuleRequest{Filter: "tls", Direction: v1.UpDirection, Layer: v1.TLSLayer, Find: v1.Value{Type: v1.TextValueType, Value: "GET / "}, Replace: v1.Value{Type: v1.TextValueType, Value: "GET /test "}}, nil)
-
-	if (err != nil) || (status != http.StatusCreated) {
-		state.Fatalf("Test of the pcap export failed, cannot add the rule, status: %d, error: %v", status, err)
-	}
-
+	client := startRewriteDecerter(state)
 	server := startServer(state, serverConfig{Certificate: &rsaCertificate, Version: tls.VersionTLS13})
 	port := serverPort(state, server)
 	testCase := curlCase{Name: server.URL, Server: serverConfig{Certificate: &rsaCertificate}, Suite: "", Expected: receivedRequest{}}
@@ -276,15 +272,219 @@ func TestAPIExportPcapPositive(state *testing.T) {
 		state.Errorf("Test of the pcap export failed, tshark should find GET /test to port %s with a comment on the change, output:\n%s\nerror: %v", port, tsharkOutput, err)
 		return
 	}
+}
 
-	for path, method := range map[string]string{"/flows/pcap?format=dsb": http.MethodGet, "/captures": http.MethodPost, "/captures/1/stop": http.MethodPost, "/captures/1/pcap": http.MethodGet, "/captures/stream": http.MethodGet} {
-		status, err = client.call(state.Context(), method, path, nil, nil)
+// Test if decerter run --intercept with the API captures the wire side: a capture started over the API, the live stream and GET /flows/pcap?format=dsb show the edited GET /test to the real server address, decrypted by tshark, for TLS 1.3 and TLS 1.2, and a capture with a process filter has only the flow it takes.
+func TestRunCaptureAPIPositive(state *testing.T) {
+	tsharkPath, lookErr := exec.LookPath("tshark")
 
-		if (err != nil) || (status != http.StatusConflict) {
-			state.Errorf("Test of the pcap export failed, %s %s should answer 409 on decerter run, status: %d, error: %v", method, path, status, err)
+	if lookErr != nil {
+		state.Skipf("tshark is not installed, error: %s", lookErr.Error())
+	}
+
+	client := startRewriteDecerter(state)
+	tls13 := startServer(state, serverConfig{Certificate: &rsaCertificate, Version: tls.VersionTLS13})
+	tls12 := startServer(state, serverConfig{Certificate: &ecdsaCertificate, Version: tls.VersionTLS12})
+	port13 := serverPort(state, tls13)
+	port12 := serverPort(state, tls12)
+	started := v1.Capture{}
+	status, err := client.call(state.Context(), http.MethodPost, "/captures", nil, &started)
+
+	if (err != nil) || (status != http.StatusCreated) || (started.Format != v1.DSBCaptureFormat) {
+		state.Fatalf("Test of the run mode capture failed, cannot start a capture, status: %d, capture: %+v, error: %v", status, started, err)
+	}
+
+	// the process fields come from the app's flow, the upstream socket is decerter's own
+	filtered := v1.Capture{}
+	status, err = client.call(state.Context(), http.MethodPost, "/captures", v1.CaptureRequest{Filter: fmt.Sprintf("proc.uid == %d && proc.comm == \"curl\" && tcp.dstport == %s", testUser.UID, port13), Plaintext: false}, &filtered)
+
+	if (err != nil) || (status != http.StatusCreated) {
+		state.Fatalf("Test of the run mode capture failed, cannot start the filtered capture, status: %d, error: %v", status, err)
+	}
+
+	live := startStreamReader(state, tsharkPath, client.socket, port13, port12)
+
+	for index, server := range []testServer{tls13, tls12} {
+		testCase := curlCase{Name: server.URL, Server: serverConfig{Certificate: []*certificate{&rsaCertificate, &ecdsaCertificate}[index]}, Suite: "", Expected: receivedRequest{}}
+		output, curlErr := runCurl(state.Context(), testUser, curlArguments(testCase, server.URL))
+
+		if (curlErr != nil) || (output != "/test") {
+			state.Fatalf("Test of the run mode capture failed, the rule should edit the request to %s, output: %q, error: %v", server.URL, output, curlErr)
+		}
+	}
+
+	found := live.waitFor(func(text string) bool {
+		return strings.Contains(text, port13+"\t/test") && strings.Contains(text, port12+"\t/test")
+	})
+
+	if !found {
+		state.Errorf("Test of the run mode capture failed, the live stream should show GET /test to ports %s and %s, output:\n%s\nerrors:\n%s", port13, port12, live.output.String(), live.errors.String())
+		return
+	}
+
+	directory := state.TempDir()
+	paths := map[string]string{}
+
+	for name, capture := range map[string]v1.Capture{"all": started, "filtered": filtered} {
+		status, err = client.call(state.Context(), http.MethodPost, fmt.Sprintf("/captures/%d/stop", capture.ID), nil, nil)
+
+		if (err != nil) || (status != http.StatusOK) {
+			state.Fatalf("Test of the run mode capture failed, cannot stop the %s capture, status: %d, error: %v", name, status, err)
+		}
+
+		paths[name] = filepath.Join(directory, name+".pcapng")
+		err = client.download(state.Context(), fmt.Sprintf("/captures/%d/pcap", capture.ID), paths[name])
+
+		if err != nil {
+			state.Fatalf("Test of the run mode capture failed, cannot download the %s capture, error: %s", name, err.Error())
+		}
+	}
+
+	paths["export"] = filepath.Join(directory, "export.pcapng")
+	err = client.download(state.Context(), "/flows/pcap?format=dsb", paths["export"])
+
+	if err != nil {
+		state.Fatalf("Test of the run mode capture failed, cannot export the flows with format=dsb, error: %s", err.Error())
+	}
+
+	// the capture, the dsb export and the filtered capture have the edited requests on the wire, decrypted with their DSB
+	expected := map[string][]string{"all": {port13, port12}, "export": {port13, port12}, "filtered": {port13}}
+
+	for name, ports := range expected {
+		requests, tsharkErr := wireRequests(state.Context(), tsharkPath, paths[name], port13, port12)
+
+		if tsharkErr != nil {
+			state.Fatalf("Test of the run mode capture failed, cannot read the %s file, error: %s", name, tsharkErr.Error())
+		}
+
+		for _, port := range []string{port13, port12} {
+			if requests[port+"\t/test"] != slices.Contains(ports, port) {
+				state.Errorf("Test of the run mode capture failed, the %s file should have GET /test to port %s: %v, requests: %v", name, port, slices.Contains(ports, port), requests)
+				return
+			}
+		}
+	}
+}
+
+// Test if the capture of decerter run returns with the expected output for what it must not have: the app's loopback packets to the proxy, a flow of a user decerter does not select, and with a process filter that takes no flow nothing.
+func TestRunCaptureAPINegative(state *testing.T) {
+	tsharkPath, lookErr := exec.LookPath("tshark")
+
+	if lookErr != nil {
+		state.Skipf("tshark is not installed, error: %s", lookErr.Error())
+	}
+
+	client := startRewriteDecerter(state)
+	server := startServer(state, serverConfig{Certificate: &rsaCertificate, Version: tls.VersionTLS13})
+	port := serverPort(state, server)
+	captures := map[string]v1.CaptureRequest{"all": {Filter: "", Plaintext: false}, "none": {Filter: "proc.comm == \"wget\"", Plaintext: false}}
+	started := map[string]v1.Capture{}
+
+	for name, request := range captures {
+		capture := v1.Capture{}
+		status, err := client.call(state.Context(), http.MethodPost, "/captures", request, &capture)
+
+		if (err != nil) || (status != http.StatusCreated) {
+			state.Fatalf("Test of the run mode capture failed, cannot start the %s capture, status: %d, error: %v", name, status, err)
+		}
+
+		started[name] = capture
+	}
+
+	testCase := curlCase{Name: server.URL, Server: serverConfig{Certificate: &rsaCertificate}, Suite: "", Expected: receivedRequest{}}
+
+	for runAs, expected := range map[account]string{testUser: "/test", otherUser: "/"} {
+		output, err := runCurl(state.Context(), runAs, curlArguments(testCase, server.URL))
+
+		if (err != nil) || (output != expected) {
+			state.Fatalf("Test of the run mode capture failed, curl as %s should get %s, output: %q, error: %v", runAs.Name, expected, output, err)
+		}
+	}
+
+	directory := state.TempDir()
+
+	for name, capture := range started {
+		status, err := client.call(state.Context(), http.MethodPost, fmt.Sprintf("/captures/%d/stop", capture.ID), nil, nil)
+
+		if (err != nil) || (status != http.StatusOK) {
+			state.Fatalf("Test of the run mode capture failed, cannot stop the %s capture, status: %d, error: %v", name, status, err)
+		}
+
+		path := filepath.Join(directory, name+".pcapng")
+		err = client.download(state.Context(), fmt.Sprintf("/captures/%d/pcap", capture.ID), path)
+
+		if err != nil {
+			state.Fatalf("Test of the run mode capture failed, cannot download the %s capture, error: %s", name, err.Error())
+		}
+
+		// one SYN to the server: the proxy's upstream connection of the test user, nobody's direct connection is not proxied and not captured
+		syns, tsharkErr := runCommand(state.Context(), tsharkPath, "-n", "-r", path, "-Y", "tcp.flags.syn == 1 && tcp.flags.ack == 0", "-T", "fields", "-e", "tcp.dstport")
+
+		if tsharkErr != nil {
+			state.Fatalf("Test of the run mode capture failed, cannot read the %s capture, error: %s", name, tsharkErr.Error())
+		}
+
+		ports, tsharkErr := capturedPorts(state.Context(), tsharkPath, path)
+
+		if tsharkErr != nil {
+			state.Fatalf("Test of the run mode capture failed, cannot read the %s capture, error: %s", name, tsharkErr.Error())
+		}
+
+		expectedSyns := port + "\n"
+
+		if name == "none" {
+			expectedSyns = ""
+		}
+
+		if (syns != expectedSyns) || ports[strconv.Itoa(int(proxyPort))] || ((name == "none") && (len(ports) != 0)) {
+			state.Errorf("Test of the run mode capture failed, the %s capture should have %q as SYNs and no packet of the proxy port %d, syns: %q, ports: %v", name, expectedSyns, proxyPort, syns, ports)
 			return
 		}
 	}
+
+	// a capture that does not exist
+	status, err := client.call(state.Context(), http.MethodPost, "/captures/99/stop", nil, nil)
+
+	if (err != nil) || (status != http.StatusNotFound) {
+		state.Errorf("Test of the run mode capture failed, stopping a capture that does not exist should answer 404, status: %d, error: %v", status, err)
+		return
+	}
+}
+
+// decerter run --intercept with the API and a rule of the API that rewrites GET / to GET /test in TLS records
+func startRewriteDecerter(state *testing.T) (client apiClient) {
+	client = startAPIDecerter(state, InterceptDecerterMode, []intercept.Rule{intercept.IdentityRule{}})
+	status, err := client.call(state.Context(), http.MethodPost, "/rules", v1.RuleRequest{Filter: "tls", Direction: v1.UpDirection, Layer: v1.TLSLayer, Find: v1.Value{Type: v1.TextValueType, Value: "GET / "}, Replace: v1.Value{Type: v1.TextValueType, Value: "GET /test "}}, nil)
+
+	if (err != nil) || (status != http.StatusCreated) {
+		state.Fatalf("Could not add the rewrite rule, status: %d, error: %v", status, err)
+	}
+
+	return
+}
+
+// the HTTP requests tshark decrypts in a capture of the TLS servers on ports, as "port\turi"
+func wireRequests(ctx context.Context, tsharkPath string, capturePath string, ports ...string) (requests map[string]bool, err error) {
+	arguments := []string{"-n", "-r", capturePath}
+
+	for _, port := range ports {
+		arguments = append(arguments, "-d", "tcp.port=="+port+",tls")
+	}
+
+	arguments = append(arguments, "-Y", "http.request", "-T", "fields", "-E", "separator=/t", "-e", "tcp.dstport", "-e", "http.request.uri")
+	output, runErr := runCommand(ctx, tsharkPath, arguments...)
+
+	if err = runErr; err != nil {
+		return
+	}
+
+	requests = map[string]bool{}
+
+	for line := range strings.Lines(output) {
+		requests[strings.TrimRight(line, "\n")] = true
+	}
+
+	return
 }
 
 // decerter capture with the API on a socket of the test and capturePath as its -w file, empty is none
@@ -490,9 +690,15 @@ type streamReader struct {
 	errors *lockedBuffer
 }
 
-func startStreamReader(state *testing.T, tsharkPath string, socket string, port string) (reader streamReader) {
+func startStreamReader(state *testing.T, tsharkPath string, socket string, ports ...string) (reader streamReader) {
 	ctx, cancel := context.WithCancel(context.Background())
-	pipeline := fmt.Sprintf("curl -sN --unix-socket %s http://%s%s/captures/stream | %s -l -n -i - -d tcp.port==%s,tls -Y http.request -T fields -e tcp.dstport -e http.request.uri", socket, v1.HostName, v1.BasePath, tsharkPath, port)
+	var decodeAs strings.Builder
+
+	for _, port := range ports {
+		decodeAs.WriteString(" -d tcp.port==" + port + ",tls")
+	}
+
+	pipeline := fmt.Sprintf("curl -sN --unix-socket %s http://%s%s/captures/stream | %s -l -n -i -%s -Y http.request -T fields -e tcp.dstport -e http.request.uri", socket, v1.HostName, v1.BasePath, tsharkPath, decodeAs.String())
 	command := exec.CommandContext(ctx, "sh", "-c", pipeline)
 	// the pipeline is its own process group, so its tshark and curl go when the test ends
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

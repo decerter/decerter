@@ -191,6 +191,67 @@ func TestMarkControlPositive(state *testing.T) {
 	}
 }
 
+// Test if proxy.dialUpstream returns with the expected output without the capture: a connection to the original destination and no upstream cookie.
+func TestDialUpstreamPositive(state *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+
+	if err != nil {
+		state.Fatalf("Test of proxy.dialUpstream failed, cannot listen, error: %s", err.Error())
+	}
+
+	defer func() {
+		if closeErr := listener.Close(); closeErr != nil {
+			state.Errorf("Test of proxy.dialUpstream failed, cannot close listener, error: %s", closeErr.Error())
+		}
+	}()
+
+	flow := testFlow
+	flow.OriginalDestination = listener.Addr().(*net.TCPAddr).AddrPort()
+	connection, upstreamCookie, err := dialUpstream(state.Context(), "tcp", flow, 7, time.Second, nil, slog.New(slog.DiscardHandler))
+
+	if err != nil {
+		state.Fatalf("Test of proxy.dialUpstream function failed, error: %s", err.Error())
+	}
+
+	defer func() {
+		if closeErr := connection.Close(); closeErr != nil {
+			state.Errorf("Test of proxy.dialUpstream failed, cannot close connection, error: %s", closeErr.Error())
+		}
+	}()
+
+	if (upstreamCookie != 0) || (connection.RemoteAddr().String() != flow.OriginalDestination.String()) {
+		state.Errorf("Test of proxy.dialUpstream function failed, the connection should go to %s without a cookie, remote: %s, cookie: %d", flow.OriginalDestination, connection.RemoteAddr(), upstreamCookie)
+		return
+	}
+
+	// a socket that is not captured has nothing to release
+	releaseUpstream(upstreamCookie, nil, slog.New(slog.DiscardHandler))
+}
+
+// Test if proxy.dialUpstream returns with the expected errors: a refused dial has no connection and no upstream cookie.
+func TestDialUpstreamNegative(state *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+
+	if err != nil {
+		state.Fatalf("Test of proxy.dialUpstream failed, cannot listen, error: %s", err.Error())
+	}
+
+	flow := testFlow
+	flow.OriginalDestination = listener.Addr().(*net.TCPAddr).AddrPort()
+	err = listener.Close()
+
+	if err != nil {
+		state.Fatalf("Test of proxy.dialUpstream failed, cannot close listener, error: %s", err.Error())
+	}
+
+	connection, upstreamCookie, err := dialUpstream(state.Context(), "tcp", flow, 7, time.Second, nil, slog.New(slog.DiscardHandler))
+
+	if !errors.Is(err, syscall.ECONNREFUSED) || (connection != nil) || (upstreamCookie != 0) {
+		state.Errorf("Test of proxy.dialUpstream function failed, error should be %v without a connection or cookie, connection: %v, cookie: %d, error: %v", syscall.ECONNREFUSED, connection, upstreamCookie, err)
+		return
+	}
+}
+
 // Test if proxy.UDPSessions returns with the expected output: an idle session expires, a replaced one does not take its successor along.
 func TestUDPSessionsPositive(state *testing.T) {
 	sessions := NewUDPSessions()

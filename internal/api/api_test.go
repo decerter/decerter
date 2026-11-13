@@ -201,7 +201,7 @@ func TestHandlerPositive(state *testing.T) {
 		{Method: http.MethodPost, Path: fmt.Sprintf("/holds/%d/drop", test.heldID), Status: http.StatusNotFound},
 		{Method: http.MethodPost, Path: fmt.Sprintf("/holds/%d/drop", test.dropID), Status: http.StatusNoContent},
 		{Method: http.MethodPost, Path: fmt.Sprintf("/holds/%d/forward", test.dropID), Status: http.StatusNotFound},
-		// run mode exports its history as synthesized packets, captures need decerter capture
+		// run mode exports its history as synthesized packets; without capture programs, a backend that has no captures, the capture operations answer 409
 		{Method: http.MethodGet, Path: "/flows/pcap", Status: http.StatusOK},
 		{Method: http.MethodGet, Path: "/flows/pcap?format=plaintext&filter=tls", Status: http.StatusOK},
 		{Method: http.MethodGet, Path: "/flows/pcap?format=dsb", Status: http.StatusConflict},

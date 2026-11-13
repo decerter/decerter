@@ -44,7 +44,7 @@ type testConsumer struct {
 // Test if capture.Hub hands every packet to each writer with its own filter and pcapng section, a writer that is not read is cut off (a stream) or loses packets (a file) without slowing the others.
 func TestHubFanOutPositive(state *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
-	hub, err := NewHub(capturebpf.MaxSnaplen, nil, nil, nil, nil, logger)
+	hub, err := NewHub(capturebpf.MaxSnaplen, nil, nil, nil, nil, false, logger)
 
 	if err != nil {
 		state.Fatalf("Test of capture.NewHub failed, error: %s", err.Error())
@@ -151,7 +151,7 @@ func TestHubFanOutPositive(state *testing.T) {
 func TestHubHistoryPositive(state *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	flows := history.New(history.DefaultLimits(), nil)
-	hub, err := NewHub(capturebpf.MaxSnaplen, nil, nil, nil, flows, logger)
+	hub, err := NewHub(capturebpf.MaxSnaplen, nil, nil, nil, flows, false, logger)
 
 	if err != nil {
 		state.Fatalf("Test of capture.NewHub failed, error: %s", err.Error())
@@ -222,6 +222,144 @@ func TestHubHistoryPositive(state *testing.T) {
 
 	if (listed[0].State != api.ClosedFlowState) || (listed[0].Up.Bytes != int64(len(hello))) || (len(hub.sessions) != 0) {
 		state.Errorf("Test of capture.Hub failed, the flow should be closed with %d bytes up and its session forgotten, flow: %+v, sessions: %d", len(hello), listed[0], len(hub.sessions))
+		return
+	}
+}
+
+// Test if capture.Hub in run mode decides the packets of an upstream socket of the proxy with the app's flow it carries, leaves the history to the proxy and exports the packets by the flow of the history.
+func TestHubProxiedPositive(state *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	flows := history.New(history.DefaultLimits(), nil)
+	scope, err := filter.Parse("tcp.dstport == 443 && proc.comm == \"curl\"")
+
+	if err != nil {
+		state.Fatalf("Test of capture.Hub failed, cannot parse filter, error: %s", err.Error())
+	}
+
+	hub, err := NewHub(capturebpf.MaxSnaplen, nil, nil, &scope, flows, true, logger)
+
+	if err != nil {
+		state.Fatalf("Test of capture.NewHub failed, error: %s", err.Error())
+	}
+
+	looked := []uint64{}
+	hub.gate.lookup = func(cookie uint64) (flow redirect.Flow, err error) {
+		looked = append(looked, cookie)
+		flow, err = testLookup(cookie)
+		return
+	}
+	hello, err := clientHello("example.com")
+
+	if err != nil {
+		state.Fatalf("Test of capture.Hub failed, cannot make a ClientHello, error: %s", err.Error())
+	}
+
+	// the proxy opened the app's flow 7 in the history, its upstream socket 20 carries it on the wire
+	clientRandom := [32]byte(hello[11:43])
+	flowID := flows.OpenFlow(7, filter.Values{Comm: "curl", IPProtocol: syscall.IPPROTO_TCP, Destination: netip.AddrPortFrom(hubServer.Address, 443)}, clientRandom)
+	packets := testFlow(20, Endpoint{Address: hubClient.Address, Port: 50000}, Endpoint{Address: hubServer.Address, Port: 443}, string(hello))
+
+	for index := range packets {
+		packets[index].FlowCookie = 7
+	}
+
+	for _, packet := range packets {
+		err = hub.gate.handle(packet, time.Now(), hub.emit)
+
+		if err != nil {
+			state.Fatalf("Test of capture.Hub failed, cannot hand a packet out, error: %s", err.Error())
+		}
+	}
+
+	listed, _ := flows.Flows(nil, 0, 10)
+
+	if !slices.Equal(looked, []uint64{7}) || (len(listed) != 1) || (listed[0].ID != flowID) || (hub.sessions[20] != clientRandom) || (hub.flows[20] == nil) {
+		state.Fatalf("Test of capture.Hub failed, the upstream socket should be decided once with the app's flow and only the proxy's flow should be in the history, looked up: %v, flows: %+v, sessions: %v", looked, listed, hub.sessions)
+	}
+
+	output := bytes.Buffer{}
+	err = hub.Export(&output, map[uint64][32]byte{7: clientRandom}, false, logger)
+
+	if err != nil {
+		state.Fatalf("Test of capture.Hub.Export failed, error: %s", err.Error())
+	}
+
+	exported, err := readPackets(output.Bytes())
+
+	if (err != nil) || (len(exported) != len(packets)) || !bytes.Contains(output.Bytes(), hello) {
+		state.Errorf("Test of capture.Hub.Export failed, the export of the app's flow should have the %d packets of its upstream socket, packets: %d, error: %v", len(packets), len(exported), err)
+		return
+	}
+
+	// the upstream socket is gone: the hub forgets it, the flow of the proxy stays open in the history until the proxy closes it
+	hub.forgetFlows(func(cookie uint64) (isOpen bool, err error) {
+		return
+	})
+	listed, _ = flows.Flows(nil, 0, 10)
+
+	if (listed[0].State != api.OpenFlowState) || (len(hub.flows) != 0) {
+		state.Errorf("Test of capture.Hub failed, the hub should forget the upstream socket and leave the flow of the proxy open, flow: %+v, hub flows: %d", listed[0], len(hub.flows))
+		return
+	}
+}
+
+// Test if capture.Hub in run mode returns with the expected output for packets it must not take: an export by the cookie of the upstream socket has none, and an upstream socket whose app's flow is out of scope is not handed out.
+func TestHubProxiedNegative(state *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	flows := history.New(history.DefaultLimits(), nil)
+	scope, err := filter.Parse("tcp.dstport == 443")
+
+	if err != nil {
+		state.Fatalf("Test of capture.Hub failed, cannot parse filter, error: %s", err.Error())
+	}
+
+	hub, err := NewHub(capturebpf.MaxSnaplen, nil, nil, &scope, flows, true, logger)
+
+	if err != nil {
+		state.Fatalf("Test of capture.NewHub failed, error: %s", err.Error())
+	}
+
+	hub.gate.lookup = testLookup
+	hello, err := clientHello("example.com")
+
+	if err != nil {
+		state.Fatalf("Test of capture.Hub failed, cannot make a ClientHello, error: %s", err.Error())
+	}
+
+	// socket 21 carries flow 7 (port 443 in flow_map), socket 22 flow 2, whose original destination is port 8080 although the packets go to 443
+	inScope := testFlow(21, hubClient, Endpoint{Address: hubServer.Address, Port: 443}, string(hello))
+	outOfScope := testFlow(22, Endpoint{Address: hubClient.Address, Port: 40001}, Endpoint{Address: hubServer.Address, Port: 443}, string(hello))
+
+	for index := range inScope {
+		inScope[index].FlowCookie = 7
+		outOfScope[index].FlowCookie = 2
+	}
+
+	for _, packet := range slices.Concat(inScope, outOfScope) {
+		err = hub.gate.handle(packet, time.Now(), hub.emit)
+
+		if err != nil {
+			state.Fatalf("Test of capture.Hub failed, cannot hand a packet out, error: %s", err.Error())
+		}
+	}
+
+	listed, _ := flows.Flows(nil, 0, 10)
+
+	if (hub.flows[22] != nil) || (hub.flows[21] == nil) || (len(listed) != 0) {
+		state.Fatalf("Test of capture.Hub failed, only the socket of the flow in scope should be handed out and nothing opened in the history, hub flows: %v, flows: %+v", hub.flows, listed)
+	}
+
+	output := bytes.Buffer{}
+	err = hub.Export(&output, map[uint64][32]byte{21: [32]byte(hello[11:43])}, false, logger)
+
+	if err != nil {
+		state.Fatalf("Test of capture.Hub.Export failed, error: %s", err.Error())
+	}
+
+	exported, err := readPackets(output.Bytes())
+
+	if (err != nil) || (len(exported) != 0) {
+		state.Errorf("Test of capture.Hub.Export failed, an export by the cookie of the upstream socket should have no packet, packets: %d, error: %v", len(exported), err)
 		return
 	}
 }
@@ -354,7 +492,7 @@ func testFlow(cookie uint64, client Endpoint, server Endpoint, request string) (
 			data = TCPPacket(nil, server, client, sequence, acknowledgment, flags, payload)
 		}
 
-		packet = capturebpf.Packet{Cookie: cookie, TimestampNs: uint64(len(packets)) * 1000, Length: uint32(len(data)), IsIngress: isIngress, Data: data}
+		packet = capturebpf.Packet{Cookie: cookie, FlowCookie: cookie, TimestampNs: uint64(len(packets)) * 1000, Length: uint32(len(data)), IsIngress: isIngress, Data: data}
 		return
 	}
 	length := uint32(len(request))

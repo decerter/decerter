@@ -31,6 +31,7 @@ type UDPSessionKey struct {
 // dtls reads a DTLS session, it is nil for any other datagrams; isRaw relays a DTLS session that can't be decrypted past the rules, they would only see ciphertext, and a session out of scope
 // isInScope is the decision of the scope filter, a session out of scope prints no flow line and is not in the history
 // interceptFlow is the flow the rules and the history see; upQueue takes the client's datagrams for the rules when they run on plain datagrams, nil otherwise
+// upstreamCookie is the cookie of the upstream socket in upstream_map of the capture, 0 when it is not captured
 // busy counts the datagrams in the rules right now, a held one keeps the session from going idle
 type UDPSession struct {
 	key                 UDPSessionKey
@@ -38,6 +39,7 @@ type UDPSession struct {
 	cmdline             string
 	interceptFlow       intercept.Flow
 	upstream            *net.UDPConn
+	upstreamCookie      uint64
 	dtls                *dtlsInterception
 	upQueue             *udpQueue
 	isRaw               bool

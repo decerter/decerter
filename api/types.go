@@ -149,7 +149,7 @@ type Status struct {
 	Captures   CaptureStatus  `json:"captures"`
 }
 
-// the captures of the API: Available is false on decerter run, Stored counts the kept files, running ones included, and Size their bytes
+// the captures of the API: Available is true when decerter captures packets (decerter capture, and decerter run with the API: the proxy's upstream sockets), Stored counts the kept files, running ones included, and Size their bytes
 type CaptureStatus struct {
 	Available bool          `json:"available"`
 	Running   int           `json:"running"`

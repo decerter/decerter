@@ -59,10 +59,16 @@ func (ring *packetRing) add(packet capturebpf.Packet) {
 	}
 }
 
-// the packets of the cookies, oldest first
-func (ring *packetRing) packetsOf(cookies map[uint64][32]byte) (packets []capturebpf.Packet) {
+// the packets of the cookies, oldest first: the cookies of their sockets, or with isByFlow of the flows they belong to, which in run mode are the app's sockets the history knows
+func (ring *packetRing) packetsOf(cookies map[uint64][32]byte, isByFlow bool) (packets []capturebpf.Packet) {
 	for _, packet := range ring.packets[ring.start:] {
-		if _, ok := cookies[packet.Cookie]; ok {
+		cookie := packet.Cookie
+
+		if isByFlow {
+			cookie = packet.FlowCookie
+		}
+
+		if _, ok := cookies[cookie]; ok {
 			packets = append(packets, packet)
 		}
 	}
@@ -70,8 +76,9 @@ func (ring *packetRing) packetsOf(cookies map[uint64][32]byte) (packets []captur
 	return
 }
 
-// capture mode's pcap export: the packets the hub still keeps of the flows, as a pcapng with a DSB in front of each TLS session or, plaintext, with synthesized decrypted packets
-// flows maps the cookies of the flows to the client randoms of their sessions, zero for a flow without one; a session whose secrets are gone from secrets_map is written without keys
+// the pcap export of the captured packets: the packets the hub still keeps of the flows, as a pcapng with a DSB in front of each TLS session or, plaintext, with synthesized decrypted packets
+// flows maps the cookies of the flows of the history to the client randoms of their sessions, zero for a flow without one; a session whose secrets are gone from secrets_map is written without keys
+// in run mode the packets are the ones of the proxy's upstream sockets, a TLS session there has the client random and the keys of the app's session, the proxy sealed its edits with them
 func (hub *Hub) Export(output io.Writer, flows map[uint64][32]byte, plaintext bool, logger *slog.Logger) (err error) {
 	if hub.ring == nil {
 		err = ErrNoPacketHistory
@@ -79,7 +86,7 @@ func (hub *Hub) Export(output io.Writer, flows map[uint64][32]byte, plaintext bo
 	}
 
 	hub.mutex.Lock()
-	packets := hub.ring.packetsOf(flows)
+	packets := hub.ring.packetsOf(flows, true)
 	hub.mutex.Unlock()
 	writerSnaplen := hub.snaplen
 
@@ -99,9 +106,10 @@ func (hub *Hub) Export(output io.Writer, flows map[uint64][32]byte, plaintext bo
 	if !plaintext {
 		recorder.known = map[uint64][32]byte{}
 
-		for cookie, clientRandom := range flows {
-			if clientRandom != [32]byte{} {
-				recorder.known[cookie] = clientRandom
+		// the writer knows a session by the socket of its packets
+		for _, packet := range packets {
+			if clientRandom := flows[packet.FlowCookie]; clientRandom != [32]byte{} {
+				recorder.known[packet.Cookie] = clientRandom
 			}
 		}
 	}
