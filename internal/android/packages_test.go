@@ -326,7 +326,8 @@ func TestFindInstallDirectoriesNegative(state *testing.T) {
 }
 
 // Test if android.DescribeTLS returns with the expected output: a system app, an app without libflutter.so, a Flutter app whose library has no Dart
-// version (not hookable, isKnown false), Chrome whose Trichrome library has no Chromium version (one line for the library, isKnown false).
+// version (not hookable, isKnown false), Chrome whose Trichrome library has no Chromium version (one line for the library, isKnown false, and the
+// line that makes setup add --block-quic).
 func TestDescribeTLSPositive(state *testing.T) {
 	appDirectory := state.TempDir()
 	flutterLibrary := filepath.Join(appDirectory, "~~a==", "io.decerter.flutter-b==", "lib", "x86_64", "libflutter.so")
@@ -361,9 +362,19 @@ func TestDescribeTLSPositive(state *testing.T) {
 
 		// Chrome's own directory has no library, only the line of its Trichrome library is printed
 		lines, isKnown, describeErr := DescribeTLS(selected, installedPackages, appDirectory, "amd64")
+		isChromium := (positive.Name == "com.android.chrome")
+		count := 1
 
-		if (describeErr != nil) || (len(lines) != 1) || !strings.Contains(lines[0], positive.Text) || (isKnown != positive.IsKnown) {
-			state.Errorf("Test of android.DescribeTLS function failed, %s should say %q, lines: %q, isKnown: %v, error: %v", positive.Name, positive.Text, lines, isKnown, describeErr)
+		if isChromium {
+			count = 2
+		}
+
+		if (describeErr != nil) || (len(lines) != count) || !strings.Contains(lines[0], positive.Text) || (isKnown != positive.IsKnown) || (IsChromiumApp(lines) != isChromium) {
+			state.Errorf("Test of android.DescribeTLS function failed, %s should say %q, Chromium app %v, lines: %q, isKnown: %v, error: %v", positive.Name, positive.Text, isChromium, lines, isKnown, describeErr)
+		}
+
+		if isChromium && (lines[1] != positive.Name+": "+ChromiumQUICLine) {
+			state.Errorf("Test of android.DescribeTLS function failed, %s should end with the QUIC line, lines: %q", positive.Name, lines)
 		}
 	}
 }

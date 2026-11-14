@@ -41,8 +41,8 @@ They run after the record rules, which still see every record, on whole messages
 - **Flow control:** per direction and stream decerter counts the window the receiver granted and the difference between what the sender sent and what went on. The sender gets a WINDOW_UPDATE of its own at once for bytes the receiver will never count (a kept message's DATA, a shrunk body, dropped padding, a dropped message); when an edit sent more than the sender did, that much of the receiver's WINDOW_UPDATEs is held back. DATA never goes beyond the receiver's windows and is split at its `SETTINGS_MAX_FRAME_SIZE`. `RST_STREAM`, `GOAWAY`, `PING`, `SETTINGS` and `PRIORITY` go on as they came.
 
 ## Limits
-- A body over 1 MiB, a message that is not whole within `--hold-timeout`, or one that a TLS alert or KeyUpdate interrupts goes on as it came, with a note in its exchange.
-- A kept-back request with `Expect: 100-continue` waits for the client's own expect timeout (curl: 1 s), since the server can't answer before it has the head.
+- A body over 1 MiB, a message that is not whole within `--assembly-timeout` (5 s, at most 1 h; counted from its first byte, apart from `--hold-timeout`, which counts once the whole message is held), or one that a TLS alert or KeyUpdate interrupts goes on as it came, with a note in its exchange.
+- A kept-back request with `Expect: 100-continue` waits for the client's own expect timeout (curl: 1 s) or `--assembly-timeout`, whichever comes first, since the server can't answer before it has the head.
 - Bodies are not decompressed, so a rule doesn't find text in a gzip body.
 - HTTP/2: a stream's window held back for a grown body is forgotten once both sides ended the stream; never-indexed fields are encoded again as literals without indexing; server push is passed on but its messages are not kept; a header block over 1 MiB can't be encoded again.
 - Not read: h2c by `Upgrade: h2c` (the 101 ends the HTTP/1 reading), WebSocket, the inside of CONNECT tunnels, HTTP/3.

@@ -4,28 +4,16 @@
 
 package boringssl
 
-// 42 Chromium branches from milestone 124, 42 ranges, 39 BoringSSL revisions, 2 offset sets
+// the milestone table: 37 Chromium release branches from milestone 124, 37 ranges
 var chromiumBranches = map[string][]chromiumRange{
-	"122.0.6238": {
-		{First: 4, Last: 4, Revision: "85e2f2c655a13e29988df777ed680ddf0969434d"},
-	},
 	"124.0.6367": {
 		{First: 0, Last: 257, Revision: "4fa4804c8ab4521079af62dba5260a99c34b8a29"},
-	},
-	"125.0.6383": {
-		{First: 0, Last: 0, Revision: "368d0d87d0bd00f8227f74ce18e8e4384eaf6afa"},
 	},
 	"125.0.6422": {
 		{First: 0, Last: 237, Revision: "f94f3ed3965ea033001fb9ae006084eee408b861"},
 	},
-	"126.0.6452": {
-		{First: 4, Last: 4, Revision: "2db0eb3f96a5756298dcd7f9319e56a98585bd10"},
-	},
 	"126.0.6478": {
 		{First: 0, Last: 270, Revision: "2db0eb3f96a5756298dcd7f9319e56a98585bd10"},
-	},
-	"127.0.6493": {
-		{First: 0, Last: 0, Revision: "2db0eb3f96a5756298dcd7f9319e56a98585bd10"},
 	},
 	"127.0.6533": {
 		{First: 0, Last: 144, Revision: "2db0eb3f96a5756298dcd7f9319e56a98585bd10"},
@@ -129,12 +117,18 @@ var chromiumBranches = map[string][]chromiumRange{
 	"160.0.8157": {
 		{First: 0, Last: 3, Revision: "89d75213812fa6c00f2673a224d0622e530e746f"},
 	},
-	"160.0.8161": {
-		{First: 0, Last: 0, Revision: "148a7b1f361dcf6708e9eb3b7c2134d0c5633e3e"},
-	},
 }
 
-// the BoringSSL revisions with equal offsets, in the order of their first branch
+// 5 Chromium builds of no release branch, each with its BoringSSL revision; 39 BoringSSL revisions, 2 offset sets in all
+var chromiumBuilds = map[string]string{
+	"122.0.6238.4": "85e2f2c655a13e29988df777ed680ddf0969434d",
+	"125.0.6383.0": "368d0d87d0bd00f8227f74ce18e8e4384eaf6afa",
+	"126.0.6452.4": "2db0eb3f96a5756298dcd7f9319e56a98585bd10",
+	"127.0.6493.0": "2db0eb3f96a5756298dcd7f9319e56a98585bd10",
+	"160.0.8161.0": "148a7b1f361dcf6708e9eb3b7c2134d0c5633e3e",
+}
+
+// the BoringSSL revisions with equal offsets, in the order of their first branch, then of the builds
 var chromiumRevisionOffsets = []revisionOffset{
 	{
 		Revisions: []string{"4fa4804c8ab4521079af62dba5260a99c34b8a29", "f94f3ed3965ea033001fb9ae006084eee408b861", "2db0eb3f96a5756298dcd7f9319e56a98585bd10", "f01108e4761e1d4189cb134322c3cb01dc71ef87", "11f334121fd0d13830fefdf08041183da2d30ef3", "58f3bc83230d2958bb9710bc910972c4f5d382dc", "85e2f2c655a13e29988df777ed680ddf0969434d", "368d0d87d0bd00f8227f74ce18e8e4384eaf6afa"},

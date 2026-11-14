@@ -29,4 +29,5 @@ var (
 	ErrBinaryNotWorking = errors.New("the pushed binary does not run")
 	ErrForward          = errors.New("could not forward the api socket")
 	ErrInstallDirectory = errors.New("could not look for the install directory")
+	ErrChromeFlags      = errors.New("could not write or check Chrome's flags file")
 )

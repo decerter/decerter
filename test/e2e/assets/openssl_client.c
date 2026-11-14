@@ -7,6 +7,8 @@
 // exist since 3.0.0, and writes its key log to SSLKEYLOGFILE through the key
 // log callback like curl does. usage: openssl_client <ip> <port> <1.2|1.3> <path>
 // sends GET <path>, prints the response and leaves after the server closes.
+// With DECERTER_CLIENT_WAIT set it reads one line from stdin before it connects,
+// so it maps libssl long before its handshake (a process decerter finds late).
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -87,6 +89,18 @@ int main(int argc, char **argv)
 		}
 
 		SSL_CTX_set_keylog_callback(ctx, write_key_log);
+	}
+
+	const char *wait = getenv("DECERTER_CLIENT_WAIT");
+
+	if (wait && wait[0])
+	{
+		char line[16];
+
+		if (!fgets(line, sizeof(line), stdin))
+		{
+			return fail("read stdin");
+		}
 	}
 
 	struct sockaddr_in address = {};

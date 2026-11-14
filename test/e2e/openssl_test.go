@@ -149,6 +149,113 @@ func TestOpenSSLDistroPositive(state *testing.T) {
 	}
 }
 
+// Test if decerter keylog without --libssl hooks the libssl of a process that starts after it: a client in a container of the test user maps the container's
+// libssl only after decerter attached the host's, the rescan of /proc/<pid>/maps finds it within a few seconds, and the session the client opens then has
+// the client's own key log lines.
+func TestOpenSSLLateProcessPositive(state *testing.T) {
+	if _, err := exec.LookPath(dockerName); err != nil {
+		state.Skipf("Test of a late OpenSSL process skipped, no docker: %s", err.Error())
+	}
+
+	compiler, err := exec.LookPath("cc")
+
+	if err != nil {
+		state.Skipf("Test of a late OpenSSL process skipped, no C compiler for the test client: %s", err.Error())
+	}
+
+	// decerter needs a library to start with, the host's
+	if _, err = openssl.FindLibssl(""); err != nil {
+		state.Skipf("Test of a late OpenSSL process skipped, no OpenSSL 3 or 4 on this host: %s", err.Error())
+	}
+
+	image := distroImages[slices.IndexFunc(distroImages, func(image distroImage) (isDebian bool) {
+		isDebian = (image.Name == "debian-13")
+		return
+	})]
+
+	if reason := prepareImage(state.Context(), image); reason != "" {
+		state.Skipf("Test of a late OpenSSL process skipped: %s", reason)
+	}
+
+	server := startServer(state, serverConfig{Certificate: &rsaCertificate, Version: 0})
+	serverURL, err := url.Parse(server.URL)
+
+	if err != nil {
+		state.Fatalf("Could not parse the test server URL %s, error: %s", server.URL, err.Error())
+	}
+
+	client := startDistroClient(state, image, compiler)
+	stdout, logs, stop := startDecerterCommandLogs(state, []string{"Attached secrets uprobe"}, "keylog", "--uid", strconv.FormatUint(uint64(testUser.UID), 10))
+
+	if strings.Contains(logs.String(), "/root/") {
+		state.Fatalf("Test of a late OpenSSL process failed, no process of the test user should map the container's libssl yet, logs: %s", logs.String())
+	}
+
+	// the client maps the container's libssl and waits for a line before it connects
+	keyLogPath := filepath.Join(client.Directory, "keylog", "late.log")
+	commandCtx, cancel := context.WithTimeout(state.Context(), commandTimeout)
+	defer cancel()
+	command := exec.CommandContext(commandCtx, dockerName, "exec", "--interactive", "--user", fmt.Sprintf("%d:%d", testUser.UID, testUser.GID), "--env", "DECERTER_CLIENT_WAIT=1", "--env", "SSLKEYLOGFILE="+filepath.Join(clientMount, "keylog", "late.log"), client.Container, filepath.Join(clientMount, "openssl_client"), "127.0.0.1", serverURL.Port(), "1.3", "/late")
+	command.WaitDelay = time.Second
+	output := &bytes.Buffer{}
+	command.Stdout = output
+	command.Stderr = output
+	stdin, err := command.StdinPipe()
+
+	if err == nil {
+		err = command.Start()
+	}
+
+	if err != nil {
+		state.Fatalf("Could not start the late client, error: %s", err.Error())
+	}
+
+	// the rescan runs every 2 s
+	deadline := time.Now().Add(decerterReadyTimeout)
+	isHooked := false
+
+	for !isHooked && time.Now().Before(deadline) {
+		for line := range strings.Lines(logs.String()) {
+			isHooked = isHooked || containsAll(line, []string{"Attached secrets uprobe", "/root/", `"pid":`})
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	_, writeErr := io.WriteString(stdin, "go\n")
+	err = errors.Join(writeErr, stdin.Close(), command.Wait())
+
+	if !isHooked || (err != nil) || !strings.Contains(output.String(), "/late") {
+		state.Fatalf("Test of a late OpenSSL process failed, decerter should hook the container's libssl of the late client within %s and the client should get its response, hooked: %v, output: %q, error: %v, logs: %s", decerterReadyTimeout, isHooked, output.String(), err, logs.String())
+	}
+
+	err = stop()
+
+	if err != nil {
+		state.Fatalf("Could not stop decerter keylog, error: %s", err.Error())
+	}
+
+	written, err := os.ReadFile(keyLogPath)
+
+	if err != nil {
+		state.Fatalf("Could not read the client key log, error: %s", err.Error())
+	}
+
+	clientKeyLog := slices.DeleteFunc(keyLogLines(string(written)), func(line string) (isExporter bool) {
+		isExporter = strings.HasPrefix(line, "EXPORTER_SECRET ")
+		return
+	})
+	decerterKeyLog := keyLogLines(stdout.String())
+	slices.Sort(clientKeyLog)
+	slices.Sort(decerterKeyLog)
+
+	// one TLS 1.3 session: four traffic secret lines
+	if (len(clientKeyLog) != 4) || !slices.Equal(clientKeyLog, decerterKeyLog) {
+		state.Errorf("Test of a late OpenSSL process failed, decerter keylog should print the late client's key log, decerter: %q, client: %q", decerterKeyLog, clientKeyLog)
+		return
+	}
+}
+
 // Test if decerter keylog refuses an OpenSSL version the offsets table does not have before it attaches, naming the nearest known version and the make command: the host's OpenSSL with major version 9, and Fedora's OpenSSL 4.0.3 as 4.0.9.
 func TestOpenSSLDistroNegative(state *testing.T) {
 	state.Run("host", func(state *testing.T) {
@@ -620,6 +727,12 @@ func runDistroClient(ctx context.Context, client distroClient, place clientPlace
 
 // run the test binary as decerter with the arguments until stop, which interrupts it and waits; it returns once a log line has every text of ready in it, stdout is decerter's output
 func startDecerterCommand(state *testing.T, ready []string, arguments ...string) (stdout *lockedBuffer, stop func() error) {
+	stdout, _, stop = startDecerterCommandLogs(state, ready, arguments...)
+	return
+}
+
+// startDecerterCommand with decerter's logs, which keep growing while it runs
+func startDecerterCommandLogs(state *testing.T, ready []string, arguments ...string) (stdout *lockedBuffer, logs *lockedBuffer, stop func() error) {
 	executable, err := os.Executable()
 
 	if err != nil {
@@ -652,7 +765,7 @@ func startDecerterCommand(state *testing.T, ready []string, arguments ...string)
 
 	// true at the ready line, false when decerter left before it
 	readyChannel := make(chan bool, 1)
-	logs := &lockedBuffer{mutex: &sync.Mutex{}, buffer: &bytes.Buffer{}}
+	logs = &lockedBuffer{mutex: &sync.Mutex{}, buffer: &bytes.Buffer{}}
 	waitGroup := sync.WaitGroup{}
 
 	// decerter log reader, reports the ready line and keeps the logs for the error messages

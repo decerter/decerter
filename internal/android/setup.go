@@ -13,6 +13,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -104,8 +105,22 @@ func Setup(ctx context.Context, options Options, output io.Writer, logger *slog.
 		report.line("tls", "Conscrypt offsets for Android %s on %s", info.Release, info.ABI)
 	}
 
+	isChromium := false
+
 	if options.Package != "" {
-		checkAppTLS(ctx, adb, options.Package, report, logger)
+		isChromium = checkAppTLS(ctx, adb, options.Package, report, logger)
+	}
+
+	if isChromium {
+		report.line("quic", "%s is a Chromium app, the device command gets --block-quic so it uses TLS over TCP, which decerter decrypts", options.Package)
+	}
+
+	if isChromium && slices.Contains(chromePackages, options.Package) {
+		err = writeChromeFlags(ctx, adb, report)
+
+		if err != nil {
+			return
+		}
 	}
 
 	port, err := forwardAPI(ctx, adb, options.Port, report)
@@ -114,7 +129,7 @@ func Setup(ctx context.Context, options Options, output io.Writer, logger *slog.
 		return
 	}
 
-	deviceCommand, uiCommand := NextCommands(adbCommand(adb.Path), adb.Serial, adb.Root, options.Package, port, options.Command)
+	deviceCommand, uiCommand := NextCommands(adbCommand(adb.Path), adb.Serial, adb.Root, options.Package, isChromium, port, options.Command)
 	report.text("\nStart decerter on the device, Ctrl-C stops it and puts netd's hooks back:\n  " + deviceCommand + "\n")
 
 	if options.Package == "" {
@@ -126,7 +141,8 @@ func Setup(ctx context.Context, options Options, output io.Writer, logger *slog.
 	return
 }
 
-// refused while decerter runs; put back netd's hooks a killed decerter left shared, then remove the binary, its data directory and the forwards of the api socket
+// refused while decerter runs; put back netd's hooks a killed decerter left shared, then remove Chrome's flags file when setup wrote it and nobody changed it
+// since, the binary, its data directory and the forwards of the api socket
 func Remove(ctx context.Context, options Options, output io.Writer, logger *slog.Logger) (err error) {
 	report := &printer{output: output, err: nil}
 
@@ -173,6 +189,12 @@ func Remove(ctx context.Context, options Options, output io.Writer, logger *slog
 		report.line("restore", "netd's hooks a killed decerter left shared are exclusive again")
 	case hasState:
 		logger.Warn("A killed decerter left netd's hooks shared and there is no binary to put them back, the data directory stays: run decerter android setup, then decerter android restore on the device", "state", statePath)
+	}
+
+	err = removeChromeFlags(ctx, adb, report)
+
+	if err != nil {
+		return
 	}
 
 	removePaths := platform.AndroidBinaryPath
@@ -419,17 +441,68 @@ func checkPackage(ctx context.Context, adb ADB, name string, report *printer, lo
 }
 
 // decerter android tls on the device: whether the package is a Flutter or Chromium app and decerter knows its library's offsets; a library it can't hook is a
-// warning, decerter still relays its TLS, only without decryption
-func checkAppTLS(ctx context.Context, adb ADB, name string, report *printer, logger *slog.Logger) {
+// warning, decerter still relays its TLS, only without decryption; isChromium is a Chromium app, hooked or not
+func checkAppTLS(ctx context.Context, adb ADB, name string, report *printer, logger *slog.Logger) (isChromium bool) {
 	output, tlsErr := adb.rootShell(ctx, platform.AndroidBinaryPath+" android tls --package "+shellQuote(name)+" 2>/dev/null")
+	lines := []string{}
 
 	for line := range strings.Lines(output) {
+		lines = append(lines, strings.TrimSpace(line))
 		report.line("app", "%s", strings.TrimSpace(line))
 	}
+
+	isChromium = IsChromiumApp(lines)
 
 	if tlsErr != nil {
 		logger.Warn("A Flutter or Chromium library decerter can't hook, its TLS is relayed without decryption: add its version with make generate-flutter-offsets or make generate-chrome-offsets", "package", name, "error", tlsErr)
 	}
+
+	return
+}
+
+// Chrome's flags file without the first-run screens, with a copy in the data directory that marks it as decerter's; a file of the user's own is kept
+func writeChromeFlags(ctx context.Context, adb ADB, report *printer) (err error) {
+	copyPath := path.Join(platform.AndroidDataDirectory, chromeCommandLineCopy)
+	command := fmt.Sprintf("if [ -e %[1]s ] && ! cmp -s %[1]s %[2]s; then echo kept; else mkdir -p -m 700 %[3]s && echo %[4]s > %[2]s && cp %[2]s %[1]s && chmod 644 %[1]s && echo wrote; fi", chromeCommandLine, copyPath, platform.AndroidDataDirectory, shellQuote(chromeFlags))
+	output, err := adb.rootShell(ctx, command)
+
+	if err != nil {
+		return
+	}
+
+	switch strings.TrimSpace(output) {
+	case "wrote":
+		report.line("chrome", "wrote %s: %s; Chrome reads it when it starts, setup --remove deletes it", chromeCommandLine, chromeFlags)
+	case "kept":
+		report.line("chrome", "kept %s, it is not the one setup writes; without --disable-fre Chrome's first-run screens hold the first page back", chromeCommandLine)
+	default:
+		err = fmt.Errorf("%w: %s: %q", ErrChromeFlags, chromeCommandLine, output)
+	}
+
+	return
+}
+
+// Chrome's flags file goes when it is still the one setup wrote, a file the user wrote or changed stays
+func removeChromeFlags(ctx context.Context, adb ADB, report *printer) (err error) {
+	copyPath := path.Join(platform.AndroidDataDirectory, chromeCommandLineCopy)
+	command := fmt.Sprintf("if [ -e %[2]s ] && cmp -s %[1]s %[2]s; then rm -f %[1]s && echo removed; elif [ -e %[2]s ] && [ -e %[1]s ]; then echo kept; else echo none; fi", chromeCommandLine, copyPath)
+	output, err := adb.rootShell(ctx, command)
+
+	if err != nil {
+		return
+	}
+
+	switch strings.TrimSpace(output) {
+	case "removed":
+		report.line("chrome", "removed %s, setup wrote it", chromeCommandLine)
+	case "kept":
+		report.line("chrome", "kept %s, it changed since setup wrote it", chromeCommandLine)
+	case "none":
+	default:
+		err = fmt.Errorf("%w: %s: %q", ErrChromeFlags, chromeCommandLine, output)
+	}
+
+	return
 }
 
 // keep a forward of the device to the api socket on port, 0 keeps any existing one or lets adb pick a free port; other forwards of the device to the socket are removed
@@ -495,20 +568,25 @@ func adbCommand(adbPath string) (command string) {
 }
 
 // the commands setup prints: decerter on the device with the api on its abstract socket, and decerter ui on the host through the forward
-// -t gives decerter a pty when the terminal has one, so Ctrl-C reaches it; without a package name the command has PACKAGE in its place
-func NextCommands(adb string, serial string, root RootType, packageName string, port uint16, decerter string) (deviceCommand string, uiCommand string) {
+// -tt gives decerter a pty even when adb's stdin is no terminal: Ctrl-C reaches it, and when the adb client dies adbd closes the pty and decerter gets SIGHUP;
+// without a package name the command has PACKAGE in its place; blockQuic adds --block-quic for a Chromium app
+func NextCommands(adb string, serial string, root RootType, packageName string, blockQuic bool, port uint16, decerter string) (deviceCommand string, uiCommand string) {
 	if packageName == "" {
 		packageName = "PACKAGE"
 	}
 
 	run := platform.AndroidBinaryPath + " run --intercept --api-socket " + platform.AndroidAPISocket + " --package " + shellQuote(packageName)
 
+	if blockQuic {
+		run += " --block-quic"
+	}
+
 	// adb shell hands its arguments to sh on the device, which runs su -c with the whole command
 	if root == SuRootType {
 		run = `"su -c '` + run + `'"`
 	}
 
-	deviceCommand = adb + " -s " + shellQuote(serial) + " shell -t " + run
+	deviceCommand = adb + " -s " + shellQuote(serial) + " shell -tt " + run
 	uiCommand = shellQuote(decerter) + " ui --api-socket " + net.JoinHostPort("127.0.0.1", strconv.FormatUint(uint64(port), 10))
 	return
 }

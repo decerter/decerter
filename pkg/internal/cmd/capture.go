@@ -25,7 +25,7 @@ func Capture(selection redirect.Filter, packageNames []string, scopeFilter *filt
 
 	ctx, cancel := shutdownContext()
 	defer cancel()
-	decerter := app.New(ctx, selection, scopeFilter, proxyPort, time.Duration(0), blockQuic, flowTable, false, false, nil, apiSocket, time.Duration(0), libssl, true, capturePath, plaintext, snaplen, currentPlatform, logger.Slog())
+	decerter := app.New(ctx, selection, scopeFilter, proxyPort, time.Duration(0), blockQuic, flowTable, false, false, nil, apiSocket, time.Duration(0), time.Duration(0), libssl, true, capturePath, plaintext, snaplen, currentPlatform, logger.Slog())
 	err = serve(ctx, &decerter, logger)
 	return
 }

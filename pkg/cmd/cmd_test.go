@@ -44,6 +44,7 @@ func TestParseFlagsPositive(state *testing.T) {
 		{Parse: parsePort, Value: "8080"},
 		{Parse: parseIdleTimeout, Value: "1m30s"},
 		{Parse: parseHoldTimeout, Value: "2m"},
+		{Parse: parseAssemblyTimeout, Value: "750ms"},
 		{Parse: parseSnaplen, Value: "1500"},
 		{Parse: parseLogLevel, Value: "trace"},
 		{Parse: parseUIAPISocket, Value: "127.0.0.1:8080"},
@@ -76,8 +77,8 @@ func TestParseFlagsPositive(state *testing.T) {
 		return
 	}
 
-	if (scopeFilter == nil) || (scopeFilter.String() != `proc.uid == 1001 && tls.sni contains "example"`) || (proxyPort != 8080) || (udpIdleTimeout != 90*time.Second) || (holdTimeout != 2*time.Minute) || (snaplen != 1500) || !logger.Slog().Enabled(state.Context(), slog.LevelDebug-4) || (uiTarget != ui.Target{Network: ui.TCPNetwork, Address: "127.0.0.1:8080"}) || (mcpTarget != ui.Target{Network: ui.UnixNetwork, Address: "@decerter-api"}) {
-		state.Errorf("Test of the flag parsers failed, filter %v, port %d, timeout %s, snaplen %d, ui api %s, mcp api %s", scopeFilter, proxyPort, udpIdleTimeout, snaplen, uiTarget, mcpTarget)
+	if (scopeFilter == nil) || (scopeFilter.String() != `proc.uid == 1001 && tls.sni contains "example"`) || (proxyPort != 8080) || (udpIdleTimeout != 90*time.Second) || (holdTimeout != 2*time.Minute) || (assemblyTimeout != 750*time.Millisecond) || (snaplen != 1500) || !logger.Slog().Enabled(state.Context(), slog.LevelDebug-4) || (uiTarget != ui.Target{Network: ui.TCPNetwork, Address: "127.0.0.1:8080"}) || (mcpTarget != ui.Target{Network: ui.UnixNetwork, Address: "@decerter-api"}) {
+		state.Errorf("Test of the flag parsers failed, filter %v, port %d, timeout %s, hold timeout %s, assembly timeout %s, snaplen %d, ui api %s, mcp api %s", scopeFilter, proxyPort, udpIdleTimeout, holdTimeout, assemblyTimeout, snaplen, uiTarget, mcpTarget)
 		return
 	}
 }
@@ -111,6 +112,9 @@ func TestExecuteNegative(state *testing.T) {
 		{Args: []string{"run", "--uid", "1001", "--hold-timeout", "0s"}, Text: `invalid hold timeout "0s": must be positive and at most 1h0m0s`},
 		{Args: []string{"run", "--uid", "1001", "--hold-timeout", "2h"}, Text: `invalid hold timeout "2h": must be positive and at most 1h0m0s`},
 		{Args: []string{"run", "--uid", "1001", "--hold-timeout", "later"}, Text: `invalid hold timeout "later"`},
+		{Args: []string{"run", "--uid", "1001", "--assembly-timeout", "0s"}, Text: `invalid assembly timeout "0s": must be positive and at most 1h0m0s`},
+		{Args: []string{"run", "--uid", "1001", "--assembly-timeout", "61m"}, Text: `invalid assembly timeout "61m": must be positive and at most 1h0m0s`},
+		{Args: []string{"run", "--uid", "1001", "--assembly-timeout", "soon"}, Text: `invalid assembly timeout "soon"`},
 		{Args: []string{"capture", "-w", "out.pcapng", "--uid", "1001", "--snaplen", "262145"}, Text: `invalid snaplen "262145": must be between 1 and 262144`},
 		// the parse error shows where in the filter it is, the way tshark does
 		{Args: []string{"run", "--filter", `proc.comm = "curl"`}, Text: "invalid filter: column 11: syntax error: unexpected \"=\", equality is ==\nproc.comm = \"curl\"\n          ^"},
@@ -160,7 +164,7 @@ func TestExecutePositive(state *testing.T) {
 	}{
 		{Args: []string{"--version"}, Text: []string{"decerter ", "(commit "}},
 		{Args: []string{"help", "filter"}, Text: []string{"subset of Wireshark's display filter language", "  proc.comm           string, flow, comm_map\n", "  tls.alpn            string, several values, clienthello\n", "  http.request.method string, several values, http\n", "--filter and the filter of a capture refuse them"}},
-		{Args: []string{"run", "--help"}, Text: []string{"--decrypt", "--udp-idle-timeout duration", "--api-socket path", "--hold-timeout duration", "--log-level level"}},
+		{Args: []string{"run", "--help"}, Text: []string{"--decrypt", "--udp-idle-timeout duration", "--api-socket path", "--hold-timeout duration", "--assembly-timeout duration", "--log-level level"}},
 		{Args: []string{"capture", "--help"}, Text: []string{"-w, --write file", "--snaplen bytes", "--package name"}},
 		{Args: []string{"android", "--help"}, Text: []string{"setup", "restore", "adb forward tcp:8080 localabstract:decerter-api", "/data/local/tmp/decerter.d"}},
 		{Args: []string{"android", "tls", "--help"}, Text: []string{"--package name", "libflutter.so", "make generate-flutter-offsets"}},
@@ -244,6 +248,7 @@ func resetState(state *testing.T) {
 	interceptFlows = false
 	apiSocket = ""
 	holdTimeout = defaultHoldTimeout
+	assemblyTimeout = defaultAssemblyTimeout
 	proxyPort = defaultProxyPort
 	udpIdleTimeout = 30 * time.Second
 	capturePath = ""

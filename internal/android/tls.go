@@ -12,6 +12,7 @@ import (
 // what decerter hooks for the TLS of one installed package, on the device: a Flutter app's libflutter.so with the offsets of its Dart version, the Chromium
 // libraries (Chrome, Trichrome, WebView, Cronet) of its install directories and of the Trichrome library it uses with the offsets of their version, or
 // nothing of its own (Java apps use Conscrypt); one line per install directory and library, isKnown is false when a library can't be hooked
+// a Chromium app gets one more line, ending in ChromiumQUICLine: it prefers QUIC, decerter android setup adds --block-quic for it
 func DescribeTLS(selected Package, packages []Package, appDirectory string, architecture string) (lines []string, isKnown bool, err error) {
 	name := selected.Name
 	directories, err := FindInstallDirectories(appDirectory, name)
@@ -32,8 +33,11 @@ func DescribeTLS(selected Package, packages []Package, appDirectory string, arch
 		lines = append(lines, fmt.Sprintf("%s: no install directory in %s, a system app; Java TLS goes through Conscrypt, a Chromium library its processes map (its Cronet, Cronet of Play services, WebView) is looked for while decerter runs", name, appDirectory))
 		isKnown = isTrichromeKnown
 		lines = append(lines, trichromeLines...)
+		lines = appendQUICLine(lines, name, len(trichromeLines) > 0)
 		return
 	}
+
+	isChromium := len(trichromeLines) > 0
 
 	for _, directory := range directories {
 		file, found, findErr := boringssl.FindFlutterLibrary(directory, architecture)
@@ -51,6 +55,7 @@ func DescribeTLS(selected Package, packages []Package, appDirectory string, arch
 			}
 
 			isKnown = isKnown && isChromiumKnown
+			isChromium = isChromium || (len(chromiumLines) > 0)
 
 			// Chrome's own directory has no library when its Trichrome library has it
 			if (len(chromiumLines) == 0) && (len(trichromeLines) == 0) {
@@ -75,6 +80,30 @@ func DescribeTLS(selected Package, packages []Package, appDirectory string, arch
 
 	isKnown = isKnown && isTrichromeKnown
 	lines = append(lines, trichromeLines...)
+	lines = appendQUICLine(lines, name, isChromium)
+	return
+}
+
+// the line that says a Chromium app wants --block-quic, a library of Chrome, WebView or Cronet was found for it, hooked or not
+func appendQUICLine(lines []string, name string, isChromium bool) (withQUIC []string) {
+	withQUIC = lines
+
+	if isChromium {
+		withQUIC = append(withQUIC, name+": "+ChromiumQUICLine)
+	}
+
+	return
+}
+
+// whether the lines of decerter android tls say that the app is a Chromium app
+func IsChromiumApp(lines []string) (isChromium bool) {
+	for _, line := range lines {
+		if strings.HasSuffix(strings.TrimSpace(line), ChromiumQUICLine) {
+			isChromium = true
+			return
+		}
+	}
+
 	return
 }
 

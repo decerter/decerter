@@ -29,7 +29,7 @@ own BoringSSL when decerter knows the Chrome version.
 Without setup, the same by hand:
   adb root
   adb push decerter /data/local/tmp/decerter                  # decerter-arm64 for an arm64 device
-  adb shell /data/local/tmp/decerter run --intercept --api-socket @decerter-api --package com.example.app
+  adb shell -tt /data/local/tmp/decerter run --intercept --api-socket @decerter-api --package com.example.app
   adb forward tcp:8080 localabstract:decerter-api
   decerter ui --api-socket 127.0.0.1:8080`,
 		Args: cobra.NoArgs,
@@ -39,7 +39,8 @@ Without setup, the same by hand:
 		Short: "Push decerter to an Android device or emulator, forward its API and print the commands to run",
 		Long: `Run on the Linux host as your user, not as root: adb and the emulator belong to your user.
 
-setup finds adb (ADB, then ANDROID_HOME, ANDROID_SDK_ROOT, PATH, ~/Android/Sdk) and picks the one device adb sees,
+setup finds adb (ADB, then the platform-tools of ANDROID_HOME, ANDROID_SDK_ROOT and ~/Android/Sdk, then PATH: the
+emulator starts its SDK's adb, and two adb versions restart each other's server) and picks the one device adb sees,
 the one --serial names, or the emulator of --avd, which it boots without a window when it doesn't run. It reads the
 device's ABI, Android release and kernel and refuses Android before 15 and kernels before android15-6.6 with the reason.
 It makes adbd root with adb root; a Google Play image is a production build where adbd can't be root, a Google APIs
@@ -50,12 +51,17 @@ It pushes the static decerter binary for the device's ABI to /data/local/tmp/dec
 decerter-arm64 next to it (make build-arm64) for an arm64 device, or the one --binary names. It checks that decerter has
 Conscrypt offsets for the Android release, without them TLS is relayed but not decrypted. --package is looked up on
 the device the way decerter run --package does it, and decerter android tls on the device says whether it is a Flutter or
-Chromium app and whether decerter knows the offsets of its version. Then it forwards a host port to the control API's abstract socket
-@decerter-api (adb forward tcp:<port> localabstract:decerter-api), keeping the forward an earlier setup made, and prints two
-commands: decerter run on the device with --package, and decerter ui on the host.
+Chromium app and whether decerter knows the offsets of its version. A Chromium app (Chrome, WebView, an app with Cronet)
+gets --block-quic in the printed command, so it uses TLS over TCP instead of QUIC; for Chrome itself setup writes
+/data/local/tmp/chrome-command-line without the first-run screens, unless a file of your own is there, and keeps a copy
+in the data directory. Then it forwards a host port to the control API's abstract socket @decerter-api (adb forward
+tcp:<port> localabstract:decerter-api), keeping the forward an earlier setup made, and prints two commands: decerter run on the
+device with --package through adb shell -tt, so Ctrl-C reaches decerter and decerter stops when the adb client goes away, and
+decerter ui on the host.
 
---remove undoes it: it is refused while decerter runs on the device, puts back netd's hooks a killed decerter left shared, and
-removes the binary, the data directory /data/local/tmp/decerter.d and the forwards to @decerter-api.`,
+--remove undoes it: it is refused while decerter runs on the device, puts back netd's hooks a killed decerter left shared,
+deletes /data/local/tmp/chrome-command-line when it is still the one setup wrote, and removes the binary, the data
+directory /data/local/tmp/decerter.d and the forwards to @decerter-api.`,
 		Example: `  # the running emulator, the app to look at
   decerter android setup --package com.example.app
 
@@ -88,8 +94,9 @@ too. A library may be extracted (lib/<isa>/ of the install directory) or stored 
 Play services lives in a module directory of com.google.android.gms; decerter run finds it in the processes' mappings.
 A library with an unknown version, or one decerter can't read (a 32 bit one too), makes the command fail after printing;
 decerter run relays such an app's TLS without decrypting it. make generate-flutter-offsets FLUTTER_VERSIONS=<release>
-adds a Flutter release to the table, make generate-chrome-offsets CHROME_VERSIONS="branches <version>" a Chromium
-version. decerter android setup --package runs this for its package.`,
+adds a Flutter release to the table, make generate-chrome-offsets the newest Chrome release branches, and
+CHROME_BUILDS a Chromium build of no release branch. A Chromium app's last line says that it prefers QUIC.
+decerter android setup --package runs this for its package.`,
 		Example: `  adb shell /data/local/tmp/decerter android tls --package com.example.app`,
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
@@ -129,7 +136,7 @@ func init() {
 	androidSetupCmd.Flags().StringVar(&setupOptions.Package, "package", "", "check that the app with this package `name` is installed and put it into the printed command (default is none, the command has PACKAGE in its place)")
 	androidSetupCmd.Flags().StringVar(&setupOptions.Binary, "binary", "", "push the static decerter binary at this `path` (default is this binary for x86_64, decerter-arm64 next to it for arm64)")
 	androidSetupCmd.Flags().Func("port", "forward this host `port` to the control API on the device (default is the port of an existing forward, or one adb picks)", parseSetupPort)
-	androidSetupCmd.Flags().BoolVar(&setupRemove, "remove", false, "remove the binary, its data directory and the forward from the device instead (default is false)")
+	androidSetupCmd.Flags().BoolVar(&setupRemove, "remove", false, "remove the binary, its data directory, the forward and the Chrome flags file setup wrote from the device instead (default is false)")
 	androidSetupCmd.MarkFlagsMutuallyExclusive("serial", "avd")
 
 	for _, flag := range []string{"avd", "package", "binary", "port"} {

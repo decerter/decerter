@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/netip"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,6 +21,7 @@ import (
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/platform"
+	"github.com/decerter/decerter/internal/tls/openssl"
 )
 
 // Test if app.kernelSelection returns with the expected output: the flags narrowed by the kernel terms of the filter, and the filter as scope when the kernel can't decide all of it.
@@ -171,6 +173,71 @@ func TestCloseTogetherPositive(state *testing.T) {
 	}
 }
 
+// Test if app.checkUnknownOpenssl returns with the expected output: an OpenSSL of the linker cache without offsets is a warning naming the nearest
+// known version and the make command while another library is hooked, and nothing to warn about is no warning.
+func TestCheckUnknownOpensslPositive(state *testing.T) {
+	logs := &bytes.Buffer{}
+	app, err := newTestApp(state.Context(), redirect.Filter{UIDs: []uint32{1001}}, "", logs)
+
+	if err != nil {
+		state.Fatalf("Test of app.checkUnknownOpenssl failed, error: %s", err.Error())
+	}
+
+	known := openssl.Library{Libssl: "/usr/lib64/libssl.so.3", Libcrypto: "/usr/lib64/libcrypto.so.3", Version: "3.5.9", Offset: openssl.Offset{}}
+	unknown := unknownOpenssl{Library: openssl.Library{Libssl: "/usr/lib64/libssl.so.4", Libcrypto: "/usr/lib64/libcrypto.so.4", Version: "4.9.0", Offset: openssl.Offset{}}, Err: nil}
+	_, unknown.Err = openssl.GetOffset(unknown.Library.Version, runtime.GOARCH)
+	positiveCases := []struct {
+		Name     string
+		Hooks    []opensslHook
+		Unknown  []unknownOpenssl
+		Expected []string
+	}{
+		{Name: "a known library of the linker cache", Hooks: []opensslHook{{Library: known, Pid: 0, Process: ""}}, Unknown: []unknownOpenssl{unknown}, Expected: []string{"level=WARN", "libssl.so.4", "4.9.0", "the nearest known version is ", "make generate-openssl-offsets"}},
+		{Name: "a library a selected process maps", Hooks: []opensslHook{{Library: known, Pid: 42, Process: "curl"}}, Unknown: []unknownOpenssl{unknown}, Expected: []string{"level=WARN", "libssl.so.4"}},
+		{Name: "every library known", Hooks: []opensslHook{{Library: known, Pid: 0, Process: ""}}, Unknown: nil, Expected: nil},
+	}
+
+	for _, positive := range positiveCases {
+		logs.Reset()
+		err = app.checkUnknownOpenssl(positive.Hooks, positive.Unknown)
+
+		if (err != nil) || (unknown.Err == nil) || ((positive.Expected == nil) && (logs.Len() != 0)) || !containsAll(logs.String(), positive.Expected) || strings.Contains(logs.String(), "level=ERROR") {
+			state.Errorf("Test of app.checkUnknownOpenssl function failed, case %q, should warn with %q and go on, logs: %q, error: %v", positive.Name, positive.Expected, logs.String(), err)
+			return
+		}
+	}
+}
+
+// Test if app.checkUnknownOpenssl returns with the expected errors: without any library decerter can hook, the unknown version fails.
+func TestCheckUnknownOpensslNegative(state *testing.T) {
+	logs := &bytes.Buffer{}
+	app, err := newTestApp(state.Context(), redirect.Filter{UIDs: []uint32{1001}}, "", logs)
+
+	if err != nil {
+		state.Fatalf("Test of app.checkUnknownOpenssl failed, error: %s", err.Error())
+	}
+
+	_, unknownErr := openssl.GetOffset("9.0.0", runtime.GOARCH)
+	unknown := []unknownOpenssl{{Library: openssl.Library{Libssl: "/usr/lib/libssl.so.9", Libcrypto: "/usr/lib/libcrypto.so.9", Version: "9.0.0", Offset: openssl.Offset{}}, Err: unknownErr}}
+	err = app.checkUnknownOpenssl(nil, unknown)
+
+	if !errors.Is(err, openssl.ErrUnknownVersion) || !strings.Contains(err.Error(), "make generate-openssl-offsets") || !strings.Contains(logs.String(), "level=ERROR") {
+		state.Errorf("Test of app.checkUnknownOpenssl function failed, error should be %v naming the make command, logs: %q, error: %v", openssl.ErrUnknownVersion, logs.String(), err)
+		return
+	}
+}
+
+// every text is in text
+func containsAll(text string, texts []string) (isAll bool) {
+	isAll = true
+
+	for _, part := range texts {
+		isAll = isAll && strings.Contains(text, part)
+	}
+
+	return
+}
+
 // an app of run mode on Linux with the flags and the filter, an empty filter is none; its logs go to output
 func newTestApp(ctx context.Context, flags redirect.Filter, filterText string, output *bytes.Buffer) (app App, err error) {
 	var scopeFilter *filter.Filter
@@ -186,7 +253,7 @@ func newTestApp(ctx context.Context, flags redirect.Filter, filterText string, o
 	}
 
 	logger := slog.New(slog.NewTextHandler(output, nil))
-	app = New(ctx, flags, scopeFilter, 15001, 30*time.Second, false, false, false, false, nil, "", time.Minute, "", false, "", false, 0, platform.Platform{Type: platform.LinuxType}, logger)
+	app = New(ctx, flags, scopeFilter, 15001, 30*time.Second, false, false, false, false, nil, "", time.Minute, 5*time.Second, "", false, "", false, 0, platform.Platform{Type: platform.LinuxType}, logger)
 	return
 }
 

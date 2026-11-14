@@ -21,8 +21,9 @@ import (
 
 // the libssl files decerter hooks: the --libssl given, nothing else then; otherwise libssl.so.3 and libssl.so.4 of the linker cache, both when the host has
 // both, and the libssl.so.N (N 3 or newer) the selected processes map, so a process gets the library it actually loads, also a container's own
-// a library of the linker cache or --libssl with an unknown version fails before anything is attached; one only a process maps is logged with the
-// nearest known version and that process is relayed without secrets; seen holds the device and inode of every library looked at, for the rescan
+// --libssl with an unknown version fails before anything is attached; a library of the linker cache with an unknown version is a warning naming the
+// nearest known version while another library is hooked, and fails when none is; one only a process maps is logged with the nearest known version and
+// that process is relayed without secrets; seen holds the device and inode of every library looked at, for the rescan
 func (app *App) findOpensslHooks() (hooks []opensslHook, seen map[string]bool, err error) {
 	seen = map[string]bool{}
 	libraries, findErr := openssl.FindLibssl(app.libssl)
@@ -34,12 +35,22 @@ func (app *App) findOpensslHooks() (hooks []opensslHook, seen map[string]bool, e
 		return
 	}
 
+	unknown := []unknownOpenssl{}
+
 	for _, library := range libraries {
 		inspected, inspectErr := openssl.Inspect(library, runtime.GOARCH)
 
-		if err = inspectErr; err != nil {
-			app.logger.Error("Could not get OpenSSL offsets", "error", err, "libssl", library.Libssl, "libcrypto", library.Libcrypto, "version", inspected.Version)
-			return
+		if inspectErr != nil {
+			if app.libssl != "" {
+				err = inspectErr
+				app.logger.Error("Could not get OpenSSL offsets", "error", err, "libssl", library.Libssl, "libcrypto", library.Libcrypto, "version", inspected.Version)
+				return
+			}
+
+			// the rescan doesn't look at it again for a process that maps it
+			seen[libraryKey(inspected.Libssl)] = true
+			unknown = append(unknown, unknownOpenssl{Library: inspected, Err: inspectErr})
+			continue
 		}
 
 		seen[libraryKey(inspected.Libssl)] = true
@@ -52,10 +63,41 @@ func (app *App) findOpensslHooks() (hooks []opensslHook, seen map[string]bool, e
 
 	hooks = append(hooks, app.findMappedOpenssl(seen)...)
 
-	if len(hooks) == 0 {
+	// no OpenSSL on the host and no selected process that maps one
+	if (len(hooks) == 0) && (len(unknown) == 0) {
 		err = findErr
 		app.logger.Error("Could not find libssl", "error", err)
 		return
+	}
+
+	err = app.checkUnknownOpenssl(hooks, unknown)
+	return
+}
+
+// the libraries of the linker cache decerter has no offsets for: a warning each while another library is hooked, the error of the first one when none is,
+// so decerter never runs without any OpenSSL hook
+func (app *App) checkUnknownOpenssl(hooks []opensslHook, unknown []unknownOpenssl) (err error) {
+	if len(hooks) == 0 {
+		err = unknownOpensslError(unknown)
+
+		if err != nil {
+			app.logger.Error("Could not get OpenSSL offsets", "error", err, "libssl", unknown[0].Library.Libssl, "libcrypto", unknown[0].Library.Libcrypto, "version", unknown[0].Library.Version)
+		}
+
+		return
+	}
+
+	for _, library := range unknown {
+		app.logger.Warn("Could not get OpenSSL offsets of a library of the linker cache, the processes that load it are relayed without secrets; the other OpenSSL libraries are hooked", "error", library.Err, "libssl", library.Library.Libssl, "libcrypto", library.Library.Libcrypto, "version", library.Library.Version)
+	}
+
+	return
+}
+
+// the error of the first library decerter has no offsets for, nil without one
+func unknownOpensslError(unknown []unknownOpenssl) (err error) {
+	if len(unknown) > 0 {
+		err = unknown[0].Err
 	}
 
 	return

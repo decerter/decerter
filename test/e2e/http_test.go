@@ -214,8 +214,9 @@ func TestHTTPHoldPositive(state *testing.T) {
 	}
 }
 
-// Test if the HTTP layer returns with the expected errors: a held request nobody decides goes on unchanged after the hold timeout, a capture filter on an http field is refused,
-// and a message larger than the body limit goes on as it came with a note.
+// Test if the HTTP layer returns with the expected errors: a held request nobody decides goes on unchanged after the hold timeout, a request with
+// Expect: 100-continue that is not whole goes on as it came after the assembly timeout, a capture filter on an http field is refused, and a message
+// larger than the body limit goes on as it came with a note.
 func TestHTTPNegative(state *testing.T) {
 	client := startAPIDecerter(state, InterceptDecerterMode, []intercept.Rule{intercept.IdentityRule{}})
 	status, err := client.call(state.Context(), http.MethodPut, "/intercept", v1.InterceptRequest{Enabled: true, Filter: `http.request.uri == "/echo"`, Direction: v1.UpDirection, Layer: v1.HTTPLayer}, nil)
@@ -236,12 +237,25 @@ func TestHTTPNegative(state *testing.T) {
 		return
 	}
 
+	// Expect: 100-continue: curl sends the body only after the server's 100, and the server only sees the kept head after the assembly timeout, well
+	// before the hold timeout and curl's own expect timeout
+	start = time.Now()
+	output, err = runCurl(state.Context(), testUser, append(curlArguments(testCase, server.URL+"echo"), "-H", "Expect: 100-continue", "--expect100-timeout", "15", "--data-binary", "slow"))
+	request, receivedErr = server.received()
+	elapsed := time.Since(start)
+	_, exchanges, exchangesErr := flowExchanges(state, client, server, 1)
+
+	if err = errors.Join(err, receivedErr, exchangesErr); (err != nil) || (output != "len=4 body=slow") || (request.ContentLength != 4) || (elapsed < apiAssemblyTimeout) || (elapsed >= apiHoldTimeout) || !strings.Contains(exchanges[0].Request.Note, "not whole after "+apiAssemblyTimeout.String()) {
+		state.Errorf("Test of the http layer failed, a request that is not whole should go on as it came after the assembly timeout %s, curl: %q after %s, exchanges: %+v, error: %v", apiAssemblyTimeout, output, elapsed, exchanges, err)
+		return
+	}
+
 	// 2 MiB: over the limit of a whole message, the record layer takes it as it came
 	large := strings.Repeat("x", 2<<20)
 	arguments := append([]string{"-q", "--silent", "--show-error", "--max-time", curlMaxTime, "-H", "Expect:", "--data-binary", "@-"}, curlArguments(testCase, server.URL+"echo")...)
 	output, err = runAsUser(state.Context(), testUser, large, curlPath, arguments...)
 	request, receivedErr = server.received()
-	_, exchanges, exchangesErr := flowExchanges(state, client, server, 1)
+	_, exchanges, exchangesErr = flowExchanges(state, client, server, 1)
 
 	if err = errors.Join(err, receivedErr, exchangesErr); (err != nil) || (output != "len=2097152 body="+large) || (len(request.Body) != len(large)) || !strings.Contains(exchanges[0].Request.Note, "larger than") || exchanges[0].Request.Edited {
 		state.Errorf("Test of the http layer failed, a large request should go on with a note, curl: %d bytes, exchanges: %+v, error: %v", len(output), exchanges, err)

@@ -14,18 +14,22 @@ import (
 const (
 	defaultProxyPort   uint16        = 15001
 	defaultHoldTimeout time.Duration = 60 * time.Second
+	// a message kept back for the rules of layer http blocks its direction of the flow while it comes, a client that waits for an answer to part of it
+	// (Expect: 100-continue) waits this long
+	defaultAssemblyTimeout time.Duration = 5 * time.Second
 	// a held message blocks its direction of the flow, so a hold is never longer than this
 	maxHoldTimeout time.Duration = time.Hour
 )
 
 var (
-	proxyPort      uint16        = defaultProxyPort
-	udpIdleTimeout time.Duration = 30 * time.Second
-	holdTimeout    time.Duration = defaultHoldTimeout
-	decrypt        bool
-	interceptFlows bool
-	apiSocket      string
-	runCmd         = &cobra.Command{
+	proxyPort       uint16        = defaultProxyPort
+	udpIdleTimeout  time.Duration = 30 * time.Second
+	holdTimeout     time.Duration = defaultHoldTimeout
+	assemblyTimeout time.Duration = defaultAssemblyTimeout
+	decrypt         bool
+	interceptFlows  bool
+	apiSocket       string
+	runCmd          = &cobra.Command{
 		Use:   "run",
 		Short: "Redirect the selected flows through decerter's proxy, optionally decrypting or intercepting them",
 		Long: `Redirect the TCP and UDP flows of the selected processes through decerter's proxy on lo.
@@ -47,14 +51,18 @@ of the flows in scope with their decrypted or intercepted messages, a live event
 --intercept it also holds messages for editing, forwarding or dropping, and runs match-and-replace rules added over the
 API after the identity rule. A socket file gets mode 0660 and the group decerter when that group exists, and is for root only
 otherwise; an abstract socket (@name, the default on Android) lets root and, on Android, adb's shell user connect.
-A held message that nobody decides goes on unchanged after --hold-timeout.
+A held message that nobody decides goes on unchanged after --hold-timeout. A rule or hold of layer http needs whole HTTP messages:
+a message it matches is kept back from its first byte until it is whole, and goes on as it came, with a note, when it is not whole
+after --assembly-timeout.
 
 The secrets come from OpenSSL's libssl on Linux (every 3.x and 4.x release, amd64 and arm64: libssl.so.3 and libssl.so.4 of the
 linker cache and the libssl the selected processes map, so a container's own too), and on Android from Conscrypt's BoringSSL, the
 BoringSSL in libflutter.so of the selected Flutter apps (Flutter 3.24.0 to 3.50.0, by the engine's Dart version) and the BoringSSL of
 Chrome, Cronet and WebView (Chrome 124 to 160, by the Chrome version; Trichrome's library and the Chromium libraries the app's processes
 map are found too). A process with another own TLS library, such as Go programs, or a Flutter or Chromium app of an unknown version, is
-relayed without decryption. QUIC is relayed without decryption too; --block-quic makes it fail so the apps use TLS over TCP.`,
+relayed without decryption, and so is a process that loads an OpenSSL of the linker cache decerter has no offsets for, which is a warning naming
+the nearest known version while another OpenSSL is hooked (decerter stops when none is, and always for --libssl). QUIC is relayed without
+decryption too; --block-quic makes it fail so the apps use TLS over TCP.`,
 		Example: `  # the flows of the local user test (uid 1001), TLS decrypted
   sudo decerter run --uid 1001 --decrypt
   sudo -u test curl -s https://example.com/
@@ -68,11 +76,11 @@ relayed without decryption. QUIC is relayed without decryption too; --block-quic
   sudo curl --unix-socket /run/decerter/api.sock http://decerter/api/v1/flows
 
   # an Android app on the device after decerter android setup, selected by its package name
-  adb shell -t /data/local/tmp/decerter run --package com.example.app --decrypt`,
+  adb shell -tt /data/local/tmp/decerter run --package com.example.app --decrypt`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) (err error) {
 			quiet(cmd)
-			err = internal.Run(selection, packageNames, scopeFilter, proxyPort, udpIdleTimeout, blockQuic, flowTable, decrypt, interceptFlows, apiSocket, holdTimeout, libssl, &logger)
+			err = internal.Run(selection, packageNames, scopeFilter, proxyPort, udpIdleTimeout, blockQuic, flowTable, decrypt, interceptFlows, apiSocket, holdTimeout, assemblyTimeout, libssl, &logger)
 			return
 		},
 	}
@@ -89,6 +97,7 @@ func init() {
 	runCmd.Flags().Func("udp-idle-timeout", "a UDP session ends after this `duration` without a datagram in either direction (default is 30s)", parseIdleTimeout)
 	runCmd.Flags().StringVar(&apiSocket, "api-socket", "", "serve the control API on the unix socket at this `path`, @name is an abstract socket; the usual one is /run/decerter/api.sock on Linux and @decerter-api on Android (default is none)")
 	runCmd.Flags().Func("hold-timeout", "a message held over the control API goes on unchanged when nobody forwards or drops it within this `duration`, at most 1h (default is 60s)", parseHoldTimeout)
+	runCmd.Flags().Func("assembly-timeout", "an HTTP message kept back for the rules and holds of layer http goes on as it came when it is not whole within this `duration`, at most 1h (default is 5s)", parseAssemblyTimeout)
 	addBlockQuicFlag(runCmd.Flags())
 	addLibsslFlag(runCmd.Flags())
 	addFlowTableFlag(runCmd.Flags())
@@ -145,5 +154,22 @@ func parseHoldTimeout(value string) (err error) {
 	}
 
 	holdTimeout = timeout
+	return
+}
+
+func parseAssemblyTimeout(value string) (err error) {
+	timeout, parseErr := time.ParseDuration(value)
+
+	if err = parseErr; err != nil {
+		err = fmt.Errorf("invalid assembly timeout %q: %w", value, err)
+		return
+	}
+
+	if (timeout <= 0) || (timeout > maxHoldTimeout) {
+		err = fmt.Errorf("invalid assembly timeout %q: must be positive and at most %s", value, maxHoldTimeout)
+		return
+	}
+
+	assemblyTimeout = timeout
 	return
 }

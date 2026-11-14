@@ -337,11 +337,13 @@ func TestCheckPositive(state *testing.T) {
 	}
 }
 
-// Test if Check returns with an error that says what to do for a missing socket, a socket the user may not open, an abstract socket nobody listens on, a closed port and a server that refuses the user.
+// Test if Check returns with an error that says what to do for a missing socket, a socket the user may not open, an abstract socket nobody listens on, a closed port, a server that refuses the user
+// and a tcp address that accepts and closes at once like adb forward without decerter on the device.
 func TestCheckNegative(state *testing.T) {
 	directory := state.TempDir()
 	missing := filepath.Join(directory, "missing.sock")
-	refusing := startRefusingServer(state)
+	refusing := startRefusingServer(state, UnixNetwork)
+	forwarded := startRefusingServer(state, TCPNetwork)
 	negativeCases := []struct {
 		Target   Target
 		Expected error
@@ -350,6 +352,7 @@ func TestCheckNegative(state *testing.T) {
 		{Target: Target{Network: UnixNetwork, Address: fmt.Sprintf("@decerter-ui-test-%d", os.Getpid())}, Expected: ErrNoServer},
 		{Target: Target{Network: TCPNetwork, Address: closedPort(state)}, Expected: ErrNoServer},
 		{Target: refusing, Expected: ErrRefused},
+		{Target: forwarded, Expected: ErrNotListening},
 	}
 
 	// root opens every socket file
@@ -390,6 +393,13 @@ func TestCheckNegative(state *testing.T) {
 
 	if (err == nil) || !strings.Contains(err.Error(), "decerter run --api-socket") {
 		state.Errorf("Test of Check failed, the error should say how to start decerter, error: %v", err)
+		return
+	}
+
+	_, err = Check(state.Context(), forwarded)
+
+	if (err == nil) || !strings.Contains(err.Error(), "nothing is listening") || strings.Contains(err.Error(), "does not let this user in") {
+		state.Errorf("Test of Check failed, an adb forward without decerter on the device should say that nothing listens yet, error: %v", err)
 		return
 	}
 
@@ -750,9 +760,15 @@ func (api *fakeAPI) seen() (requests []*http.Request) {
 }
 
 // a socket that closes every connection at once, the way the api refuses a peer of an abstract socket
-func startRefusingServer(state *testing.T) (target Target) {
+func startRefusingServer(state *testing.T, network Network) (target Target) {
 	name := fmt.Sprintf("@decerter-ui-refuse-%d", os.Getpid())
-	listener, err := net.Listen("unix", name)
+
+	// adb forward on the host while nothing listens on the device
+	if network == TCPNetwork {
+		name = "127.0.0.1:0"
+	}
+
+	listener, err := net.Listen(string(network), name)
 
 	if err != nil {
 		state.Fatalf("Could not listen on %s, error: %s", name, err.Error())
@@ -779,7 +795,7 @@ func startRefusingServer(state *testing.T) (target Target) {
 		}
 	}()
 
-	target = Target{Network: UnixNetwork, Address: name}
+	target = Target{Network: network, Address: listener.Addr().String()}
 	return
 }
 

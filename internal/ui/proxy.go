@@ -161,6 +161,9 @@ func Explain(err error, target Target) (explained error) {
 		explained = fmt.Errorf("%w: %s: %w", ErrNoSocket, target, err)
 	case errors.Is(err, syscall.ECONNREFUSED):
 		explained = fmt.Errorf("%w: %s: %w", ErrNoServer, target, err)
+	// adb forward accepts on the host and closes when nothing listens on the device's socket; a unix socket closes on a peer it refuses
+	case (target.Network == TCPNetwork) && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)):
+		explained = fmt.Errorf("%w: %s: %w", ErrNotListening, target, err)
 	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF), errors.Is(err, syscall.ECONNRESET), errors.Is(err, syscall.EPIPE):
 		explained = fmt.Errorf("%w: %s: %w", ErrRefused, target, err)
 	default:

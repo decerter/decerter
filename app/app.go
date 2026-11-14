@@ -71,6 +71,7 @@ type App struct {
 	rules               []intercept.Rule
 	apiSocket           string
 	holdTimeout         time.Duration
+	assemblyTimeout     time.Duration
 	apiServer           *api.Server
 	backend             *api.Backend
 	startTime           time.Time
@@ -103,13 +104,14 @@ type App struct {
 // decrypt is the --decrypt option of run mode: the proxy decrypts the TLS flows with the secrets of the uprobe and prints their plaintext
 // rules make the proxy intercept every flow instead of observing it: TLS records are decrypted, run through the rules, printed and sealed again, plain tcp and udp go through them too; empty intercepts nothing
 // apiSocket serves the control API on this unix socket path, @name is an abstract socket, empty serves none; in run mode with rules the API adds its own rules and the hold queue after them, holdTimeout is how long a held message waits for a decision
+// assemblyTimeout is how long a message kept back for the rules of layer http may take to come whole before it goes on as it came
 // libssl overrides the resolved libssl path, empty means search the standard directories
 // isCapture is the capture command: nothing is redirected, the packets of the selected flows and the secrets of their TLS sessions are written to the pcapng file at capturePath, empty writes none, and to the captures and streams of the API; at most snaplen bytes of a packet
 // plaintext is the --plaintext option of capture mode: the file gets synthesized packets with the decrypted payload instead of the captured packets and the secrets
 // currentPlatform decides where the netd hook state is kept and whether hooks held exclusively by another program may be shared, only on Android
 // blockQuic is --block-quic of run and capture mode: UDP connects and sends of the selected processes to port 443 fail, so QUIC falls back to TLS over TCP
 // flags is the kernel selection of --uid, --pid, --dst-cidr and --dst-port; scopeFilter the --filter, which narrows it: its kernel terms are added to the maps, the proxy and the capture writer decide the rest per flow; nil is no filter
-func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter, proxyPort uint16, udpIdleTimeout time.Duration, blockQuic bool, flowTable bool, keylog bool, decrypt bool, rules []intercept.Rule, apiSocket string, holdTimeout time.Duration, libssl string, isCapture bool, capturePath string, plaintext bool, snaplen uint32, currentPlatform platform.Platform, logger *slog.Logger) (app App) {
+func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter, proxyPort uint16, udpIdleTimeout time.Duration, blockQuic bool, flowTable bool, keylog bool, decrypt bool, rules []intercept.Rule, apiSocket string, holdTimeout time.Duration, assemblyTimeout time.Duration, libssl string, isCapture bool, capturePath string, plaintext bool, snaplen uint32, currentPlatform platform.Platform, logger *slog.Logger) (app App) {
 	appCtx, cancel := context.WithCancel(ctx)
 	app = App{
 		ctx:                 appCtx,
@@ -128,6 +130,7 @@ func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter,
 		rules:               rules,
 		apiSocket:           apiSocket,
 		holdTimeout:         holdTimeout,
+		assemblyTimeout:     assemblyTimeout,
 		apiServer:           nil,
 		backend:             nil,
 		startTime:           time.Now(),
@@ -409,7 +412,7 @@ func (app *App) StartProxy() (err error) {
 	var httpLayer *proxy.HTTPLayer
 
 	if recorder != nil {
-		httpLayer = &proxy.HTTPLayer{Pipeline: nil, Timeout: app.holdTimeout}
+		httpLayer = &proxy.HTTPLayer{Pipeline: nil, Timeout: app.assemblyTimeout}
 
 		if pipeline != nil {
 			httpLayer.Pipeline = pipeline.Derive([]intercept.Rule{app.backend.Rules, app.backend.Holds})

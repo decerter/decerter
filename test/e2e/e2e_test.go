@@ -48,6 +48,8 @@ const (
 	udpIdleTimeout time.Duration = 30 * time.Second
 	// a message held over the API that nobody decides goes on after this
 	apiHoldTimeout time.Duration = 3 * time.Second
+	// a message kept back for a rule or hold of layer http goes on as it came when it is not whole after this
+	apiAssemblyTimeout time.Duration = time.Second
 	// the test binary runs as decerter with its arguments when this is 1
 	decerterCommandEnvironment string = "DECERTER_E2E_COMMAND"
 )
@@ -265,7 +267,7 @@ func newBlockingDecerter(state *testing.T, mode decerterMode, capturePath string
 	}
 
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	decerter = app.New(context.Background(), flags, scopeFilter, proxyPort, udpIdleTimeout, blockQuic, false, false, mode == DecryptDecerterMode, rules, apiSocket, apiHoldTimeout, "", (mode == CaptureDecerterMode) || (mode == PlaintextDecerterMode), capturePath, mode == PlaintextDecerterMode, capturebpf.MaxSnaplen, platform.Detect("/"), logger)
+	decerter = app.New(context.Background(), flags, scopeFilter, proxyPort, udpIdleTimeout, blockQuic, false, false, mode == DecryptDecerterMode, rules, apiSocket, apiHoldTimeout, apiAssemblyTimeout, "", (mode == CaptureDecerterMode) || (mode == PlaintextDecerterMode), capturePath, mode == PlaintextDecerterMode, capturebpf.MaxSnaplen, platform.Detect("/"), logger)
 	return
 }
 

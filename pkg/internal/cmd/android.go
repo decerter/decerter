@@ -29,7 +29,7 @@ func RestoreAndroid(logger *logging.Logger) (err error) {
 		return
 	}
 
-	decerter := app.New(context.Background(), redirect.Filter{}, nil, 0, time.Duration(0), false, false, false, false, nil, "", time.Duration(0), "", false, "", false, capturebpf.MaxSnaplen, currentPlatform, logger.Slog())
+	decerter := app.New(context.Background(), redirect.Filter{}, nil, 0, time.Duration(0), false, false, false, false, nil, "", time.Duration(0), time.Duration(0), "", false, "", false, capturebpf.MaxSnaplen, currentPlatform, logger.Slog())
 
 	defer func() {
 		err = errors.Join(err, decerter.Shutdown())

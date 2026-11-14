@@ -55,7 +55,7 @@ sudo -u test curl -s https://example.com/ | grep -o '<title>.*</title>'
 curl checked the server's real certificate; decerter sealed the changed HTTP/2 response with the session's own keys. Next: hold and edit requests by hand in [`decerter ui`](docs/ui.md), let an LLM drive decerter with [`decerter mcp`](docs/mcp.md), or write a pcapng that Wireshark decrypts by itself with [`decerter capture`](docs/capture.md).
 
 ## Quickstart: Android
-On the Linux host, with the Android SDK (`adb` of platform-tools on your `PATH`, the emulator) and an AVD of the Google APIs x86_64 image of Android 15 (API 35), whose `adbd` can run as root:
+On the Linux host, with the Android SDK (platform-tools and the emulator, in `~/Android/Sdk` or `ANDROID_HOME`; setup takes the SDK's `adb` before one on `PATH`) and an AVD of the Google APIs x86_64 image of Android 15 (API 35), whose `adbd` can run as root:
 
 ```sh
 sdkmanager "platform-tools" "emulator" "system-images;android-35;google_apis;x86_64"
@@ -70,7 +70,7 @@ cd decerter_*_linux_amd64/
 ./decerter android setup --avd decerter-a15 --package com.android.chrome --port 8080
 ```
 ```
-adb      /usr/bin/adb
+adb      /home/you/Android/Sdk/platform-tools/adb
 boot     decerter-a15 as emulator-5554 without a window, its log is /tmp/decerter-emulator-2455380772.log
 device   emulator-5554, sdk_gphone64_x86_64 (emulator)
 android  15 (API level 35, userdebug build), x86_64, kernel 6.6.50-android15-8-g8adecb593e9b-ab12525588
@@ -79,33 +79,35 @@ package  com.android.chrome, uid 10145
 binary   /data/local/tmp/decerter, decerter v0.0.0-… (commit …), pushed from …/decerter_v0.0.0-…_linux_amd64/decerter
 tls      Conscrypt offsets for Android 15 on x86_64
 app      com.android.chrome: Chrome 124.0.6367.219 of com.google.android.trichromelibrary_636771938, BoringSSL offsets known, ssl_log_secret found through 7 key log labels in /data/app/…/TrichromeLibrary.apk!/lib/x86_64/libmonochrome_64.so
+app      com.android.chrome: a Chromium app, it prefers QUIC, which decerter relays without decryption; --block-quic makes it use TLS over TCP
+quic     com.android.chrome is a Chromium app, the device command gets --block-quic so it uses TLS over TCP, which decerter decrypts
+chrome   wrote /data/local/tmp/chrome-command-line: _ --disable-fre --no-default-browser-check --no-first-run; Chrome reads it when it starts, setup --remove deletes it
 api      adb forward tcp:8080 localabstract:decerter-api
 
 Start decerter on the device, Ctrl-C stops it and puts netd's hooks back:
-  adb -s emulator-5554 shell -t /data/local/tmp/decerter run --intercept --api-socket @decerter-api --package com.android.chrome
+  /home/you/Android/Sdk/platform-tools/adb -s emulator-5554 shell -tt /data/local/tmp/decerter run --intercept --api-socket @decerter-api --package com.android.chrome --block-quic
 Then the UI on this machine, in another terminal:
   ./decerter ui --api-socket 127.0.0.1:8080
 Undo the setup with: ./decerter android setup --remove --serial emulator-5554
 ```
 
-Run the printed command with `--block-quic` added: Chrome prefers QUIC where a server offers it, decerter doesn't decrypt QUIC, and `--block-quic` makes Chrome fall back to TLS over TCP.
+Run the printed command. Chrome prefers QUIC where a server offers it and decerter doesn't decrypt QUIC, so setup added `--block-quic`, which makes Chrome fall back to TLS over TCP; it also wrote Chrome's flags file without the first-run screens, which would hold the first page back.
 
 ```sh
-# terminal 2: decerter on the emulator, Ctrl-C stops it
-adb -s emulator-5554 shell -t /data/local/tmp/decerter run --intercept --api-socket @decerter-api --package com.android.chrome --block-quic
+# terminal 2: decerter on the emulator, Ctrl-C stops it, and so does closing this terminal
+~/Android/Sdk/platform-tools/adb -s emulator-5554 shell -tt /data/local/tmp/decerter run --intercept --api-socket @decerter-api --package com.android.chrome --block-quic
 ```
 ```sh
 # terminal 3: the UI on the host, open the URL it prints
 ./decerter ui --api-socket 127.0.0.1:8080
 ```
 ```sh
-# terminal 4: open a page in Chrome; its first-run screens would hold the page back, and on the emulator's debug build Chrome takes flags from this file
-adb -s emulator-5554 shell "echo '_ --disable-fre --no-default-browser-check --no-first-run' > /data/local/tmp/chrome-command-line"
+# terminal 4: open a page in Chrome
 adb -s emulator-5554 shell am start -S -W -a android.intent.action.VIEW -d https://example.com/ com.android.chrome
 curl -s 'http://127.0.0.1:8080/api/v1/flows?filter=tls.sni+contains+%22example%22'
 ```
 
-The flow list in the UI (and the curl above) shows Chrome's TLS 1.3 flows to `example.com` with their decrypted HTTP/2 exchanges; the intercept switch holds the next request for editing. When you are done, stop decerter with Ctrl-C and undo the setup:
+The flow list in the UI (and the curl above) shows Chrome's TLS 1.3 flows to `example.com` with their decrypted HTTP/2 exchanges; the intercept switch holds the next request for editing. When you are done, stop decerter with Ctrl-C and undo the setup, which also deletes the flags file it wrote:
 
 ```sh
 ./decerter android setup --remove --serial emulator-5554
@@ -234,7 +236,7 @@ sudo ./decerter keylog --uid 1001 > keys.log
 
 `run` relays (`--decrypt` prints, `--intercept` edits), [`capture`](docs/capture.md) records without redirecting, `keylog` prints secrets, [`ui`](docs/ui.md) and [`mcp`](docs/mcp.md) are clients of the [control API](docs/api.md) and run as your user, [`android`](docs/android.md) sets up a device. The examples select the user `test`, UID 1001.
 
-The proxy of `run` listens on port 15001 of `lo` (`--port`), TCP and UDP; a UDP session ends after 30 s without a datagram (`--udp-idle-timeout`). The secrets uprobe goes on the `libssl.so.3` and the `libssl.so.4` of the dynamic linker cache, both when the host has both, each with the offsets of its own version, and on every OpenSSL 3 or newer `libssl` the selected processes map (read from `/proc/<pid>/maps` at start and every 2 s and opened through `/proc/<pid>/root`), so a container's own OpenSSL is found too; with `--libssl` only the library it names (OpenSSL's `libcrypto` with the same suffix has to be next to it). An unknown version of the linker cache's or `--libssl`'s OpenSSL stops decerter before anything is attached and names the nearest known version; a library only a process maps with an unknown version is logged and that process is relayed without secrets. `--flow-table` prints the kernel's flow table every 5 s for debugging. `--log-level` sets the JSON logs on stderr, and every flag can also come from an environment variable `DECERTER_<FLAG>`.
+The proxy of `run` listens on port 15001 of `lo` (`--port`), TCP and UDP; a UDP session ends after 30 s without a datagram (`--udp-idle-timeout`). The secrets uprobe goes on the `libssl.so.3` and the `libssl.so.4` of the dynamic linker cache, both when the host has both, each with the offsets of its own version, and on every OpenSSL 3 or newer `libssl` the selected processes map (read from `/proc/<pid>/maps` at start and every 2 s and opened through `/proc/<pid>/root`), so a container's own OpenSSL is found too; with `--libssl` only the library it names (OpenSSL's `libcrypto` with the same suffix has to be next to it). An unknown version of `--libssl`'s OpenSSL stops decerter before anything is attached and names the nearest known version and `make generate-openssl-offsets`. A library of the linker cache with an unknown version is a warning with the same text while another OpenSSL is still hooked (the other soname of the linker cache, or one a selected process maps), and stops decerter when none is; the processes that load it are relayed without secrets. A library only a process maps with an unknown version is logged and that process is relayed without secrets. `--flow-table` prints the kernel's flow table every 5 s for debugging. `--log-level` sets the JSON logs on stderr, and every flag can also come from an environment variable `DECERTER_<FLAG>`.
 
 ## Known limits
 - Only outgoing flows: sockets that `connect()` or `sendmsg()` in a selected process. Accepted (server-side) sockets are not redirected or captured, and the children of a `--pid` are not followed.

@@ -10,11 +10,12 @@ import (
 	"testing"
 )
 
-// Test if the generated Chromium table is what tools/offsetgen/boringssl.sh chrome promises: every branch is MAJOR.0.BUILD with ranges in patch
-// order that don't overlap, every revision has offsets for both architectures in exactly one group, the image's Chrome and Cronet builds and at
-// least 12 milestones are in it.
+// Test if the generated Chromium tables are what tools/offsetgen/boringssl.sh chrome promises: every branch of the milestone table is MAJOR.0.BUILD
+// with ranges in patch order that don't overlap, one branch per milestone, every revision has offsets for both architectures in exactly one group,
+// the image's Chrome and at least 12 milestones are in the milestone table, and the explicit builds (the image's Cronet, the e2e snapshot) are in
+// their own list and not in the milestone table.
 func TestChromiumTablePositive(state *testing.T) {
-	milestones := map[string]bool{}
+	milestones := map[string]string{}
 
 	for branch, ranges := range chromiumBranches {
 		parts := strings.Split(branch, ".")
@@ -24,7 +25,11 @@ func TestChromiumTablePositive(state *testing.T) {
 			continue
 		}
 
-		milestones[parts[0]] = true
+		if other, found := milestones[parts[0]]; found {
+			state.Errorf("Test of the Chromium table failed, milestone %s should have one release branch, branches: %s and %s", parts[0], other, branch)
+		}
+
+		milestones[parts[0]] = branch
 
 		for index, current := range ranges {
 			if (current.First > current.Last) || ((index > 0) && (current.First <= ranges[index-1].Last)) {
@@ -53,15 +58,26 @@ func TestChromiumTablePositive(state *testing.T) {
 		state.Errorf("Test of the Chromium table failed, it should cover at least 12 milestones, milestones: %d", len(milestones))
 	}
 
-	for _, version := range []string{"124.0.6367.219", "122.0.6238.4", "125.0.6383.0", "126.0.6452.4", "127.0.6493.0", "160.0.8161.0"} {
-		branch, patch, err := splitChromiumVersion(version)
-		found := slices.ContainsFunc(chromiumBranches[branch], func(current chromiumRange) (isIn bool) {
-			isIn = (patch >= current.First) && (patch <= current.Last)
+	branch, patch, err := splitChromiumVersion("124.0.6367.219")
+	found := slices.ContainsFunc(chromiumBranches[branch], func(current chromiumRange) (isIn bool) {
+		isIn = (patch >= current.First) && (patch <= current.Last)
+		return
+	})
+
+	if (err != nil) || !found {
+		state.Errorf("Test of the Chromium table failed, Chrome 124.0.6367.219 of the decerter-a15 image should be in the milestone table, error: %v", err)
+	}
+
+	for _, version := range []string{"122.0.6238.4", "125.0.6383.0", "126.0.6452.4", "127.0.6493.0", "160.0.8161.0"} {
+		buildBranch, _, splitErr := splitChromiumVersion(version)
+		revision, isBuild := chromiumBuilds[version]
+		groups := slices.IndexFunc(chromiumRevisionOffsets, func(group revisionOffset) (isIn bool) {
+			isIn = slices.Contains(group.Revisions, revision)
 			return
 		})
 
-		if (err != nil) || !found {
-			state.Errorf("Test of the Chromium table failed, %s of the decerter-a15 image or the e2e snapshot should be in it, error: %v", version, err)
+		if (splitErr != nil) || !isBuild || (groups < 0) || (len(chromiumBranches[buildBranch]) != 0) {
+			state.Errorf("Test of the Chromium table failed, %s of the decerter-a15 image or the e2e snapshot should be a build with offsets, apart from the milestone table, revision: %q, branch ranges: %+v, error: %v", version, revision, chromiumBranches[buildBranch], splitErr)
 		}
 	}
 }

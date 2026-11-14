@@ -121,17 +121,18 @@ func findADB(sdk string) (adb string, err error) {
 		return
 	}
 
-	adb, err = exec.LookPath("adb")
+	// the SDK's adb first like decerter android setup: the emulator starts it, and an adb of another version restarts its server
+	adb = filepath.Join(sdk, "platform-tools", "adb")
+	_, statErr := os.Stat(adb)
 
-	if err == nil {
+	if statErr == nil {
 		return
 	}
 
-	adb = filepath.Join(sdk, "platform-tools", "adb")
-	_, err = os.Stat(adb)
+	adb, err = exec.LookPath("adb")
 
 	if err != nil {
-		err = fmt.Errorf("%w: no adb on PATH or in platform-tools: %w", errNoSDK, err)
+		err = fmt.Errorf("%w: no adb in platform-tools or on PATH: %w", errNoSDK, errors.Join(statErr, err))
 	}
 
 	return

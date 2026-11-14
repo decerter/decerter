@@ -30,8 +30,9 @@ func sdkDirectories() (environment []string, studio string) {
 	return
 }
 
-// ADB when set, then the platform-tools of ANDROID_HOME and ANDROID_SDK_ROOT, then PATH, then ~/Android/Sdk
-// the adb server of the user may come from any of them, an adb of another version restarts it
+// ADB when set, then the platform-tools of ANDROID_HOME, ANDROID_SDK_ROOT and ~/Android/Sdk, then PATH
+// the emulator starts the adb of its SDK's platform-tools, and an adb of another version (a distribution's on PATH) restarts the server of the other one,
+// so the SDK's adb comes before PATH
 func FindADB() (adb string, err error) {
 	adb = os.Getenv("ADB")
 
@@ -42,18 +43,16 @@ func FindADB() (adb string, err error) {
 	environment, studio := sdkDirectories()
 	candidates := []string{}
 
-	for _, directory := range environment {
-		candidates = append(candidates, filepath.Join(directory, "platform-tools", "adb"))
+	for _, directory := range append(environment, studio) {
+		if directory != "" {
+			candidates = append(candidates, filepath.Join(directory, "platform-tools", "adb"))
+		}
 	}
 
 	pathADB, lookErr := exec.LookPath("adb")
 
 	if lookErr == nil {
 		candidates = append(candidates, pathADB)
-	}
-
-	if studio != "" {
-		candidates = append(candidates, filepath.Join(studio, "platform-tools", "adb"))
 	}
 
 	for _, candidate := range candidates {

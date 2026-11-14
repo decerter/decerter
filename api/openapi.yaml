@@ -58,7 +58,7 @@ info:
     DATA frames without padding; decerter keeps HPACK and flow control consistent for both peers. A form that is no HTTP/2
     message lets the message go on as it came, with a note; a dropped HTTP/2 message resets its stream for both peers.
     A message is kept back from its first byte while such a rule or hold may want it; a body over 1 MiB, a message not
-    whole within the hold timeout, or (HTTP/1) a TLS alert or KeyUpdate in between lets it go on as it came, with a note
+    whole within `decerter run --assembly-timeout` (default 5 s), or (HTTP/1) a TLS alert or KeyUpdate in between lets it go on as it came, with a note
     on its exchange. A held message blocks only its own direction of its own flow, on HTTP/2 only its own stream (and the
     new streams the client opens after a held request). Rules run in this order: the rules compiled into decerter (the identity rule of
     `--intercept`), then the API rules in the order they were added, then the hold queue, so a held message shows what

@@ -46,7 +46,7 @@ func addBlockQuicFlag(flags *pflag.FlagSet) {
 }
 
 func addLibsslFlag(flags *pflag.FlagSet) {
-	flags.StringVar(&libssl, "libssl", "", "attach the secrets uprobe only to the OpenSSL 3 or 4, or BoringSSL, libssl.so at this `path`, OpenSSL's libcrypto with the same suffix (libcrypto.so.3 for libssl.so.3) has to be next to it (default is the libssl.so.3 and libssl.so.4 of the dynamic linker cache plus the libssl the selected processes map, also in a container, on Linux, Conscrypt's libssl on Android)")
+	flags.StringVar(&libssl, "libssl", "", "attach the secrets uprobe only to the OpenSSL 3 or 4, or BoringSSL, libssl.so at this `path`, OpenSSL's libcrypto with the same suffix (libcrypto.so.3 for libssl.so.3) has to be next to it; an OpenSSL version decerter has no offsets for stops decerter here, while one of the linker cache is only a warning as long as another OpenSSL is hooked (default is the libssl.so.3 and libssl.so.4 of the dynamic linker cache plus the libssl the selected processes map, also in a container, on Linux, Conscrypt's libssl on Android)")
 }
 
 func addFlowTableFlag(flags *pflag.FlagSet) {

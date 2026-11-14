@@ -30,10 +30,11 @@ BORINGSSL_RELEASES ?= 15 16 17
 # Flutter stable releases whose engine's BoringSSL gets offsets: all is every x.y.z tag from FLUTTER_MIN_VERSION on
 FLUTTER_VERSIONS ?= all
 FLUTTER_MIN_VERSION ?= 3.24.0
-# Chromium versions whose BoringSSL gets offsets: branches is the release branch of every milestone from CHROME_MIN_MILESTONE on with all its tags;
-# the Cronet builds of the decerter-a15 image (GoogleTTS, YouTube, Play services, the Google app) are trunk builds of their own, and
-# 160.0.8161.0@20d5177… is the ChromePublic snapshot the Android e2e tests install
-CHROME_VERSIONS ?= branches 122.0.6238.4 125.0.6383.0 126.0.6452.4 127.0.6493.0 160.0.8161.0@20d5177b437511f9931e078aa4d3ed2ed43cc1c0
+# the milestone table of the Chromium offsets: branches is the release branch of every milestone from CHROME_MIN_MILESTONE on with all its tags
+CHROME_VERSIONS ?= branches
+# Chromium builds of no release branch, kept apart from the milestone table, one version each: the Cronet builds of the decerter-a15 image (GoogleTTS,
+# YouTube, Play services, the Google app) are trunk builds of their own, and 160.0.8161.0@20d5177… is the ChromePublic snapshot the Android e2e tests install
+CHROME_BUILDS ?= 122.0.6238.4 125.0.6383.0 126.0.6452.4 127.0.6493.0 160.0.8161.0@20d5177b437511f9931e078aa4d3ed2ed43cc1c0
 CHROME_MIN_MILESTONE ?= 124
 # empty: the script's default ~/.cache/decerter-boringssl, one shallow checkout per BoringSSL revision
 BORINGSSL_CACHE ?=
@@ -132,9 +133,9 @@ generate-flutter-offsets: ## Generate BoringSSL offsets of the Flutter engine (d
 
 # the same finder for Chrome, WebView and Cronet; their BoringSSL revision comes from chromium/src's DEPS through gitiles, no Chromium checkout
 .PHONY: generate-chrome-offsets
-generate-chrome-offsets: ## Generate BoringSSL offsets of Chrome, WebView and Cronet for CHROME_VERSIONS (default is branches, every milestone's release branch from CHROME_MIN_MILESTONE, default 124, plus the image's Cronet and the e2e snapshot; or versions like 142.0.7444.171, version@commit for a snapshot), keyed by branch and patch, with the NDK in ANDROID_NDK; DEPS answers are cached in CHROMIUM_CACHE (default is ~/.cache/decerter-chromium/deps), BoringSSL checkouts in BORINGSSL_CACHE
+generate-chrome-offsets: ## Generate BoringSSL offsets of Chrome, WebView and Cronet for CHROME_VERSIONS (default is branches, every milestone's release branch from CHROME_MIN_MILESTONE, default 124, keyed by branch and patch) and the builds of no release branch in CHROME_BUILDS (default is the image's Cronet and the e2e snapshot; versions like 161.0.8200.3, version@commit for a snapshot), kept apart and keyed by their version, with the NDK in ANDROID_NDK; DEPS answers are cached in CHROMIUM_CACHE (default is ~/.cache/decerter-chromium/deps), BoringSSL checkouts in BORINGSSL_CACHE
 	tmp="$$(mktemp)"; \
-	ANDROID_NDK="$(ANDROID_NDK)" CHROME_MIN_MILESTONE="$(CHROME_MIN_MILESTONE)" BORINGSSL_CACHE="$(BORINGSSL_CACHE)" CHROMIUM_CACHE="$(CHROMIUM_CACHE)" ./tools/offsetgen/boringssl.sh chrome $(CHROME_VERSIONS) > "$$tmp" && gofmt -w "$$tmp" && mv "$$tmp" internal/tls/boringssl/chromium_offsets_gen.go || { rm -f "$$tmp"; exit 1; }
+	ANDROID_NDK="$(ANDROID_NDK)" CHROME_MIN_MILESTONE="$(CHROME_MIN_MILESTONE)" BORINGSSL_CACHE="$(BORINGSSL_CACHE)" CHROMIUM_CACHE="$(CHROMIUM_CACHE)" ./tools/offsetgen/boringssl.sh chrome $(CHROME_VERSIONS) $(CHROME_BUILDS) > "$$tmp" && gofmt -w "$$tmp" && mv "$$tmp" internal/tls/boringssl/chromium_offsets_gen.go || { rm -f "$$tmp"; exit 1; }
 
 .PHONY: generate
 generate: generate-vmlinux generate-bpf-objects ## Generate vmlinux.h and bpf object files

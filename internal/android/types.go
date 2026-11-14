@@ -41,6 +41,20 @@ const (
 	bootTimeout   time.Duration = 5 * time.Minute
 	pollInterval  time.Duration = 250 * time.Millisecond
 	binaryVersion string        = "--version"
+	// Chrome reads its flags from this file on a userdebug image or with the developer option for it; setup writes it for a Chrome package and keeps
+	// a copy in decerter's data directory, --remove deletes the file only while it is still equal to the copy
+	chromeCommandLine     string = "/data/local/tmp/chrome-command-line"
+	chromeCommandLineCopy string = "chrome-command-line"
+	// no first-run screens, they hold the first page back
+	chromeFlags string = "_ --disable-fre --no-default-browser-check --no-first-run"
+)
+
+// the last line decerter android tls prints for a Chromium app, setup adds --block-quic to the device command when it sees it
+const ChromiumQUICLine string = "a Chromium app, it prefers QUIC, which decerter relays without decryption; --block-quic makes it use TLS over TCP"
+
+var (
+	// the Chrome browsers that read chromeCommandLine: stable, beta, dev, canary and the ChromePublic of Chromium builds
+	chromePackages = []string{"com.android.chrome", "com.chrome.beta", "com.chrome.dev", "com.chrome.canary", "org.chromium.chrome"}
 )
 
 // one line of /data/system/packages.list: the package name, the uid of its app in user 0 and its versionCode, 0 when the line has none

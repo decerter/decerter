@@ -401,12 +401,19 @@ func manifestVersion(apkPath string) (version string, err error) {
 	return
 }
 
-// the offsets of the BoringSSL the Chromium version builds with, from the generated table: its branch MAJOR.0.BUILD and the range of patch numbers
-// that holds its PATCH; an unknown version names the nearest known branch and the make command that adds it
+// the offsets of the BoringSSL the Chromium version builds with, from the generated tables: the exact build of no release branch, or else its branch
+// MAJOR.0.BUILD in the milestone table and the range of patch numbers that holds its PATCH; an unknown version names the nearest known one and the
+// make command that adds it
 func GetChromiumOffset(version string, architecture string) (offset Offset, revision string, err error) {
 	branch, patch, parseErr := splitChromiumVersion(version)
 
 	if err = parseErr; err != nil {
+		return
+	}
+
+	if build, isBuild := chromiumBuilds[version]; isBuild {
+		offset, err = chromiumRevisionOffset(version, build, architecture)
+		revision = build
 		return
 	}
 
@@ -415,27 +422,32 @@ func GetChromiumOffset(version string, architecture string) (offset Offset, revi
 			continue
 		}
 
-		for _, group := range chromiumRevisionOffsets {
-			if !slices.Contains(group.Revisions, current.Revision) {
-				continue
-			}
-
-			var found bool
-
-			if offset, found = group.Offsets[architecture]; !found {
-				err = fmt.Errorf("%w: %s", ErrUnsupportedMachine, architecture)
-				return
-			}
-
-			revision = current.Revision
-			return
-		}
-
-		err = fmt.Errorf("%w: Chromium %s has BoringSSL %s without offsets in the table", ErrUnknownChromiumVersion, version, current.Revision)
+		offset, err = chromiumRevisionOffset(version, current.Revision, architecture)
+		revision = current.Revision
 		return
 	}
 
-	err = fmt.Errorf("%w: Chromium %s on %s, the nearest known is %s; run make generate-chrome-offsets CHROME_VERSIONS=\"branches %s\" and rebuild", ErrUnknownChromiumVersion, version, architecture, nearestChromiumVersion(version), version)
+	err = fmt.Errorf("%w: Chromium %s on %s, the nearest known is %s; run make generate-chrome-offsets for the newest release branches, or for a build of no release branch add %s to CHROME_BUILDS, and rebuild", ErrUnknownChromiumVersion, version, architecture, nearestChromiumVersion(version), version)
+	return
+}
+
+// the offsets of the group of the BoringSSL revision on the architecture
+func chromiumRevisionOffset(version string, revision string, architecture string) (offset Offset, err error) {
+	for _, group := range chromiumRevisionOffsets {
+		if !slices.Contains(group.Revisions, revision) {
+			continue
+		}
+
+		var found bool
+
+		if offset, found = group.Offsets[architecture]; !found {
+			err = fmt.Errorf("%w: %s", ErrUnsupportedMachine, architecture)
+		}
+
+		return
+	}
+
+	err = fmt.Errorf("%w: Chromium %s has BoringSSL %s without offsets in the table", ErrUnknownChromiumVersion, version, revision)
 	return
 }
 
@@ -476,7 +488,7 @@ func nearestChromiumVersion(version string) (nearest string) {
 	return
 }
 
-// the version ranges of the generated table, oldest first, as first to last (one version on its own)
+// the version ranges of the milestone table and the builds, oldest first, as first to last (one version on its own)
 func KnownChromiumVersions() (ranges []string) {
 	type versionRange struct {
 		first string
@@ -489,6 +501,10 @@ func KnownChromiumVersions() (ranges []string) {
 		for _, patches := range current {
 			known = append(known, versionRange{first: branch + "." + strconv.Itoa(patches.First), last: branch + "." + strconv.Itoa(patches.Last)})
 		}
+	}
+
+	for build := range chromiumBuilds {
+		known = append(known, versionRange{first: build, last: build})
 	}
 
 	slices.SortFunc(known, func(first versionRange, second versionRange) (order int) {

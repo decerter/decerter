@@ -26,3 +26,9 @@ type opensslHook struct {
 	Pid     int
 	Process string
 }
+
+// a library of the linker cache whose version has no offsets, Err names the nearest known version and the make command
+type unknownOpenssl struct {
+	Library openssl.Library
+	Err     error
+}

@@ -399,24 +399,113 @@ func TestCheckBinaryNegative(state *testing.T) {
 // Test if android.NextCommands returns with the expected output: copy-pasteable commands with the socket, the binary path and the forward of the platform.
 func TestNextCommandsPositive(state *testing.T) {
 	positiveCases := []struct {
-		ADB     string
-		Root    RootType
-		Package string
-		Decerter    string
-		Device  string
-		UI      string
+		ADB       string
+		Root      RootType
+		Package   string
+		BlockQuic bool
+		Decerter      string
+		Device    string
+		UI        string
 	}{
-		{ADB: "adb", Root: ADBRootType, Package: "com.example.app", Decerter: "decerter", Device: "adb -s emulator-5580 shell -t /data/local/tmp/decerter run --intercept --api-socket @decerter-api --package com.example.app", UI: "decerter ui --api-socket 127.0.0.1:8080"},
-		{ADB: "'/opt/android sdk/platform-tools/adb'", Root: ADBRootType, Package: "", Decerter: "/home/user/my tools/decerter", Device: "'/opt/android sdk/platform-tools/adb' -s emulator-5580 shell -t /data/local/tmp/decerter run --intercept --api-socket @decerter-api --package PACKAGE", UI: "'/home/user/my tools/decerter' ui --api-socket 127.0.0.1:8080"},
-		{ADB: "adb", Root: SuRootType, Package: "com.example.app", Decerter: "./decerter", Device: `adb -s emulator-5580 shell -t "su -c '/data/local/tmp/decerter run --intercept --api-socket @decerter-api --package com.example.app'"`, UI: "./decerter ui --api-socket 127.0.0.1:8080"},
+		{ADB: "adb", Root: ADBRootType, Package: "com.example.app", BlockQuic: false, Decerter: "decerter", Device: "adb -s emulator-5580 shell -tt /data/local/tmp/decerter run --intercept --api-socket @decerter-api --package com.example.app", UI: "decerter ui --api-socket 127.0.0.1:8080"},
+		{ADB: "'/opt/android sdk/platform-tools/adb'", Root: ADBRootType, Package: "", BlockQuic: false, Decerter: "/home/user/my tools/decerter", Device: "'/opt/android sdk/platform-tools/adb' -s emulator-5580 shell -tt /data/local/tmp/decerter run --intercept --api-socket @decerter-api --package PACKAGE", UI: "'/home/user/my tools/decerter' ui --api-socket 127.0.0.1:8080"},
+		{ADB: "adb", Root: SuRootType, Package: "com.example.app", BlockQuic: false, Decerter: "./decerter", Device: `adb -s emulator-5580 shell -tt "su -c '/data/local/tmp/decerter run --intercept --api-socket @decerter-api --package com.example.app'"`, UI: "./decerter ui --api-socket 127.0.0.1:8080"},
+		// a Chromium app
+		{ADB: "adb", Root: ADBRootType, Package: "com.android.chrome", BlockQuic: true, Decerter: "decerter", Device: "adb -s emulator-5580 shell -tt /data/local/tmp/decerter run --intercept --api-socket @decerter-api --package com.android.chrome --block-quic", UI: "decerter ui --api-socket 127.0.0.1:8080"},
+		{ADB: "adb", Root: SuRootType, Package: "com.google.android.youtube", BlockQuic: true, Decerter: "decerter", Device: `adb -s emulator-5580 shell -tt "su -c '/data/local/tmp/decerter run --intercept --api-socket @decerter-api --package com.google.android.youtube --block-quic'"`, UI: "decerter ui --api-socket 127.0.0.1:8080"},
 	}
 
 	for _, positive := range positiveCases {
-		device, ui := NextCommands(positive.ADB, "emulator-5580", positive.Root, positive.Package, 8080, positive.Decerter)
+		device, ui := NextCommands(positive.ADB, "emulator-5580", positive.Root, positive.Package, positive.BlockQuic, 8080, positive.Decerter)
 
 		if (device != positive.Device) || (ui != positive.UI) {
 			state.Errorf("Test of android.NextCommands function failed, commands should be %q and %q, commands: %q and %q", positive.Device, positive.UI, device, ui)
 			return
+		}
+	}
+}
+
+// Test if android.FindADB returns with the expected output: ADB first, then the platform-tools of ANDROID_HOME, ANDROID_SDK_ROOT and ~/Android/Sdk,
+// and the adb on PATH only without an SDK, so the adb the emulator starts and setup's are the same; an adb that can't run is skipped.
+func TestFindADBPositive(state *testing.T) {
+	directory := state.TempDir()
+	home := filepath.Join(directory, "home")
+	studio := filepath.Join(home, "Android", "Sdk", "platform-tools", "adb")
+	androidHome := filepath.Join(directory, "android-home", "platform-tools", "adb")
+	sdkRoot := filepath.Join(directory, "sdk-root", "platform-tools", "adb")
+	pathADB := filepath.Join(directory, "bin", "adb")
+	notExecutable := filepath.Join(directory, "broken", "platform-tools", "adb")
+
+	for _, adb := range []string{studio, androidHome, sdkRoot, pathADB, notExecutable} {
+		err := os.MkdirAll(filepath.Dir(adb), 0o700)
+
+		if err == nil {
+			err = os.WriteFile(adb, []byte("#!/bin/sh\n"), 0o700)
+		}
+
+		if err != nil {
+			state.Fatalf("Test of android.FindADB failed, cannot create %s, error: %s", adb, err.Error())
+		}
+	}
+
+	if err := os.Chmod(notExecutable, 0o600); err != nil {
+		state.Fatalf("Test of android.FindADB failed, error: %s", err.Error())
+	}
+
+	positiveCases := []struct {
+		Name        string
+		ADB         string
+		AndroidHome string
+		SDKRoot     string
+		Home        string
+		Expected    string
+	}{
+		{Name: "ADB wins", ADB: "/opt/adb", AndroidHome: filepath.Dir(filepath.Dir(androidHome)), SDKRoot: "", Home: home, Expected: "/opt/adb"},
+		{Name: "ANDROID_HOME before PATH", ADB: "", AndroidHome: filepath.Dir(filepath.Dir(androidHome)), SDKRoot: filepath.Dir(filepath.Dir(sdkRoot)), Home: home, Expected: androidHome},
+		{Name: "ANDROID_SDK_ROOT before PATH", ADB: "", AndroidHome: "", SDKRoot: filepath.Dir(filepath.Dir(sdkRoot)), Home: home, Expected: sdkRoot},
+		{Name: "~/Android/Sdk before PATH", ADB: "", AndroidHome: "", SDKRoot: "", Home: home, Expected: studio},
+		{Name: "an adb that can't run is skipped", ADB: "", AndroidHome: filepath.Dir(filepath.Dir(notExecutable)), SDKRoot: "", Home: home, Expected: studio},
+		{Name: "PATH without an SDK", ADB: "", AndroidHome: "", SDKRoot: "", Home: directory, Expected: pathADB},
+	}
+
+	for _, positive := range positiveCases {
+		state.Setenv("ADB", positive.ADB)
+		state.Setenv("ANDROID_HOME", positive.AndroidHome)
+		state.Setenv("ANDROID_SDK_ROOT", positive.SDKRoot)
+		state.Setenv("HOME", positive.Home)
+		state.Setenv("PATH", filepath.Dir(pathADB))
+		adb, err := FindADB()
+
+		if (err != nil) || (adb != positive.Expected) {
+			state.Errorf("Test of android.FindADB function failed, case %q, adb should be %s, adb: %s, error: %v", positive.Name, positive.Expected, adb, err)
+		}
+	}
+}
+
+// Test if android.FindADB returns with the expected errors: no SDK and nothing on PATH, or only an adb that can't run.
+func TestFindADBNegative(state *testing.T) {
+	directory := state.TempDir()
+	notExecutable := filepath.Join(directory, "sdk", "platform-tools", "adb")
+	err := os.MkdirAll(filepath.Dir(notExecutable), 0o700)
+
+	if err == nil {
+		err = os.WriteFile(notExecutable, []byte("#!/bin/sh\n"), 0o600)
+	}
+
+	if err != nil {
+		state.Fatalf("Test of android.FindADB failed, error: %s", err.Error())
+	}
+
+	for _, sdk := range []string{"", filepath.Join(directory, "sdk")} {
+		state.Setenv("ADB", "")
+		state.Setenv("ANDROID_HOME", sdk)
+		state.Setenv("ANDROID_SDK_ROOT", "")
+		state.Setenv("HOME", directory)
+		state.Setenv("PATH", directory)
+		adb, err := FindADB()
+
+		if !errors.Is(err, ErrNoADB) {
+			state.Errorf("Test of android.FindADB function failed, ANDROID_HOME %q, error should be %v, adb: %s, error: %v", sdk, ErrNoADB, adb, err)
 		}
 	}
 }

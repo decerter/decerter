@@ -6,6 +6,7 @@ package cmd
 
 import (
 	"fmt"
+	"go/version"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,6 +99,53 @@ func TestFlagDocsPositive(state *testing.T) {
 				state.Errorf("Test of the flag docs failed, --%s of %s is not in README.md or docs/", flag.Name, command.CommandPath())
 			}
 		})
+	}
+}
+
+// Test if go.mod pins a toolchain that is at least its go version, and every workflow takes Go from go.mod, so CI and local builds use the same Go and
+// release checksums match.
+func TestToolchainPositive(state *testing.T) {
+	goMod, err := os.ReadFile(filepath.Join(repositoryRoot, "go.mod"))
+
+	if err != nil {
+		state.Fatalf("Test of the toolchain failed, error: %s", err.Error())
+	}
+
+	goVersion, toolchain := "", ""
+
+	for line := range strings.Lines(string(goMod)) {
+		fields := strings.Fields(line)
+
+		switch {
+		case (len(fields) == 2) && (fields[0] == "go"):
+			goVersion = "go" + fields[1]
+		case (len(fields) == 2) && (fields[0] == "toolchain"):
+			toolchain = fields[1]
+		default:
+		}
+	}
+
+	if (goVersion == "") || !version.IsValid(toolchain) || (version.Compare(toolchain, goVersion) < 0) || (version.Lang(toolchain) != version.Lang(goVersion)) {
+		state.Errorf("Test of the toolchain failed, go.mod should name a toolchain of its go version's language, at least that version, go: %q, toolchain: %q", goVersion, toolchain)
+		return
+	}
+
+	workflows, err := filepath.Glob(filepath.Join(repositoryRoot, ".github", "workflows", "*.yml"))
+
+	if (err != nil) || (len(workflows) == 0) {
+		state.Fatalf("Test of the toolchain failed, no workflows, error: %v", err)
+	}
+
+	for _, path := range workflows {
+		content, readErr := os.ReadFile(path)
+
+		if err = readErr; err != nil {
+			state.Fatalf("Test of the toolchain failed, error: %s", err.Error())
+		}
+
+		if strings.Contains(string(content), "go-version:") {
+			state.Errorf("Test of the toolchain failed, %s should take Go from go.mod with go-version-file, not go-version", path)
+		}
 	}
 }
 

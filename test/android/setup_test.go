@@ -34,6 +34,8 @@ const (
 	deviceHeading  string = "Start decerter on the device"
 	uiHeading      string = "Then the UI on this machine"
 	sharedHookLine string = `"msg":"Shared netd cgroup hook"`
+	// the flags setup writes into Chrome's flags file
+	setupChromeFlags string = "_ --disable-fre --no-default-browser-check --no-first-run"
 )
 
 var (
@@ -54,6 +56,7 @@ type setupRun struct {
 // a host command of the tests as the invoking user, run by the printed command line: decerter on the device through adb shell, or decerter ui
 type userProcess struct {
 	command *exec.Cmd
+	stdin   io.WriteCloser
 	stdout  lockedBuffer
 	stderr  lockedBuffer
 	exited  chan struct{}
@@ -105,21 +108,22 @@ func TestSetupPositive(state *testing.T) {
 
 	port := setupForwardPort(state)
 	deviceCommand, uiCommand := printedCommands(state, setupResult.Output)
-	expectedDevice := fmt.Sprintf("adb -s %s shell -t %s run --intercept --api-socket @decerter-api --package %s", device.Serial, setupBinary, appPackage)
+	// adb by its path, or by name when PATH finds the same adb
+	expectedDevice := fmt.Sprintf(" -s %s shell -tt %s run --intercept --api-socket @decerter-api --package %s", device.Serial, setupBinary, appPackage)
 	expectedUI := fmt.Sprintf("%s ui --api-socket 127.0.0.1:%s", filepath.Join(workDirectory, decerterBinary), port)
 
-	if (deviceCommand != expectedDevice) || (uiCommand != expectedUI) {
-		state.Fatalf("Test of the setup failed, the commands should be %q and %q, commands: %q and %q", expectedDevice, expectedUI, deviceCommand, uiCommand)
+	if ((deviceCommand != device.ADB+expectedDevice) && (deviceCommand != "adb"+expectedDevice)) || (uiCommand != expectedUI) {
+		state.Fatalf("Test of the setup failed, the commands should be adb or its path followed by %q, and %q, commands: %q and %q", expectedDevice, expectedUI, deviceCommand, uiCommand)
 	}
 
-	// the printed command, as the user runs it; decerter logs on stderr through adb shell
+	// the printed command, as the user runs it without a terminal; adb shell -tt gives decerter a pty anyway, its logs come on stdout with its output
 	servers := startHTTPSServers(state, nil)
 	decerter := startUserProcess(state, deviceCommand)
-	waitText(state, "decerter run on the device", decerter.stderr, decerter.exited, redirectReady)
+	waitText(state, "decerter run on the device", decerter.stdout, decerter.exited, redirectReady)
 	selected := fmt.Sprintf(`"msg":"Selected package","package":%q,"uid":%d}`, appPackage, appUID)
 
-	if !strings.Contains(decerter.stderr.String(), selected) {
-		state.Errorf("Test of the setup failed, decerter should log %s, log:\n%s", selected, decerter.stderr.String())
+	if !strings.Contains(decerter.stdout.String(), selected) {
+		state.Errorf("Test of the setup failed, decerter should log %s, log:\n%s", selected, decerter.stdout.String())
 	}
 
 	for _, server := range servers {
@@ -149,19 +153,49 @@ func TestSetupPositive(state *testing.T) {
 
 	ui.stop(state)
 
-	// what Ctrl-C does to the adb shell: decerter stops and puts netd's hooks back, its adb shell ends
-	_, err = device.shell(state.Context(), "kill -TERM $(pidof decerter)")
+	// Ctrl-C in the terminal of the printed command: adb shell -tt hands it to decerter's pty, decerter stops and puts netd's hooks back, its adb shell ends
+	_, err = decerter.stdin.Write([]byte{0x03})
 
 	if err != nil {
-		state.Fatalf("Could not stop decerter, error: %s", err.Error())
+		state.Fatalf("Could not send Ctrl-C to decerter, error: %s", err.Error())
 	}
 
 	decerter.wait(state)
-	log := decerter.stderr.String()
+	log := decerter.stdout.String()
 	shared := strings.Count(log, sharedHookLine)
 
 	if (shared == 0) || (strings.Count(log, stoppedLog) != shared) {
 		state.Errorf("Test of the setup failed, decerter should log %s for each %s when it stops, log:\n%s", stoppedLog, sharedHookLine, log)
+	}
+
+	checkPristine(state)
+}
+
+// Test if decerter on the device stops and puts netd's hooks back when the adb client of the printed command dies without a terminal (killed, or its
+// terminal closed): adb shell -tt gave decerter a pty, adbd closes it and decerter gets SIGHUP.
+func TestSetupHangupPositive(state *testing.T) {
+	guardDevice(state)
+	requireSetup(state)
+	deviceCommand, _ := printedCommands(state, setupResult.Output)
+	decerter := startUserProcess(state, deviceCommand)
+	waitText(state, "decerter run on the device", decerter.stdout, decerter.exited, redirectReady)
+	err := syscall.Kill(-decerter.command.Process.Pid, syscall.SIGKILL)
+
+	if err != nil {
+		state.Fatalf("Could not kill the adb client, error: %s", err.Error())
+	}
+
+	decerter.wait(state)
+	stoppedCtx, cancel := context.WithTimeout(state.Context(), readyTimeout)
+	defer cancel()
+	err = poll(stoppedCtx, func() (isDone bool, pollErr error) {
+		pids, pollErr := device.shell(stoppedCtx, "pidof decerter || true")
+		isDone = (pollErr == nil) && (strings.TrimSpace(pids) == "")
+		return
+	})
+
+	if err != nil {
+		state.Fatalf("Test of the setup failed, decerter on the device should stop when its adb client dies, error: %s, output:\n%s", err.Error(), decerter.stdout.String())
 	}
 
 	checkPristine(state)
@@ -468,11 +502,18 @@ func userCommand(ctx context.Context, account hostAccount, sdk string, adb strin
 
 // run a printed command line with sh as the invoking user until it exits or the test ends
 func startUserProcess(state *testing.T, commandLine string) (process *userProcess) {
-	process = &userProcess{command: nil, stdout: newLockedBuffer(), stderr: newLockedBuffer(), exited: make(chan struct{})}
+	process = &userProcess{command: nil, stdin: nil, stdout: newLockedBuffer(), stderr: newLockedBuffer(), exited: make(chan struct{})}
 	process.command = userCommand(state.Context(), device.account, device.SDK, device.ADB, "/bin/sh", "-c", commandLine)
+	// its own process group, so the test can kill the shell and adb in it at once
+	process.command.SysProcAttr.Setpgid = true
 	process.command.Stdout = process.stdout
 	process.command.Stderr = process.stderr
-	err := process.command.Start()
+	stdin, err := process.command.StdinPipe()
+
+	if err == nil {
+		process.stdin = stdin
+		err = process.command.Start()
+	}
 
 	if err != nil {
 		state.Fatalf("Could not run %s, error: %s", commandLine, err.Error())
@@ -664,4 +705,117 @@ func (page uiPage) waitRequest(ctx context.Context, port string) (request string
 		return
 	})
 	return
+}
+
+// Test if decerter android setup --package of Chrome adds --block-quic to the device command and writes Chrome's flags file, and --remove deletes it.
+func TestSetupChromePositive(state *testing.T) {
+	guardDevice(state)
+	removeChromeFlags(state)
+	result := runSetup(state.Context(), device.account, device.SDK, device.ADB, "--serial", device.Serial, "--package", chromePackage)
+	state.Logf("decerter android setup --package %s, output:\n%s", chromePackage, result.Output)
+
+	for _, expected := range []string{"app      " + chromePackage + ": a Chromium app, it prefers QUIC", "quic     " + chromePackage + " is a Chromium app", "chrome   wrote " + chromeCommandLine + ": " + setupChromeFlags} {
+		if (result.Err != nil) || !strings.Contains(result.Output, "\n"+expected) {
+			state.Fatalf("Test of the Chrome setup failed, the output should have a line %q, error: %v, output:\n%s\nlog:\n%s", expected, result.Err, result.Output, result.Log)
+		}
+	}
+
+	deviceCommand, _ := printedCommands(state, result.Output)
+	flags, err := device.shell(state.Context(), "cat "+chromeCommandLine)
+
+	if (err != nil) || !strings.HasSuffix(deviceCommand, " shell -tt "+setupBinary+" run --intercept --api-socket @decerter-api --package "+chromePackage+" --block-quic") || (strings.TrimSpace(flags) != setupChromeFlags) {
+		state.Fatalf("Test of the Chrome setup failed, the command should end with --block-quic and the flags file should be setup's, command: %q, flags: %q, error: %v", deviceCommand, flags, err)
+	}
+
+	// a second setup takes the file as its own
+	result = runSetup(state.Context(), device.account, device.SDK, device.ADB, "--serial", device.Serial, "--package", chromePackage)
+
+	if (result.Err != nil) || !strings.Contains(result.Output, "\nchrome   wrote "+chromeCommandLine) {
+		state.Errorf("Test of the Chrome setup failed, a second setup should keep writing its own flags file, error: %v, output:\n%s", result.Err, result.Output)
+	}
+
+	result = runSetup(state.Context(), device.account, device.SDK, device.ADB, "--remove", "--serial", device.Serial)
+	isLeft, err := deviceFileExists(state.Context(), chromeCommandLine)
+
+	if (result.Err != nil) || !strings.Contains(result.Output, "\nchrome   removed "+chromeCommandLine+", setup wrote it") || (err != nil) || isLeft {
+		state.Errorf("Test of the Chrome setup failed, --remove should delete the flags file setup wrote, left: %v, error: %v, output:\n%s\nlog:\n%s", isLeft, errors.Join(result.Err, err), result.Output, result.Log)
+	}
+
+	checkPristine(state)
+}
+
+// Test if decerter android setup keeps a Chrome flags file it didn't write, and --remove keeps one changed after setup wrote it; an app that is no
+// Chromium app gets no --block-quic.
+func TestSetupChromeNegative(state *testing.T) {
+	guardDevice(state)
+	removeChromeFlags(state)
+	ownFlags := "_ --my-own-flag"
+	_, err := device.shell(state.Context(), fmt.Sprintf("echo '%s' > %s && chmod 644 %s", ownFlags, chromeCommandLine, chromeCommandLine))
+
+	if err != nil {
+		state.Fatalf("Could not write the flags file, error: %s", err.Error())
+	}
+
+	result := runSetup(state.Context(), device.account, device.SDK, device.ADB, "--serial", device.Serial, "--package", chromePackage)
+	flags, err := device.shell(state.Context(), "cat "+chromeCommandLine)
+
+	if (result.Err != nil) || !strings.Contains(result.Output, "\nchrome   kept "+chromeCommandLine) || (err != nil) || (strings.TrimSpace(flags) != ownFlags) {
+		state.Errorf("Test of the Chrome setup failed, setup should keep a flags file of the user's, flags: %q, error: %v, output:\n%s\nlog:\n%s", flags, errors.Join(result.Err, err), result.Output, result.Log)
+	}
+
+	// setup's file, changed by the user afterwards
+	_, err = device.shell(state.Context(), "rm -f "+chromeCommandLine)
+
+	if err == nil {
+		result = runSetup(state.Context(), device.account, device.SDK, device.ADB, "--serial", device.Serial, "--package", chromePackage)
+		err = result.Err
+	}
+
+	if err == nil {
+		_, err = device.shell(state.Context(), fmt.Sprintf("echo '%s --user-flag' > %s", setupChromeFlags, chromeCommandLine))
+	}
+
+	if err != nil {
+		state.Fatalf("Could not change the flags file setup wrote, error: %s, output:\n%s", err.Error(), result.Output)
+	}
+
+	result = runSetup(state.Context(), device.account, device.SDK, device.ADB, "--remove", "--serial", device.Serial)
+	flags, err = device.shell(state.Context(), "cat "+chromeCommandLine)
+
+	if (result.Err != nil) || !strings.Contains(result.Output, "\nchrome   kept "+chromeCommandLine+", it changed since setup wrote it") || (err != nil) || (strings.TrimSpace(flags) != setupChromeFlags+" --user-flag") {
+		state.Errorf("Test of the Chrome setup failed, --remove should keep a flags file changed after setup wrote it, flags: %q, error: %v, output:\n%s\nlog:\n%s", flags, errors.Join(result.Err, err), result.Output, result.Log)
+	}
+
+	// the test app is no Chromium app
+	result = runSetup(state.Context(), device.account, device.SDK, device.ADB, "--serial", device.Serial, "--package", appPackage)
+
+	if (result.Err != nil) || strings.Contains(result.Output, "--block-quic") || strings.Contains(result.Output, "\nchrome   ") {
+		state.Errorf("Test of the Chrome setup failed, an app that is no Chromium app should get no --block-quic and no flags file, error: %v, output:\n%s", result.Err, result.Output)
+	}
+
+	result = runSetup(state.Context(), device.account, device.SDK, device.ADB, "--remove", "--serial", device.Serial)
+
+	if result.Err != nil {
+		state.Errorf("Could not remove the setup, error: %s, output:\n%s\nlog:\n%s", result.Err.Error(), result.Output, result.Log)
+	}
+
+	checkPristine(state)
+}
+
+// no flags file before the case, and none after it
+func removeChromeFlags(state *testing.T) {
+	_, err := device.shell(state.Context(), "rm -f "+chromeCommandLine)
+
+	if err != nil {
+		state.Fatalf("Could not remove the flags file, error: %s", err.Error())
+	}
+
+	state.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
+		defer cancel()
+
+		if _, cleanErr := device.shell(ctx, "rm -f "+chromeCommandLine); cleanErr != nil {
+			state.Errorf("Could not remove the flags file, error: %s", cleanErr.Error())
+		}
+	})
 }

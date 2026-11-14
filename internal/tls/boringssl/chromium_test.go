@@ -236,7 +236,7 @@ func TestInspectChromiumNegative(state *testing.T) {
 		Err          error
 		Text         []string
 	}{
-		{Machine: elf.EM_X86_64, Labels: allLabels, Strings: []string{"Chrome/" + unknownChrome}, Architecture: "amd64", Err: boringssl.ErrUnknownChromiumVersion, Text: []string{unknownChrome, "the nearest known is 160.0.8161.0", "make generate-chrome-offsets CHROME_VERSIONS=\"branches " + unknownChrome + "\""}},
+		{Machine: elf.EM_X86_64, Labels: allLabels, Strings: []string{"Chrome/" + unknownChrome}, Architecture: "amd64", Err: boringssl.ErrUnknownChromiumVersion, Text: []string{unknownChrome, "the nearest known is 160.0.8161.0", "run make generate-chrome-offsets for the newest release branches", "add " + unknownChrome + " to CHROME_BUILDS"}},
 		{Machine: elf.EM_X86_64, Labels: allLabels, Strings: []string{"Chrome/124.0.6367.9999"}, Architecture: "amd64", Err: boringssl.ErrUnknownChromiumVersion, Text: []string{"124.0.6367.9999", "the nearest known is 124.0.6367.0 to 124.0.6367.257"}},
 		{Machine: elf.EM_X86_64, Labels: allLabels, Strings: []string{"Chrome/100.0.4896.1"}, Architecture: "amd64", Err: boringssl.ErrUnknownChromiumVersion, Text: []string{"the nearest known is 122.0.6238.4"}},
 		{Machine: elf.EM_X86_64, Labels: allLabels, Strings: []string{"10.0.2.2", "Chrome/", "1.0.0.0", "160.0.8161.0"}, Architecture: "amd64", Err: boringssl.ErrNoChromiumVersion, Text: []string{"base.apk"}},
@@ -319,7 +319,7 @@ func TestGetChromiumOffsetPositive(state *testing.T) {
 }
 
 // Test if boringssl.GetChromiumOffset returns with the expected errors: no MAJOR.0.BUILD.PATCH version, an unknown branch, a patch after the
-// generated range, an architecture without Android build.
+// generated range, another patch of a build's branch, an architecture without Android build.
 func TestGetChromiumOffsetNegative(state *testing.T) {
 	negativeCases := []struct {
 		Version      string
@@ -331,6 +331,8 @@ func TestGetChromiumOffsetNegative(state *testing.T) {
 		{Version: "chrome", Architecture: "amd64", Err: boringssl.ErrUnknownChromiumVersion, Text: "MAJOR.0.BUILD.PATCH"},
 		{Version: "124.0.6366.1", Architecture: "amd64", Err: boringssl.ErrUnknownChromiumVersion, Text: "make generate-chrome-offsets"},
 		{Version: "124.0.6367.258", Architecture: "amd64", Err: boringssl.ErrUnknownChromiumVersion, Text: "124.0.6367.0 to 124.0.6367.257"},
+		// a build is one version, not its branch
+		{Version: "126.0.6452.5", Architecture: "amd64", Err: boringssl.ErrUnknownChromiumVersion, Text: "the nearest known is 126.0.6452.4"},
 		{Version: knownChrome, Architecture: "riscv64", Err: boringssl.ErrUnsupportedMachine, Text: "riscv64"},
 	}
 

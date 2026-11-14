@@ -32,7 +32,7 @@ const (
 )
 
 // the HTTP layer of the tcp flows in scope: their exchanges go into the history, and with Pipeline their whole messages go through the rules of layer http
-// Timeout is how long a message may take to come whole once its first byte is kept back, the hold timeout of the API
+// Timeout is how long a message may take to come whole once its first byte is kept back, --assembly-timeout
 type HTTPLayer struct {
 	Pipeline *intercept.Pipeline
 	Timeout  time.Duration
