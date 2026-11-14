@@ -143,7 +143,10 @@ func TestCaptureAPIPositive(state *testing.T) {
 		state.Fatalf("Could not stop decerter, error: %s", err.Error())
 	}
 
-	err = testTshark(state.Context(), tsharkPath, filePath, []capturedCall{{Name: "captured", Port: capturedPort, IsTLS: true, IsHTTP2: false}, {Name: "other", Port: otherPort, IsTLS: true, IsHTTP2: false}}, false)
+	// the file has the bulk body too: its port is decoded as data, or tshark reassembles all of it as one HTTP response, which takes a slow host longer than its timeout
+	start = time.Now()
+	err = testTshark(state.Context(), tsharkPath, filePath, []capturedCall{{Name: "captured", Port: capturedPort, IsTLS: true, IsHTTP2: false}, {Name: "other", Port: otherPort, IsTLS: true, IsHTTP2: false}}, false, serverPortOf(testServer{URL: bulk}))
+	state.Logf("tshark read the -w file in %s", time.Since(start))
 
 	if err != nil {
 		state.Errorf("Test of the capture api failed, the -w file should have both calls, error: %s", err.Error())

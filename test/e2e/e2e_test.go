@@ -43,6 +43,8 @@ const (
 	otherUserName string = "nobody"
 	// every external command is killed after this long, curl gives up a little earlier on its own
 	commandTimeout time.Duration = 20 * time.Second
+	// tshark reading a whole capture file gets longer, a file with a bulk download takes a slow CI runner more than commandTimeout
+	tsharkTimeout  time.Duration = 60 * time.Second
 	curlMaxTime    string        = "10"
 	proxyPort      uint16        = 15001
 	udpIdleTimeout time.Duration = 30 * time.Second
@@ -295,9 +297,15 @@ func runCurl(ctx context.Context, runAs account, arguments []string) (output str
 	return
 }
 
-// run a tool of the host as root with a timeout, stdout is the output
+// run a tool of the host as root, killed after commandTimeout, stdout is the output
 func runCommand(ctx context.Context, name string, arguments ...string) (output string, err error) {
-	commandCtx, cancel := context.WithTimeout(ctx, commandTimeout)
+	output, err = runCommandTimeout(ctx, commandTimeout, name, arguments...)
+	return
+}
+
+// run a tool of the host as root, killed after timeout, stdout is the output
+func runCommandTimeout(ctx context.Context, timeout time.Duration, name string, arguments ...string) (output string, err error) {
+	commandCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	command := exec.CommandContext(commandCtx, name, arguments...)
 	command.WaitDelay = time.Second

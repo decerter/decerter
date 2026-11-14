@@ -135,8 +135,13 @@ func captureCalls(state *testing.T, mode decerterMode, capturePath string) (call
 }
 
 // every call must show up as a GET of / to its port; the TLS ports are decoded as TLS unless the file is plaintext
-func testTshark(ctx context.Context, tsharkPath string, capturePath string, calls []capturedCall, isPlaintext bool) (err error) {
+// dataPorts are decoded as data: tshark neither reassembles nor dissects what went to them, a body of many megabytes costs it only the read then
+func testTshark(ctx context.Context, tsharkPath string, capturePath string, calls []capturedCall, isPlaintext bool, dataPorts ...string) (err error) {
 	arguments := []string{"-n", "-r", capturePath}
+
+	for _, port := range dataPorts {
+		arguments = append(arguments, "-d", fmt.Sprintf("tcp.port==%s,data", port))
+	}
 
 	for _, call := range calls {
 		protocol := "http"
@@ -152,7 +157,7 @@ func testTshark(ctx context.Context, tsharkPath string, capturePath string, call
 	}
 
 	arguments = append(arguments, "-Y", "http.request or http2.type == 1", "-T", "fields", "-E", "separator=/t", "-e", "tcp.dstport", "-e", "http.request.method", "-e", "http.request.uri", "-e", "http2.headers.method", "-e", "http2.headers.path")
-	output, runErr := runCommand(ctx, tsharkPath, arguments...)
+	output, runErr := runCommandTimeout(ctx, tsharkTimeout, tsharkPath, arguments...)
 
 	if err = runErr; err != nil {
 		return
