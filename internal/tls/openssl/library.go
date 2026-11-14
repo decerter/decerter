@@ -8,12 +8,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"slices"
+	"strconv"
+	"strings"
 )
 
+// the libssl sonames decerter looks for by name, OpenSSL 3.x and 4.x; libcrypto has the same suffix
 const (
-	libsslName    string = "libssl.so.3"
-	libcryptoName string = "libcrypto.so.3"
+	libsslPrefix    string = "libssl"
+	libcryptoPrefix string = "libcrypto"
+	// libssl.so.<major> and the versioned file names the soname links to (libssl.so.4.0.3), a mapping shows the file
+	libsslPattern string = `^libssl\.so\.(\d+)(\.\d+)*$`
+	// OpenSSL 1.1 and older are not supported, their mappings are skipped
+	firstMajor int = 3
 )
 
 // glibc's cache of the dynamic linker (sysdeps/generic/dl-cache.h): a 48 byte header, 24 byte entries, strings addressed from the start of the header
@@ -26,6 +35,9 @@ const (
 )
 
 var (
+	// the sonames looked up in the linker cache, each one found is hooked: a host can have both (Fedora 45 with openssl3-libs)
+	libsslNames  = []string{"libssl.so.3", "libssl.so.4"}
+	libsslRegexp = regexp.MustCompile(libsslPattern)
 	// flags of a libc6 ELF library for the architecture decerter runs on: FLAG_ELF_LIBC6 with FLAG_X8664_LIB64 or FLAG_AARCH64_LIB64
 	linkerCacheFlags = map[string]uint32{
 		"amd64": 0x0303,
@@ -43,28 +55,106 @@ var (
 	}
 )
 
-// override is the --libssl flag, empty means the libssl the dynamic linker would load for a process without its own search path
-// the version string is only in libcrypto, it is taken from the directory of libssl
-func FindLibssl(override string) (libsslPath string, libcryptoPath string, err error) {
-	libsslPath = override
+// override is the --libssl flag, the one library hooked then; empty means every libssl.so.3 and libssl.so.4 the dynamic linker would load for a process
+// without its own search path, a host with both gets both; the version string is only in libcrypto, it is taken from the directory of libssl
+func FindLibssl(override string) (libraries []Library, err error) {
+	paths := []string{override}
 
-	if libsslPath == "" {
-		libsslPath = findLibrary(libsslName)
+	if override == "" {
+		paths = findLibraries(libsslNames, findLibrary)
 	}
 
-	if libsslPath == "" {
-		err = fmt.Errorf("%w: %s, give its path with --libssl", ErrLibraryNotFound, libsslName)
+	if len(paths) == 0 {
+		err = fmt.Errorf("%w: %s, give its path with --libssl", ErrLibraryNotFound, strings.Join(libsslNames, " or "))
 		return
 	}
 
-	_, err = os.Stat(libsslPath)
+	for _, path := range paths {
+		_, statErr := os.Stat(path)
+
+		if err = statErr; err != nil {
+			err = fmt.Errorf("%w: %w", ErrLibraryNotFound, err)
+			return
+		}
+
+		libraries = append(libraries, Library{Libssl: path, Libcrypto: LibcryptoPath(path), Version: "", Offset: Offset{}})
+	}
+
+	return
+}
+
+// the path of each name find resolves, in the order of names, a path two names resolve to only once
+func findLibraries(names []string, find func(name string) (path string)) (paths []string) {
+	for _, name := range names {
+		path := find(name)
+
+		if (path != "") && !slices.Contains(paths, path) {
+			paths = append(paths, path)
+		}
+	}
+
+	return
+}
+
+// libcrypto next to libssl with the same suffix: libssl.so.3 → libcrypto.so.3, libssl.so.4.0.3 → libcrypto.so.4.0.3; a file not named libssl* gets
+// libcrypto.so.3 like before 4.x
+func LibcryptoPath(libsslPath string) (libcryptoPath string) {
+	directory, name := filepath.Split(libsslPath)
+	suffix, isLibssl := strings.CutPrefix(name, libsslPrefix)
+
+	if !isLibssl {
+		suffix = ".so.3"
+	}
+
+	libcryptoPath = filepath.Join(directory, libcryptoPrefix+suffix)
+	return
+}
+
+// the libssl files of OpenSSL 3 and newer a process maps executable, from the text of /proc/<pid>/maps, as the process sees them (its mount namespace)
+func MappedLibssl(maps string) (paths []string) {
+	for line := range strings.Lines(maps) {
+		fields := strings.Fields(line)
+
+		if (len(fields) < 6) || (len(fields[1]) < 3) || (fields[1][2] != 'x') || !strings.HasPrefix(fields[5], "/") || strings.HasSuffix(strings.TrimSpace(line), "(deleted)") {
+			continue
+		}
+
+		path := strings.Join(fields[5:], " ")
+		match := libsslRegexp.FindStringSubmatch(filepath.Base(path))
+
+		if match == nil {
+			continue
+		}
+
+		major, convertErr := strconv.Atoi(match[1])
+
+		if (convertErr != nil) || (major < firstMajor) || slices.Contains(paths, path) {
+			continue
+		}
+
+		paths = append(paths, path)
+	}
+
+	return
+}
+
+// the version of the library's libcrypto and its offsets on the architecture, an unknown version names the nearest known one
+func Inspect(library Library, architecture string) (inspected Library, err error) {
+	inspected = library
+	version, err := DetectVersion(library.Libcrypto)
 
 	if err != nil {
-		err = fmt.Errorf("%w: %w", ErrLibraryNotFound, err)
 		return
 	}
 
-	libcryptoPath = filepath.Join(filepath.Dir(libsslPath), libcryptoName)
+	inspected.Version = version
+	offset, err := GetOffset(version, architecture)
+
+	if err != nil {
+		return
+	}
+
+	inspected.Offset = offset
 	return
 }
 

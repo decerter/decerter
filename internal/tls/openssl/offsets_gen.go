@@ -4,7 +4,7 @@
 
 package openssl
 
-// 71 releases from 3.0.0 to 3.6.5, each range spans the releases from First to Last that follow each other
+// 76 releases from 3.0.0 to 4.1.0, each range spans the releases from First to Last that follow each other
 // tags without a release (withdrawn), not probed: 3.0.6
 var offsets = map[string][]offsetRange{
 	"amd64": {
@@ -248,6 +248,46 @@ var offsets = map[string][]offsetRange{
 				CipherId:               0x18,
 			},
 		},
+		{
+			First: "4.0.0",
+			Last:  "4.0.3",
+			Offset: Offset{
+				HasType:                true,
+				Type:                   0x0,
+				SSLConnection:          0x0,
+				Version:                0x48,
+				ClientRandom:           0x188,
+				Session:                0x900,
+				MasterKey:              0x50,
+				MasterKeyLength:        0x8,
+				ClientAppTrafficSecret: 0x77c,
+				ServerAppTrafficSecret: 0x7bc,
+				HandshakeSecret:        0x5bc,
+				HandshakeTrafficHash:   0x73c,
+				SessionCipher:          0x2f8,
+				CipherId:               0x18,
+			},
+		},
+		{
+			First: "4.1.0",
+			Last:  "4.1.0",
+			Offset: Offset{
+				HasType:                true,
+				Type:                   0x0,
+				SSLConnection:          0x0,
+				Version:                0x48,
+				ClientRandom:           0x190,
+				Session:                0x948,
+				MasterKey:              0x50,
+				MasterKeyLength:        0x8,
+				ClientAppTrafficSecret: 0x7c4,
+				ServerAppTrafficSecret: 0x804,
+				HandshakeSecret:        0x604,
+				HandshakeTrafficHash:   0x784,
+				SessionCipher:          0x2f8,
+				CipherId:               0x18,
+			},
+		},
 	},
 	"arm64": {
 		{
@@ -486,6 +526,46 @@ var offsets = map[string][]offsetRange{
 				ServerAppTrafficSecret: 0x7bc,
 				HandshakeSecret:        0x5bc,
 				HandshakeTrafficHash:   0x73c,
+				SessionCipher:          0x2f8,
+				CipherId:               0x18,
+			},
+		},
+		{
+			First: "4.0.0",
+			Last:  "4.0.3",
+			Offset: Offset{
+				HasType:                true,
+				Type:                   0x0,
+				SSLConnection:          0x0,
+				Version:                0x48,
+				ClientRandom:           0x188,
+				Session:                0x900,
+				MasterKey:              0x50,
+				MasterKeyLength:        0x8,
+				ClientAppTrafficSecret: 0x77c,
+				ServerAppTrafficSecret: 0x7bc,
+				HandshakeSecret:        0x5bc,
+				HandshakeTrafficHash:   0x73c,
+				SessionCipher:          0x2f8,
+				CipherId:               0x18,
+			},
+		},
+		{
+			First: "4.1.0",
+			Last:  "4.1.0",
+			Offset: Offset{
+				HasType:                true,
+				Type:                   0x0,
+				SSLConnection:          0x0,
+				Version:                0x48,
+				ClientRandom:           0x190,
+				Session:                0x948,
+				MasterKey:              0x50,
+				MasterKeyLength:        0x8,
+				ClientAppTrafficSecret: 0x7c4,
+				ServerAppTrafficSecret: 0x804,
+				HandshakeSecret:        0x604,
+				HandshakeTrafficHash:   0x784,
 				SessionCipher:          0x2f8,
 				CipherId:               0x18,
 			},

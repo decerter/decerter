@@ -195,10 +195,16 @@ jobs:
           fi
           id test
           id nobody
-      # the distro OpenSSL cases use these images in the runner's architecture and skip an image that is missing
+      # the distro OpenSSL cases use these images in the runner's architecture and skip an image that is missing; BlackArch is published for amd64 only
       - name: Pull the distro images
         run: |
-          for image in ubuntu:24.04 debian:13 fedora almalinux:10; do
+          images="ubuntu:24.04 debian:13 fedora almalinux:10 kalilinux/kali-rolling parrotsec/core"
+          if [ "$(uname -m)" = "x86_64" ]; then
+            images="$images blackarchlinux/blackarch"
+          else
+            echo "::notice::blackarchlinux/blackarch has no arm64 image, its distro OpenSSL case skips"
+          fi
+          for image in $images; do
             docker pull --quiet "$image" || echo "::warning::could not pull $image, its distro OpenSSL case skips"
           done
       # make test-e2e is sudo go test; the test binary is built as the runner user, so root doesn't write to its Go caches

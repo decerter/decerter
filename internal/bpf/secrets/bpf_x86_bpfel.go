@@ -35,6 +35,25 @@ type bpfLayoutError struct {
 	SecretLength uint32
 }
 
+type bpfOpensslLayout struct {
+	_                            structs.HostLayout
+	HasType                      uint32
+	Padding                      uint32
+	TypeOffset                   uint64
+	SslConnectionOffset          uint64
+	VersionOffset                uint64
+	ClientRandomOffset           uint64
+	SessionOffset                uint64
+	MasterKeyOffset              uint64
+	MasterKeyLengthOffset        uint64
+	SessionCipherOffset          uint64
+	CipherIdOffset               uint64
+	ClientAppTrafficSecretOffset uint64
+	ServerAppTrafficSecretOffset uint64
+	HandshakeSecretOffset        uint64
+	HandshakeTrafficHashOffset   uint64
+}
+
 type bpfTlsSecrets struct {
 	_                            structs.HostLayout
 	TlsVersion                   uint32
@@ -56,33 +75,20 @@ type bpfTlsSecrets struct {
 //
 // Used for safe lookups in a Collection or CollectionSpec.
 const (
-	bpfMapBoringsslLayoutMap           = "boringssl_layout_map"
-	bpfMapLayoutErrorMap               = "layout_error_map"
-	bpfMapPartialSecretsMap            = "partial_secrets_map"
-	bpfMapSecretsEventMap              = "secrets_event_map"
-	bpfMapSecretsMap                   = "secrets_map"
-	bpfMapSecretsScratchMap            = "secrets_scratch_map"
-	bpfMapSslMap                       = "ssl_map"
-	bpfMapTgidMap                      = "tgid_map"
-	bpfMapUidMap                       = "uid_map"
-	bpfProgLogSecret                   = "log_secret"
-	bpfProgStashSsl                    = "stash_ssl"
-	bpfProgStoreSecrets                = "store_secrets"
-	bpfVarCipherIdOffset               = "cipher_id_offset"
-	bpfVarClientAppTrafficSecretOffset = "client_app_traffic_secret_offset"
-	bpfVarClientRandomOffset           = "client_random_offset"
-	bpfVarHandshakeSecretOffset        = "handshake_secret_offset"
-	bpfVarHandshakeTrafficHashOffset   = "handshake_traffic_hash_offset"
-	bpfVarHasType                      = "has_type"
-	bpfVarMasterKeyLengthOffset        = "master_key_length_offset"
-	bpfVarMasterKeyOffset              = "master_key_offset"
-	bpfVarOwnTgid                      = "own_tgid"
-	bpfVarServerAppTrafficSecretOffset = "server_app_traffic_secret_offset"
-	bpfVarSessionCipherOffset          = "session_cipher_offset"
-	bpfVarSessionOffset                = "session_offset"
-	bpfVarSslConnectionOffset          = "ssl_connection_offset"
-	bpfVarTypeOffset                   = "type_offset"
-	bpfVarVersionOffset                = "version_offset"
+	bpfMapBoringsslLayoutMap = "boringssl_layout_map"
+	bpfMapLayoutErrorMap     = "layout_error_map"
+	bpfMapOpensslLayoutMap   = "openssl_layout_map"
+	bpfMapPartialSecretsMap  = "partial_secrets_map"
+	bpfMapSecretsEventMap    = "secrets_event_map"
+	bpfMapSecretsMap         = "secrets_map"
+	bpfMapSecretsScratchMap  = "secrets_scratch_map"
+	bpfMapSslMap             = "ssl_map"
+	bpfMapTgidMap            = "tgid_map"
+	bpfMapUidMap             = "uid_map"
+	bpfProgLogSecret         = "log_secret"
+	bpfProgStashSsl          = "stash_ssl"
+	bpfProgStoreSecrets      = "store_secrets"
+	bpfVarOwnTgid            = "own_tgid"
 )
 
 // loadBpf returns the embedded CollectionSpec for bpf.
@@ -138,6 +144,7 @@ type bpfProgramSpecs struct {
 type bpfMapSpecs struct {
 	BoringsslLayoutMap *ebpf.MapSpec `ebpf:"boringssl_layout_map"`
 	LayoutErrorMap     *ebpf.MapSpec `ebpf:"layout_error_map"`
+	OpensslLayoutMap   *ebpf.MapSpec `ebpf:"openssl_layout_map"`
 	PartialSecretsMap  *ebpf.MapSpec `ebpf:"partial_secrets_map"`
 	SecretsEventMap    *ebpf.MapSpec `ebpf:"secrets_event_map"`
 	SecretsMap         *ebpf.MapSpec `ebpf:"secrets_map"`
@@ -151,21 +158,7 @@ type bpfMapSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfVariableSpecs struct {
-	CipherIdOffset               *ebpf.VariableSpec `ebpf:"cipher_id_offset"`
-	ClientAppTrafficSecretOffset *ebpf.VariableSpec `ebpf:"client_app_traffic_secret_offset"`
-	ClientRandomOffset           *ebpf.VariableSpec `ebpf:"client_random_offset"`
-	HandshakeSecretOffset        *ebpf.VariableSpec `ebpf:"handshake_secret_offset"`
-	HandshakeTrafficHashOffset   *ebpf.VariableSpec `ebpf:"handshake_traffic_hash_offset"`
-	HasType                      *ebpf.VariableSpec `ebpf:"has_type"`
-	MasterKeyLengthOffset        *ebpf.VariableSpec `ebpf:"master_key_length_offset"`
-	MasterKeyOffset              *ebpf.VariableSpec `ebpf:"master_key_offset"`
-	OwnTgid                      *ebpf.VariableSpec `ebpf:"own_tgid"`
-	ServerAppTrafficSecretOffset *ebpf.VariableSpec `ebpf:"server_app_traffic_secret_offset"`
-	SessionCipherOffset          *ebpf.VariableSpec `ebpf:"session_cipher_offset"`
-	SessionOffset                *ebpf.VariableSpec `ebpf:"session_offset"`
-	SslConnectionOffset          *ebpf.VariableSpec `ebpf:"ssl_connection_offset"`
-	TypeOffset                   *ebpf.VariableSpec `ebpf:"type_offset"`
-	VersionOffset                *ebpf.VariableSpec `ebpf:"version_offset"`
+	OwnTgid *ebpf.VariableSpec `ebpf:"own_tgid"`
 }
 
 // bpfObjects contains all objects after they have been loaded into the kernel.
@@ -190,6 +183,7 @@ func (o *bpfObjects) Close() error {
 type bpfMaps struct {
 	BoringsslLayoutMap *ebpf.Map `ebpf:"boringssl_layout_map"`
 	LayoutErrorMap     *ebpf.Map `ebpf:"layout_error_map"`
+	OpensslLayoutMap   *ebpf.Map `ebpf:"openssl_layout_map"`
 	PartialSecretsMap  *ebpf.Map `ebpf:"partial_secrets_map"`
 	SecretsEventMap    *ebpf.Map `ebpf:"secrets_event_map"`
 	SecretsMap         *ebpf.Map `ebpf:"secrets_map"`
@@ -203,6 +197,7 @@ func (m *bpfMaps) Close() error {
 	return _BpfClose(
 		m.BoringsslLayoutMap,
 		m.LayoutErrorMap,
+		m.OpensslLayoutMap,
 		m.PartialSecretsMap,
 		m.SecretsEventMap,
 		m.SecretsMap,
@@ -217,21 +212,7 @@ func (m *bpfMaps) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfVariables struct {
-	CipherIdOffset               *ebpf.Variable `ebpf:"cipher_id_offset"`
-	ClientAppTrafficSecretOffset *ebpf.Variable `ebpf:"client_app_traffic_secret_offset"`
-	ClientRandomOffset           *ebpf.Variable `ebpf:"client_random_offset"`
-	HandshakeSecretOffset        *ebpf.Variable `ebpf:"handshake_secret_offset"`
-	HandshakeTrafficHashOffset   *ebpf.Variable `ebpf:"handshake_traffic_hash_offset"`
-	HasType                      *ebpf.Variable `ebpf:"has_type"`
-	MasterKeyLengthOffset        *ebpf.Variable `ebpf:"master_key_length_offset"`
-	MasterKeyOffset              *ebpf.Variable `ebpf:"master_key_offset"`
-	OwnTgid                      *ebpf.Variable `ebpf:"own_tgid"`
-	ServerAppTrafficSecretOffset *ebpf.Variable `ebpf:"server_app_traffic_secret_offset"`
-	SessionCipherOffset          *ebpf.Variable `ebpf:"session_cipher_offset"`
-	SessionOffset                *ebpf.Variable `ebpf:"session_offset"`
-	SslConnectionOffset          *ebpf.Variable `ebpf:"ssl_connection_offset"`
-	TypeOffset                   *ebpf.Variable `ebpf:"type_offset"`
-	VersionOffset                *ebpf.Variable `ebpf:"version_offset"`
+	OwnTgid *ebpf.Variable `ebpf:"own_tgid"`
 }
 
 // bpfPrograms contains all programs after they have been loaded into the kernel.

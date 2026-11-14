@@ -12,7 +12,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -33,7 +32,6 @@ import (
 	"github.com/decerter/decerter/internal/platform"
 	"github.com/decerter/decerter/internal/proxy"
 	"github.com/decerter/decerter/internal/route"
-	"github.com/decerter/decerter/internal/tls/openssl"
 	"github.com/cilium/ebpf"
 )
 
@@ -79,6 +77,8 @@ type App struct {
 	libssl              string
 	boringsslHooks      []boringsslHook
 	flutterSeen         map[string]bool
+	opensslHooks        []opensslHook
+	opensslSeen         map[string]bool
 	isCapture           bool
 	capturePath         string
 	plaintext           bool
@@ -134,6 +134,8 @@ func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter,
 		libssl:              libssl,
 		boringsslHooks:      nil,
 		flutterSeen:         nil,
+		opensslHooks:        nil,
+		opensslSeen:         nil,
 		isCapture:           isCapture,
 		capturePath:         capturePath,
 		plaintext:           plaintext,
@@ -833,7 +835,8 @@ func (app *App) StartFlowTable() {
 }
 
 // resolve libssl and pick the offsets, then load the secrets object; an unknown OpenSSL version fails here, so this runs before anything is attached
-// Linux hooks OpenSSL. Android hooks BoringSSL's ssl_log_secret in Conscrypt's libssl with the offsets of the Android release, and in the libflutter.so of
+// Linux hooks OpenSSL: the --libssl given, or every libssl.so.3 and libssl.so.4 of the linker cache plus the libssl the selected processes map (a
+// container's own), each with the offsets of its version. Android hooks BoringSSL's ssl_log_secret in Conscrypt's libssl with the offsets of the Android release, and in the libflutter.so of
 // each selected Flutter app with the offsets of its Dart version; with --libssl the library given, as BoringSSL when it has ssl_log_secret and as OpenSSL otherwise
 // in run and capture mode the redirect object has to be loaded already, the secrets object shares its uid_map and tgid_map; in keylog mode it owns them
 // on an architecture without the secrets object, and on Android when neither Conscrypt nor a Flutter app can be hooked, keylog mode fails, run and capture mode go on without TLS secrets
@@ -846,9 +849,10 @@ func (app *App) LoadSecretsBpfObjects() (err error) {
 	}
 
 	var (
-		opensslOffset openssl.Offset
-		libsslPath    string
-		library       string
+		libsslPaths  []string
+		libraries    []string
+		opensslHooks []opensslHook
+		opensslSeen  map[string]bool
 	)
 
 	hooks, useBoringssl, seen, boringsslErr := app.findBoringsslHooks()
@@ -859,39 +863,24 @@ func (app *App) LoadSecretsBpfObjects() (err error) {
 	}
 
 	if useBoringssl {
-		libraries := []string{}
-
 		for _, hook := range hooks {
+			libsslPaths = append(libsslPaths, hook.Path)
 			libraries = append(libraries, hook.Library)
 		}
-
-		libsslPath = hooks[0].Path
-		library = strings.Join(libraries, ", ")
 	} else {
-		opensslPath, libcryptoPath, findErr := openssl.FindLibssl(app.libssl)
+		found, foundSeen, findErr := app.findOpensslHooks()
 
 		if err = findErr; err != nil {
-			app.logger.Error("Could not find libssl", "error", err)
 			return
 		}
 
-		version, versionErr := openssl.DetectVersion(libcryptoPath)
-
-		if err = versionErr; err != nil {
-			app.logger.Error("Could not detect OpenSSL version", "error", err, "libcrypto", libcryptoPath)
-			return
+		for _, hook := range found {
+			libsslPaths = append(libsslPaths, hook.Library.Libssl)
+			libraries = append(libraries, "OpenSSL "+hook.Library.Version)
 		}
 
-		offset, offsetErr := openssl.GetOffset(version, runtime.GOARCH)
-
-		if err = offsetErr; err != nil {
-			app.logger.Error("Could not get OpenSSL offsets", "error", err, "version", version, "libcrypto", libcryptoPath)
-			return
-		}
-
-		opensslOffset = offset
-		libsslPath = opensslPath
-		library = "OpenSSL " + version
+		opensslHooks = found
+		opensslSeen = foundSeen
 	}
 
 	var sharedUidMap, sharedTgidMap *ebpf.Map
@@ -902,20 +891,21 @@ func (app *App) LoadSecretsBpfObjects() (err error) {
 		sharedTgidMap = app.redirectBpfMaps[redirect.TgidMap]
 	}
 
-	bpfMaps, bpfPrograms, closeFunction, loadErr := secrets.LoadBpfObjects(opensslOffset, uint32(os.Getpid()), sharedUidMap, sharedTgidMap)
+	bpfMaps, bpfPrograms, closeFunction, loadErr := secrets.LoadBpfObjects(uint32(os.Getpid()), sharedUidMap, sharedTgidMap)
 
 	if err = loadErr; err != nil {
 		app.logger.Error("Could not load secrets bpf objects", "error", err)
 		return
 	}
 
-	app.libssl = libsslPath
 	app.boringsslHooks = hooks
 	app.flutterSeen = seen
+	app.opensslHooks = opensslHooks
+	app.opensslSeen = opensslSeen
 	app.secretsBpfMaps = bpfMaps
 	app.secretsBpfPrograms = bpfPrograms
 	app.closeFunctions = append(app.closeFunctions, closeFunction)
-	app.logger.Info("Loaded secrets uprobe", "libssl", libsslPath, "library", library)
+	app.logger.Info("Loaded secrets uprobe", "libssl", strings.Join(libsslPaths, ", "), "library", strings.Join(libraries, ", "))
 	return
 }
 
@@ -969,7 +959,8 @@ func (app *App) StartKeylog() {
 	})
 }
 
-// OpenSSL: attach the entry and return uprobes to every libssl function that carries a complete handshake
+// OpenSSL: attach the entry and return uprobes to every libssl function that carries a complete handshake, in each libssl found, and watch for libssl
+// files selected processes start to map
 // BoringSSL: attach one entry uprobe to ssl_log_secret of each library, by file offset because the symbol is not exported, and watch for layout errors and new Flutter apps
 // nothing to attach when run mode goes on without the secrets object
 func (app *App) AttachSecrets() (err error) {
@@ -982,42 +973,7 @@ func (app *App) AttachSecrets() (err error) {
 		return
 	}
 
-	executable, openErr := attach.OpenExecutable(app.libssl)
-
-	if err = openErr; err != nil {
-		app.logger.Error("Could not open libssl", "error", err, "libssl", app.libssl)
-		return
-	}
-
-	attachments := []struct {
-		program  bpf.BpfProgramName
-		isReturn bool
-	}{
-		{program: secrets.StashSsl, isReturn: false},
-		{program: secrets.StoreSecrets, isReturn: true},
-	}
-
-	// closing a uprobe link waits in the kernel while it unregisters the probe, 60-180 ms each; one after the other the ten links made every shutdown take over a second, closed together they take about half as long, the kernel serialises the rest
-	uprobeCloseFunctions := [](func() error){}
-
-	defer func() {
-		app.closeFunctions = append(app.closeFunctions, closeTogether(uprobeCloseFunctions))
-	}()
-
-	for _, symbol := range secrets.SymbolHooks() {
-		for _, attachment := range attachments {
-			closeFunction, attachErr := attach.AddUprobe(executable, symbol, app.secretsBpfPrograms[attachment.program], attachment.isReturn)
-
-			if err = attachErr; err != nil {
-				app.logger.Error("Could not attach secrets uprobe", "error", err, "symbol", symbol, "return", attachment.isReturn)
-				return
-			}
-
-			uprobeCloseFunctions = append(uprobeCloseFunctions, closeFunction)
-		}
-	}
-
-	app.logger.Info("Attached secrets uprobe", "libssl", app.libssl, "symbols", secrets.SymbolHooks(), "uids", app.secretsUIDs(), "pids", app.secretsTgids())
+	err = app.attachOpensslHooks()
 	return
 }
 

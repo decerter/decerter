@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// Compiled (never linked or run) inside an OpenSSL 3.x source tree after
+// Compiled (never linked or run) inside an OpenSSL 3.x or 4.x source tree after
 // `make build_generated`, once per architecture with clang --target, so the
 // layout is the one that release has on that architecture. offsetgen.sh reads
 // the constants from the assembly. Offsets come from the release's own internal
@@ -10,6 +10,8 @@
 // field tells a TLS connection from the QUIC objects; ssl_connection is the
 // delta to subtract from that SSL * to reach the SSL_CONNECTION. Up to 3.1 the
 // SSL * is the connection itself and has no type field (there is no QUIC).
+// OpenSSL 4.x (libssl.so.4) kept these field names and moved most of them, so
+// the same probe reads its offsets.
 #include <stddef.h>
 
 #include "ssl/ssl_local.h"

@@ -49,7 +49,8 @@ API after the identity rule. A socket file gets mode 0660 and the group decerter
 otherwise; an abstract socket (@name, the default on Android) lets root and, on Android, adb's shell user connect.
 A held message that nobody decides goes on unchanged after --hold-timeout.
 
-The secrets come from OpenSSL 3's libssl on Linux (every 3.x release, amd64 and arm64), and on Android from Conscrypt's BoringSSL, the
+The secrets come from OpenSSL's libssl on Linux (every 3.x and 4.x release, amd64 and arm64: libssl.so.3 and libssl.so.4 of the
+linker cache and the libssl the selected processes map, so a container's own too), and on Android from Conscrypt's BoringSSL, the
 BoringSSL in libflutter.so of the selected Flutter apps (Flutter 3.24.0 to 3.50.0, by the engine's Dart version) and the BoringSSL of
 Chrome, Cronet and WebView (Chrome 124 to 160, by the Chrome version; Trichrome's library and the Chromium libraries the app's processes
 map are found too). A process with another own TLS library, such as Go programs, or a Flutter or Chromium app of an unknown version, is

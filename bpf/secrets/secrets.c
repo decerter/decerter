@@ -26,6 +26,7 @@ int stash_ssl(struct pt_regs *ctx)
 }
 
 //Store the session secrets by client_random when they are complete, at the return of the entry functions the handshake has finished and the secrets are in place
+//one program for every libssl (3.x and 4.x), the attach cookie is the index of the library's offsets in openssl_layout_map
 SEC("uretprobe/ssl")
 int store_secrets(struct pt_regs *ctx)
 {
@@ -38,16 +39,26 @@ int store_secrets(struct pt_regs *ctx)
 		return 0;
 	}
 
-	uint64_t ssl_address = *stashed - ssl_connection_offset;
+	uint64_t stashed_address = *stashed;
 
 	bpf_map_delete_elem(&ssl_map, &pid_tgid);
 
+	uint32_t layout_index = bpf_get_attach_cookie(ctx);
+	struct openssl_layout *layout = bpf_map_lookup_elem(&openssl_layout_map, &layout_index);
+
+	if (!layout)
+	{
+		return 0;
+	}
+
+	uint64_t ssl_address = stashed_address - layout->ssl_connection_offset;
+
 	//a QUIC SSL object reaches the same functions with a different layout, reading it at these offsets would be garbage; up to OpenSSL 3.1 there is no QUIC and no type field
-	if (has_type)
+	if (layout->has_type)
 	{
 		int32_t type = 0;
 
-		if (bpf_probe_read_user(&type, sizeof(type), (void *)(ssl_address + type_offset)) || (type != SSL_TYPE_SSL_CONNECTION))
+		if (bpf_probe_read_user(&type, sizeof(type), (void *)(ssl_address + layout->type_offset)) || (type != SSL_TYPE_SSL_CONNECTION))
 		{
 			return 0;
 		}
@@ -63,7 +74,7 @@ int store_secrets(struct pt_regs *ctx)
 
 	__builtin_memset(secrets, 0, sizeof(*secrets));
 
-	switch (read_secrets(ssl_address, secrets))
+	switch (read_secrets(ssl_address, layout, secrets))
 	{
 	case OK:
 		if (secrets_complete(secrets))

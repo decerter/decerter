@@ -42,6 +42,9 @@
 //BoringSSL libraries the ssl_log_secret uprobe can be attached to at once: Conscrypt's libssl and the statically linked ones (each Flutter app)
 #define BORINGSSL_LAYOUTS	64
 
+//OpenSSL libraries the stash_ssl and store_secrets uprobes can be attached to at once: libssl.so.3 and libssl.so.4 of the host and the ones selected processes map (containers)
+#define OPENSSL_LAYOUTS		64
+
 //arm64 uprobe context: the arm64 UAPI register layout (arch/arm64/include/uapi/asm/ptrace.h) PT_REGS_* reads, the x86 vmlinux.h has no arm64 types and the uprobe needs no other
 #if defined(__TARGET_ARCH_arm64)
 struct user_pt_regs {
@@ -56,48 +59,6 @@ char __license[] SEC("license") = "Dual MIT/GPL";
 
 //Value: tgid of decerter, decerter does not use libssl so it is never read, excluded for parity with the redirect, set from Go before load
 volatile const uint32_t own_tgid = 0;
-
-//Value: 1 if the SSL object has a type field (OpenSSL >= 3.2), 0 up to 3.1, which has neither the field nor QUIC objects, set from Go before load
-volatile const uint32_t has_type = 0;
-
-//Value: offsetof(ssl_st, type), the SSL object type, read before the other offsets to skip QUIC objects, set from Go before load
-volatile const uint64_t type_offset = 0;
-
-//Value: delta from the SSL * the public API hands out to the SSL_CONNECTION, subtracted first, 0 for every OpenSSL 3.x, set from Go before load
-volatile const uint64_t ssl_connection_offset = 0;
-
-//Value: offsetof(SSL_CONNECTION, version), set from Go before load
-volatile const uint64_t version_offset = 0;
-
-//Value: offsetof(SSL_CONNECTION, s3.client_random), set from Go before load
-volatile const uint64_t client_random_offset = 0;
-
-//Value: offsetof(SSL_CONNECTION, session), set from Go before load
-volatile const uint64_t session_offset = 0;
-
-//Value: offsetof(SSL_SESSION, master_key), set from Go before load
-volatile const uint64_t master_key_offset = 0;
-
-//Value: offsetof(SSL_SESSION, master_key_length), set from Go before load
-volatile const uint64_t master_key_length_offset = 0;
-
-//Value: offsetof(SSL_SESSION, cipher), the negotiated SSL_CIPHER pointer, set from Go before load
-volatile const uint64_t session_cipher_offset = 0;
-
-//Value: offsetof(SSL_CIPHER, id), the cipher id whose low 16 bits select the hash length, set from Go before load
-volatile const uint64_t cipher_id_offset = 0;
-
-//Value: offsetof(SSL_CONNECTION, client_app_traffic_secret), set from Go before load
-volatile const uint64_t client_app_traffic_secret_offset = 0;
-
-//Value: offsetof(SSL_CONNECTION, server_app_traffic_secret), set from Go before load
-volatile const uint64_t server_app_traffic_secret_offset = 0;
-
-//Value: offsetof(SSL_CONNECTION, handshake_secret), Go derives the handshake traffic secrets from it, set from Go before load
-volatile const uint64_t handshake_secret_offset = 0;
-
-//Value: offsetof(SSL_CONNECTION, handshake_traffic_hash), the transcript hash the handshake traffic secrets bind to, set from Go before load
-volatile const uint64_t handshake_traffic_hash_offset = 0;
 
 //client_random of a TLS session, the key of secrets_map
 struct client_random {
@@ -123,6 +84,30 @@ struct tls_secrets {
 	uint8_t handshake_traffic_hash[SECRET_SIZE];
 	uint8_t client_handshake_traffic_secret[SECRET_SIZE];
 	uint8_t server_handshake_traffic_secret[SECRET_SIZE];
+};
+
+//OpenSSL offsets of one libssl the stash_ssl and store_secrets uprobes are attached to, Go sets them before it attaches the uprobes with the entry's index as cookie
+//has_type: 1 if the SSL object has a type field (OpenSSL >= 3.2), 0 up to 3.1, which has neither the field nor QUIC objects; type_offset: offsetof(ssl_st, type);
+//ssl_connection_offset: delta from the SSL * the public API hands out to the SSL_CONNECTION, subtracted first, 0 for every OpenSSL 3.x and 4.x;
+//version, client_random (s3.client_random), session, client_app_traffic_secret, server_app_traffic_secret, handshake_secret, handshake_traffic_hash:
+//offsets into SSL_CONNECTION; master_key, master_key_length, session_cipher (the negotiated SSL_CIPHER pointer): offsets into SSL_SESSION;
+//cipher_id: offsetof(SSL_CIPHER, id), whose low 16 bits select the hash length
+struct openssl_layout {
+	uint32_t has_type;
+	uint32_t padding;
+	uint64_t type_offset;
+	uint64_t ssl_connection_offset;
+	uint64_t version_offset;
+	uint64_t client_random_offset;
+	uint64_t session_offset;
+	uint64_t master_key_offset;
+	uint64_t master_key_length_offset;
+	uint64_t session_cipher_offset;
+	uint64_t cipher_id_offset;
+	uint64_t client_app_traffic_secret_offset;
+	uint64_t server_app_traffic_secret_offset;
+	uint64_t handshake_secret_offset;
+	uint64_t handshake_traffic_hash_offset;
 };
 
 //BoringSSL offsets of one library the ssl_log_secret uprobe is attached to, Go sets them before it attaches the uprobe with the entry's index as cookie
@@ -174,6 +159,14 @@ struct {
 	__type(key, struct client_random);
 	__type(value, struct tls_secrets);
 } partial_secrets_map SEC(".maps");
+
+//Key: the attach cookie of the stash_ssl and store_secrets uprobes, Value: the OpenSSL offsets of the libssl they are attached to
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, OPENSSL_LAYOUTS);
+	__type(key, uint32_t);
+	__type(value, struct openssl_layout);
+} openssl_layout_map SEC(".maps");
 
 //Key: the attach cookie of the ssl_log_secret uprobe, Value: the BoringSSL offsets of the library it is attached to
 struct {
@@ -253,10 +246,10 @@ bool secrets_complete(struct tls_secrets *secrets)
 	}
 }
 
-//Read the secrets of an SSL_CONNECTION, the address is a user space pointer so it is passed as a scalar, best effort reads do not fail the whole read
-uint16_t read_secrets(uint64_t ssl_address, struct tls_secrets *secrets)
+//Read the secrets of an SSL_CONNECTION with the offsets of its libssl, the address is a user space pointer so it is passed as a scalar, best effort reads do not fail the whole read
+uint16_t read_secrets(uint64_t ssl_address, struct openssl_layout *layout, struct tls_secrets *secrets)
 {
-	if ((!ssl_address) || (!secrets))
+	if ((!ssl_address) || (!layout) || (!secrets))
 	{
 		return NOK;
 	}
@@ -264,36 +257,36 @@ uint16_t read_secrets(uint64_t ssl_address, struct tls_secrets *secrets)
 	uint64_t session_address = 0;
 	uint64_t cipher_address = 0;
 
-	if (bpf_probe_read_user(&secrets->tls_version, sizeof(secrets->tls_version), (void *)(ssl_address + version_offset)))
+	if (bpf_probe_read_user(&secrets->tls_version, sizeof(secrets->tls_version), (void *)(ssl_address + layout->version_offset)))
 	{
 		return NOK;
 	}
 
-	if (bpf_probe_read_user(&secrets->client_random, sizeof(secrets->client_random), (void *)(ssl_address + client_random_offset)))
+	if (bpf_probe_read_user(&secrets->client_random, sizeof(secrets->client_random), (void *)(ssl_address + layout->client_random_offset)))
 	{
 		return NOK;
 	}
 
-	if (bpf_probe_read_user(&session_address, sizeof(session_address), (void *)(ssl_address + session_offset)))
+	if (bpf_probe_read_user(&session_address, sizeof(session_address), (void *)(ssl_address + layout->session_offset)))
 	{
 		return NOK;
 	}
 
 	//TLS 1.3 application and handshake secrets live in the connection
-	bpf_probe_read_user(&secrets->client_app_traffic_secret, sizeof(secrets->client_app_traffic_secret), (void *)(ssl_address + client_app_traffic_secret_offset));
-	bpf_probe_read_user(&secrets->server_app_traffic_secret, sizeof(secrets->server_app_traffic_secret), (void *)(ssl_address + server_app_traffic_secret_offset));
-	bpf_probe_read_user(&secrets->handshake_secret, sizeof(secrets->handshake_secret), (void *)(ssl_address + handshake_secret_offset));
-	bpf_probe_read_user(&secrets->handshake_traffic_hash, sizeof(secrets->handshake_traffic_hash), (void *)(ssl_address + handshake_traffic_hash_offset));
+	bpf_probe_read_user(&secrets->client_app_traffic_secret, sizeof(secrets->client_app_traffic_secret), (void *)(ssl_address + layout->client_app_traffic_secret_offset));
+	bpf_probe_read_user(&secrets->server_app_traffic_secret, sizeof(secrets->server_app_traffic_secret), (void *)(ssl_address + layout->server_app_traffic_secret_offset));
+	bpf_probe_read_user(&secrets->handshake_secret, sizeof(secrets->handshake_secret), (void *)(ssl_address + layout->handshake_secret_offset));
+	bpf_probe_read_user(&secrets->handshake_traffic_hash, sizeof(secrets->handshake_traffic_hash), (void *)(ssl_address + layout->handshake_traffic_hash_offset));
 
 	//the TLS 1.2 master key and the negotiated cipher live in the session
 	if (session_address)
 	{
-		bpf_probe_read_user(&secrets->master_key, sizeof(secrets->master_key), (void *)(session_address + master_key_offset));
-		bpf_probe_read_user(&secrets->master_key_length, sizeof(secrets->master_key_length), (void *)(session_address + master_key_length_offset));
+		bpf_probe_read_user(&secrets->master_key, sizeof(secrets->master_key), (void *)(session_address + layout->master_key_offset));
+		bpf_probe_read_user(&secrets->master_key_length, sizeof(secrets->master_key_length), (void *)(session_address + layout->master_key_length_offset));
 
-		if ((!bpf_probe_read_user(&cipher_address, sizeof(cipher_address), (void *)(session_address + session_cipher_offset))) && cipher_address)
+		if ((!bpf_probe_read_user(&cipher_address, sizeof(cipher_address), (void *)(session_address + layout->session_cipher_offset))) && cipher_address)
 		{
-			bpf_probe_read_user(&secrets->cipher_id, sizeof(secrets->cipher_id), (void *)(cipher_address + cipher_id_offset));
+			bpf_probe_read_user(&secrets->cipher_id, sizeof(secrets->cipher_id), (void *)(cipher_address + layout->cipher_id_offset));
 		}
 	}
 

@@ -29,6 +29,7 @@ const (
 	TgidMap            bpf.BpfMapName     = 6 // value: "tgid_map"
 	UidMap             bpf.BpfMapName     = 7 // value: "uid_map"
 	BoringsslLayoutMap bpf.BpfMapName     = 8 // value: "boringssl_layout_map"
+	OpensslLayoutMap   bpf.BpfMapName     = 9 // value: "openssl_layout_map"
 	LogSecret          bpf.BpfProgramName = 0 // value: "log_secret"
 	StashSsl           bpf.BpfProgramName = 1 // value: "stash_ssl"
 	StoreSecrets       bpf.BpfProgramName = 2 // value: "store_secrets"
@@ -39,7 +40,7 @@ func CheckSupported() (err error) {
 	return
 }
 
-func LoadBpfObjects(opensslOffset openssl.Offset, ownTgid uint32, sharedUidMap *ebpf.Map, sharedTgidMap *ebpf.Map) (bpfMaps map[bpf.BpfMapName]*ebpf.Map, bpfPrograms map[bpf.BpfProgramName]*ebpf.Program, closeFunction func() error, err error) {
+func LoadBpfObjects(ownTgid uint32, sharedUidMap *ebpf.Map, sharedTgidMap *ebpf.Map) (bpfMaps map[bpf.BpfMapName]*ebpf.Map, bpfPrograms map[bpf.BpfProgramName]*ebpf.Program, closeFunction func() error, err error) {
 	err = CheckSupported()
 	return
 }
@@ -63,6 +64,15 @@ func Lookup(clientRandom [32]byte, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (sessio
 // no key log without the uprobe
 func LookupKeyLog(clientRandom [32]byte, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (keyLog string, found bool, err error) {
 	err = CheckSupported()
+	return
+}
+
+func SetOpensslLayout(index uint32, offset openssl.Offset, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (err error) {
+	err = CheckSupported()
+	return
+}
+
+func OpensslLayouts(bpfMaps map[bpf.BpfMapName]*ebpf.Map) (count uint32) {
 	return
 }
 

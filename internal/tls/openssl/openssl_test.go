@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -56,21 +57,23 @@ func TestDetectVersionPositive(state *testing.T) {
 
 // Test if openssl.DetectVersion returns with the expected output for the libcrypto of this host, skipped without one.
 func TestDetectVersionSystemPositive(state *testing.T) {
-	_, libcryptoPath, err := openssl.FindLibssl("")
-
-	if err == nil {
-		_, err = os.Stat(libcryptoPath)
-	}
+	libraries, err := openssl.FindLibssl("")
 
 	if err != nil {
-		state.Skipf("Test of openssl.DetectVersion skipped, no OpenSSL 3 on this host: %s", err.Error())
+		state.Skipf("Test of openssl.DetectVersion skipped, no OpenSSL 3 or 4 on this host: %s", err.Error())
 	}
 
-	version, err := openssl.DetectVersion(libcryptoPath)
+	for _, library := range libraries {
+		if _, statErr := os.Stat(library.Libcrypto); statErr != nil {
+			state.Skipf("Test of openssl.DetectVersion skipped, no libcrypto next to %s: %s", library.Libssl, statErr.Error())
+		}
 
-	if (err != nil) || !regexp.MustCompile(`^3\.\d+\.\d+$`).MatchString(version) {
-		state.Errorf("Test of openssl.DetectVersion function failed, library: %s, version should be 3.x.y, version: %s, error: %v", libcryptoPath, version, err)
-		return
+		version, err := openssl.DetectVersion(library.Libcrypto)
+
+		if (err != nil) || !regexp.MustCompile(`^[34]\.\d+\.\d+$`).MatchString(version) {
+			state.Errorf("Test of openssl.DetectVersion function failed, library: %s, version should be 3.x.y or 4.x.y, version: %s, error: %v", library.Libcrypto, version, err)
+			return
+		}
 	}
 }
 
@@ -160,6 +163,13 @@ func TestGetOffsetPositive(state *testing.T) {
 		SessionCipher:          0x2f8,
 		CipherId:               0x18,
 	}
+	offset410 := offset362
+	offset410.ClientRandom = 0x190
+	offset410.Session = 0x948
+	offset410.ClientAppTrafficSecret = 0x7c4
+	offset410.ServerAppTrafficSecret = 0x804
+	offset410.HandshakeSecret = 0x604
+	offset410.HandshakeTrafficHash = 0x784
 	positiveCases := []struct {
 		Version      string
 		Architecture string
@@ -174,6 +184,11 @@ func TestGetOffsetPositive(state *testing.T) {
 		{Version: "3.0.6", Architecture: "amd64", Expected: offset30},
 		{Version: "3.0.13", Architecture: "arm64", Expected: offset30},
 		{Version: "3.1.8", Architecture: "amd64", Expected: offset30},
+		// OpenSSL 4.0 (libssl.so.4) kept the 3.5 layout, Fedora 45's 4.0.3 checked in stage 38; 4.1 moved everything from s3 on
+		{Version: "4.0.0", Architecture: "amd64", Expected: offset362},
+		{Version: "4.0.3", Architecture: "arm64", Expected: offset362},
+		{Version: "4.1.0", Architecture: "amd64", Expected: offset410},
+		{Version: "4.1.0", Architecture: "arm64", Expected: offset410},
 	}
 
 	for _, positive := range positiveCases {
@@ -211,7 +226,11 @@ func TestGetOffsetNegative(state *testing.T) {
 		// a patch release after the table, a series and a major after it, one before it
 		{Version: "3.6.99", Architecture: "amd64", Err: openssl.ErrUnknownVersion, Message: "nearest known version is 3.6.5"},
 		{Version: "3.7.0", Architecture: "arm64", Err: openssl.ErrUnknownVersion, Message: "nearest known version is 3.6.5"},
-		{Version: "4.0.3", Architecture: "amd64", Err: openssl.ErrUnknownVersion, Message: "nearest known version is 3.6.5"},
+		// unknown 4.x: a patch release after the 4.0 range, a series after the table, a major after it
+		{Version: "4.0.4", Architecture: "amd64", Err: openssl.ErrUnknownVersion, Message: "4.0.4 on amd64, the nearest known version is 4.0.3, run make generate-openssl-offsets"},
+		{Version: "4.0.99", Architecture: "arm64", Err: openssl.ErrUnknownVersion, Message: "nearest known version is 4.0.3"},
+		{Version: "4.2.0", Architecture: "amd64", Err: openssl.ErrUnknownVersion, Message: "nearest known version is 4.1.0"},
+		{Version: "5.0.0", Architecture: "amd64", Err: openssl.ErrUnknownVersion, Message: "nearest known version is 4.1.0"},
 		{Version: "1.1.1", Architecture: "amd64", Err: openssl.ErrUnknownVersion, Message: "nearest known version is 3.0.0"},
 		{Version: "3.0.23", Architecture: "amd64", Err: openssl.ErrUnknownVersion, Message: "3.0.23 on amd64, the nearest known version is 3.0.22, run make generate-openssl-offsets"},
 		// not x.y.z, no nearest version
@@ -234,28 +253,132 @@ func TestGetOffsetNegative(state *testing.T) {
 // Test if openssl.FindLibssl returns with the expected output.
 func TestFindLibsslPositive(state *testing.T) {
 	directory := state.TempDir()
-	libssl := filepath.Join(directory, "libssl.so.3")
-	err := os.WriteFile(libssl, nil, 0o600)
-
-	if err != nil {
-		state.Fatalf("Test of openssl.FindLibssl failed, cannot write file, error: %s", err.Error())
+	positiveCases := []struct {
+		Libssl    string
+		Libcrypto string
+	}{
+		// libcrypto is taken from the directory of libssl with the same suffix, it does not have to exist yet
+		{Libssl: "libssl.so.3", Libcrypto: "libcrypto.so.3"},
+		{Libssl: "libssl.so.4", Libcrypto: "libcrypto.so.4"},
+		{Libssl: "libssl.so.4.0.3", Libcrypto: "libcrypto.so.4.0.3"},
+		// a file not named libssl gets libcrypto.so.3 like before 4.x
+		{Libssl: "renamed.so", Libcrypto: "libcrypto.so.3"},
 	}
 
-	// libcrypto is taken from the directory of libssl, it does not have to exist yet
-	libsslPath, libcryptoPath, err := openssl.FindLibssl(libssl)
+	for _, positive := range positiveCases {
+		libssl := filepath.Join(directory, positive.Libssl)
+		err := os.WriteFile(libssl, nil, 0o600)
 
-	if (err != nil) || (libsslPath != libssl) || (libcryptoPath != filepath.Join(directory, "libcrypto.so.3")) {
-		state.Errorf("Test of openssl.FindLibssl function failed, paths should be %s %s, paths: %s %s, error: %v", libssl, filepath.Join(directory, "libcrypto.so.3"), libsslPath, libcryptoPath, err)
-		return
+		if err != nil {
+			state.Fatalf("Test of openssl.FindLibssl failed, cannot write file, error: %s", err.Error())
+		}
+
+		libraries, err := openssl.FindLibssl(libssl)
+		expected := []openssl.Library{{Libssl: libssl, Libcrypto: filepath.Join(directory, positive.Libcrypto), Version: "", Offset: openssl.Offset{}}}
+
+		if (err != nil) || !slices.Equal(libraries, expected) {
+			state.Errorf("Test of openssl.FindLibssl function failed, libraries should be %+v, libraries: %+v, error: %v", expected, libraries, err)
+			return
+		}
 	}
 }
 
 // Test if openssl.FindLibssl returns with the expected errors.
 func TestFindLibsslNegative(state *testing.T) {
-	_, _, err := openssl.FindLibssl(filepath.Join(state.TempDir(), "libssl.so.3"))
+	_, err := openssl.FindLibssl(filepath.Join(state.TempDir(), "libssl.so.4"))
 
 	if !errors.Is(err, openssl.ErrLibraryNotFound) || !errors.Is(err, os.ErrNotExist) {
 		state.Errorf("Test of openssl.FindLibssl function failed, error should be %v, error: %v", openssl.ErrLibraryNotFound, err)
+		return
+	}
+}
+
+// Test if openssl.Inspect returns with the expected output for an OpenSSL 3 and an OpenSSL 4 libcrypto.
+func TestInspectPositive(state *testing.T) {
+	for _, version := range []string{"3.6.2", "4.0.3", "4.1.0"} {
+		libcrypto, err := writeELF(state.TempDir(), []section{{Name: ".rodata", Type: elf.SHT_PROGBITS, Data: []byte("\x00OpenSSL " + version + " 29 Sep 2026\x00")}})
+
+		if err != nil {
+			state.Fatalf("Test of openssl.Inspect failed, cannot write ELF, error: %s", err.Error())
+		}
+
+		expected, err := openssl.GetOffset(version, "amd64")
+
+		if err != nil {
+			state.Fatalf("Test of openssl.Inspect failed, no offsets for %s, error: %s", version, err.Error())
+		}
+
+		library, err := openssl.Inspect(openssl.Library{Libssl: "/usr/lib64/libssl.so.4", Libcrypto: libcrypto, Version: "", Offset: openssl.Offset{}}, "amd64")
+
+		if (err != nil) || (library.Version != version) || (library.Offset != expected) || (library.Libssl != "/usr/lib64/libssl.so.4") {
+			state.Errorf("Test of openssl.Inspect function failed, version should be %s with %+v, library: %+v, error: %v", version, expected, library, err)
+			return
+		}
+	}
+}
+
+// Test if openssl.Inspect returns with the expected errors: an unknown 4.x names the nearest known version and keeps the version it read.
+func TestInspectNegative(state *testing.T) {
+	libcrypto, err := writeELF(state.TempDir(), []section{{Name: ".rodata", Type: elf.SHT_PROGBITS, Data: []byte("\x00OpenSSL 4.0.9 1 Jan 2027\x00")}})
+
+	if err != nil {
+		state.Fatalf("Test of openssl.Inspect failed, cannot write ELF, error: %s", err.Error())
+	}
+
+	negativeCases := []struct {
+		Libcrypto string
+		Version   string
+		Err       error
+		Message   string
+	}{
+		{Libcrypto: libcrypto, Version: "4.0.9", Err: openssl.ErrUnknownVersion, Message: "4.0.9 on amd64, the nearest known version is 4.0.3"},
+		{Libcrypto: filepath.Join(state.TempDir(), "libcrypto.so.4"), Version: "", Err: openssl.ErrOpenLibrary, Message: "libcrypto.so.4"},
+	}
+
+	for _, negative := range negativeCases {
+		library, err := openssl.Inspect(openssl.Library{Libssl: "libssl.so.4", Libcrypto: negative.Libcrypto, Version: "", Offset: openssl.Offset{}}, "amd64")
+
+		if !errors.Is(err, negative.Err) || !strings.Contains(err.Error(), negative.Message) || (library.Version != negative.Version) || (library.Offset != openssl.Offset{}) {
+			state.Errorf("Test of openssl.Inspect function failed, error should be %v naming %q with version %q, library: %+v, error: %v", negative.Err, negative.Message, negative.Version, library, err)
+			return
+		}
+	}
+}
+
+// Test if openssl.MappedLibssl returns with the expected output.
+func TestMappedLibsslPositive(state *testing.T) {
+	maps := strings.Join([]string{
+		"7f0000000000-7f0000020000 r--p 00000000 00:2a 1234 /usr/lib64/libssl.so.4.0.3",
+		"7f0000020000-7f00000a0000 r-xp 00020000 00:2a 1234 /usr/lib64/libssl.so.4.0.3",
+		"7f00000a0000-7f00000c0000 r-xp 00020000 00:2a 1235 /usr/lib/x86_64-linux-gnu/libssl.so.3",
+		"7f00000c0000-7f00000e0000 r-xp 00020000 00:2a 1236 /opt/app dir/lib/libssl.so.3",
+		// mapped twice executable, listed once
+		"7f00000e0000-7f0000100000 r-xp 00040000 00:2a 1235 /usr/lib/x86_64-linux-gnu/libssl.so.3",
+	}, "\n")
+	expected := []string{"/usr/lib64/libssl.so.4.0.3", "/usr/lib/x86_64-linux-gnu/libssl.so.3", "/opt/app dir/lib/libssl.so.3"}
+	paths := openssl.MappedLibssl(maps)
+
+	if !slices.Equal(paths, expected) {
+		state.Errorf("Test of openssl.MappedLibssl function failed, paths should be %q, paths: %q", expected, paths)
+		return
+	}
+}
+
+// Test if openssl.MappedLibssl returns with the expected output for mappings that are no OpenSSL 3 or newer libssl.
+func TestMappedLibsslNegative(state *testing.T) {
+	maps := strings.Join([]string{
+		// not executable, OpenSSL 1.1, libcrypto, a look-alike name, a deleted file, anonymous memory, a short line
+		"7f0000000000-7f0000020000 r--p 00000000 00:2a 1234 /usr/lib64/libssl.so.4",
+		"7f0000020000-7f00000a0000 r-xp 00020000 00:2a 1237 /usr/lib/libssl.so.1.1",
+		"7f00000a0000-7f00000c0000 r-xp 00020000 00:2a 1238 /usr/lib64/libcrypto.so.4",
+		"7f00000c0000-7f00000e0000 r-xp 00020000 00:2a 1239 /usr/lib64/libssl.so.3.bak",
+		"7f00000e0000-7f0000100000 r-xp 00020000 00:2a 1240 /usr/lib64/libssl.so.3 (deleted)",
+		"7f0000100000-7f0000120000 r-xp 00000000 00:00 0 [vdso]",
+		"7f0000120000-7f0000140000 r-xp",
+	}, "\n")
+
+	if paths := openssl.MappedLibssl(maps); len(paths) != 0 {
+		state.Errorf("Test of openssl.MappedLibssl function failed, paths should be empty, paths: %q", paths)
 		return
 	}
 }

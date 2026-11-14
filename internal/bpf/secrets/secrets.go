@@ -27,6 +27,7 @@ const (
 	TgidMap            bpf.BpfMapName     = 6 // value: "tgid_map"
 	UidMap             bpf.BpfMapName     = 7 // value: "uid_map"
 	BoringsslLayoutMap bpf.BpfMapName     = 8 // value: "boringssl_layout_map"
+	OpensslLayoutMap   bpf.BpfMapName     = 9 // value: "openssl_layout_map"
 	LogSecret          bpf.BpfProgramName = 0 // value: "log_secret"
 	StashSsl           bpf.BpfProgramName = 1 // value: "stash_ssl"
 	StoreSecrets       bpf.BpfProgramName = 2 // value: "store_secrets"
@@ -37,12 +38,12 @@ func CheckSupported() (err error) {
 	return
 }
 
-// one object holds the OpenSSL programs (stash_ssl, store_secrets) and the BoringSSL one (log_secret); the OpenSSL offsets are set before load, they stay zero and
-// its programs are never attached when BoringSSL is hooked; the BoringSSL offsets are per library in boringssl_layout_map (SetBoringsslLayout), so Conscrypt and
-// every Flutter app can be hooked at once
+// one object holds the OpenSSL programs (stash_ssl, store_secrets) and the BoringSSL one (log_secret); the offsets are per library in openssl_layout_map
+// (SetOpensslLayout) and boringssl_layout_map (SetBoringsslLayout), read by the attach cookie, so libssl.so.3 and libssl.so.4 of the host, the libssl of
+// a container, Conscrypt and every Flutter app can be hooked at once
 // sharedUidMap and sharedTgidMap share the redirect object's selection maps in run mode, so run and keylog mode pick processes the same way
 // in keylog mode they are nil, the secrets object owns uid_map and tgid_map and UpdateSelection fills them; with both empty no process is read
-func LoadBpfObjects(opensslOffset openssl.Offset, ownTgid uint32, sharedUidMap *ebpf.Map, sharedTgidMap *ebpf.Map) (bpfMaps map[bpf.BpfMapName]*ebpf.Map, bpfPrograms map[bpf.BpfProgramName]*ebpf.Program, closeFunction func() error, err error) {
+func LoadBpfObjects(ownTgid uint32, sharedUidMap *ebpf.Map, sharedTgidMap *ebpf.Map) (bpfMaps map[bpf.BpfMapName]*ebpf.Map, bpfPrograms map[bpf.BpfProgramName]*ebpf.Program, closeFunction func() error, err error) {
 	err = rlimit.RemoveMemlock()
 
 	if err != nil {
@@ -57,38 +58,11 @@ func LoadBpfObjects(opensslOffset openssl.Offset, ownTgid uint32, sharedUidMap *
 		return
 	}
 
-	// the offsets are set before load so the verifier bakes them into the probe
-	hasType := uint32(0)
+	err = spec.Variables[bpfVarOwnTgid].Set(ownTgid)
 
-	if opensslOffset.HasType {
-		hasType = 1
-	}
-
-	variables := map[string]any{
-		bpfVarOwnTgid:                      ownTgid,
-		bpfVarHasType:                      hasType,
-		bpfVarTypeOffset:                   opensslOffset.Type,
-		bpfVarSslConnectionOffset:          opensslOffset.SSLConnection,
-		bpfVarVersionOffset:                opensslOffset.Version,
-		bpfVarClientRandomOffset:           opensslOffset.ClientRandom,
-		bpfVarSessionOffset:                opensslOffset.Session,
-		bpfVarMasterKeyOffset:              opensslOffset.MasterKey,
-		bpfVarMasterKeyLengthOffset:        opensslOffset.MasterKeyLength,
-		bpfVarSessionCipherOffset:          opensslOffset.SessionCipher,
-		bpfVarCipherIdOffset:               opensslOffset.CipherId,
-		bpfVarClientAppTrafficSecretOffset: opensslOffset.ClientAppTrafficSecret,
-		bpfVarServerAppTrafficSecretOffset: opensslOffset.ServerAppTrafficSecret,
-		bpfVarHandshakeSecretOffset:        opensslOffset.HandshakeSecret,
-		bpfVarHandshakeTrafficHashOffset:   opensslOffset.HandshakeTrafficHash,
-	}
-
-	for name, value := range variables {
-		err = spec.Variables[name].Set(value)
-
-		if err != nil {
-			err = fmt.Errorf("set %s: %w", name, err)
-			return
-		}
+	if err != nil {
+		err = fmt.Errorf("set %s: %w", bpfVarOwnTgid, err)
+		return
 	}
 
 	options := &ebpf.CollectionOptions{}
@@ -119,6 +93,7 @@ func LoadBpfObjects(opensslOffset openssl.Offset, ownTgid uint32, sharedUidMap *
 		TgidMap:            objs.TgidMap,
 		UidMap:             objs.UidMap,
 		BoringsslLayoutMap: objs.BoringsslLayoutMap,
+		OpensslLayoutMap:   objs.OpensslLayoutMap,
 	}
 	bpfPrograms = map[bpf.BpfProgramName]*ebpf.Program{
 		LogSecret:    objs.LogSecret,
@@ -149,6 +124,47 @@ func UpdateSelection(uids []uint32, tgids []uint32, bpfMaps map[bpf.BpfMapName]*
 		}
 	}
 
+	return
+}
+
+// the OpenSSL offsets of the libssl whose stash_ssl and store_secrets uprobes get index as their attach cookie, set before the uprobes are attached
+func SetOpensslLayout(index uint32, offset openssl.Offset, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (err error) {
+	hasType := uint32(0)
+
+	if offset.HasType {
+		hasType = 1
+	}
+
+	layout := bpfOpensslLayout{
+		HasType:                      hasType,
+		Padding:                      0,
+		TypeOffset:                   offset.Type,
+		SslConnectionOffset:          offset.SSLConnection,
+		VersionOffset:                offset.Version,
+		ClientRandomOffset:           offset.ClientRandom,
+		SessionOffset:                offset.Session,
+		MasterKeyOffset:              offset.MasterKey,
+		MasterKeyLengthOffset:        offset.MasterKeyLength,
+		SessionCipherOffset:          offset.SessionCipher,
+		CipherIdOffset:               offset.CipherId,
+		ClientAppTrafficSecretOffset: offset.ClientAppTrafficSecret,
+		ServerAppTrafficSecretOffset: offset.ServerAppTrafficSecret,
+		HandshakeSecretOffset:        offset.HandshakeSecret,
+		HandshakeTrafficHashOffset:   offset.HandshakeTrafficHash,
+	}
+	err = bpfMaps[OpensslLayoutMap].Update(index, layout, ebpf.UpdateExist)
+
+	if err != nil {
+		err = fmt.Errorf("update %s index %d: %w", bpfMapOpensslLayoutMap, index, err)
+		return
+	}
+
+	return
+}
+
+// how many OpenSSL libraries can be hooked at once, the size of openssl_layout_map
+func OpensslLayouts(bpfMaps map[bpf.BpfMapName]*ebpf.Map) (count uint32) {
+	count = bpfMaps[OpensslLayoutMap].MaxEntries()
 	return
 }
 

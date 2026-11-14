@@ -7,6 +7,7 @@ package openssl
 import (
 	"encoding/binary"
 	"os"
+	"slices"
 	"testing"
 )
 
@@ -19,11 +20,14 @@ type cacheEntry struct {
 }
 
 const (
-	x8664Flags  uint32 = 0x0303
-	i386Flags   uint32 = 0x0003
-	libsslPath  string = "/usr/lib/x86_64-linux-gnu/libssl.so.3"
-	hwcapsPath  string = "/usr/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v3/libssl.so.3"
-	libssl32bit string = "/usr/lib/i386-linux-gnu/libssl.so.3"
+	libsslName    string = "libssl.so.3"
+	libssl4Name   string = "libssl.so.4"
+	libcryptoName string = "libcrypto.so.3"
+	x8664Flags    uint32 = 0x0303
+	i386Flags     uint32 = 0x0003
+	libsslPath    string = "/usr/lib/x86_64-linux-gnu/libssl.so.3"
+	hwcapsPath    string = "/usr/lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v3/libssl.so.3"
+	libssl32bit   string = "/usr/lib/i386-linux-gnu/libssl.so.3"
 )
 
 // Test if openssl.findInLinkerCache returns with the expected output.
@@ -75,6 +79,62 @@ func TestFindInLinkerCachePositive(state *testing.T) {
 	if text := cacheString([]byte("no nul"), 0); text != "" {
 		state.Errorf("Test of openssl.cacheString function failed, text should be empty, text: %q", text)
 		return
+	}
+}
+
+// Test if openssl.findLibraries returns with the expected output: a host with libssl.so.3 and libssl.so.4 gets both, in the order of the names.
+func TestFindLibrariesPositive(state *testing.T) {
+	both := []cacheEntry{
+		{Flags: x8664Flags, Name: libssl4Name, Path: "/lib64/libssl.so.4", Hwcap: 0},
+		{Flags: x8664Flags, Name: libsslName, Path: "/lib64/libssl.so.3", Hwcap: 0},
+		{Flags: x8664Flags, Name: "libcrypto.so.4", Path: "/lib64/libcrypto.so.4", Hwcap: 0},
+	}
+	// Fedora 45 without openssl3-libs, and a host where both names lead to one file
+	only4 := []cacheEntry{{Flags: x8664Flags, Name: libssl4Name, Path: "/lib64/libssl.so.4", Hwcap: 0}}
+	same := []cacheEntry{{Flags: x8664Flags, Name: libssl4Name, Path: "/lib64/libssl.so", Hwcap: 0}, {Flags: x8664Flags, Name: libsslName, Path: "/lib64/libssl.so", Hwcap: 0}}
+	positiveCases := []struct {
+		Name     string
+		Entries  []cacheEntry
+		Expected []string
+	}{
+		{Name: "both", Entries: both, Expected: []string{"/lib64/libssl.so.3", "/lib64/libssl.so.4"}},
+		{Name: "only 4", Entries: only4, Expected: []string{"/lib64/libssl.so.4"}},
+		{Name: "same file", Entries: same, Expected: []string{"/lib64/libssl.so"}},
+	}
+
+	for _, positive := range positiveCases {
+		cache := linkerCache(positive.Entries, false)
+		paths := findLibraries(libsslNames, func(name string) (path string) {
+			path = findInLinkerCache(cache, name, x8664Flags)
+			return
+		})
+
+		if !slices.Equal(paths, positive.Expected) {
+			state.Errorf("Test of openssl.findLibraries function failed, case %q, paths should be %q, paths: %q", positive.Name, positive.Expected, paths)
+			return
+		}
+	}
+}
+
+// Test if openssl.findLibraries returns with the expected output when no name is found: no library, an architecture whose entries are missing, a 32 bit
+// library only, or an OpenSSL 1.1 only.
+func TestFindLibrariesNegative(state *testing.T) {
+	entries := []cacheEntry{
+		{Flags: i386Flags, Name: libssl4Name, Path: "/usr/lib/i386-linux-gnu/libssl.so.4", Hwcap: 0},
+		{Flags: x8664Flags, Name: "libssl.so.1.1", Path: "/usr/lib/libssl.so.1.1", Hwcap: 0},
+	}
+
+	for _, flags := range []uint32{x8664Flags, 0x0a03} {
+		cache := linkerCache(entries, false)
+		paths := findLibraries(libsslNames, func(name string) (path string) {
+			path = findInLinkerCache(cache, name, flags)
+			return
+		})
+
+		if len(paths) != 0 {
+			state.Errorf("Test of openssl.findLibraries function failed, flags 0x%04x, paths should be empty, paths: %q", flags, paths)
+			return
+		}
 	}
 }
 

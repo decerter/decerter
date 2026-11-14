@@ -6,7 +6,7 @@ decerter picks the sockets of one user, one process or one Android app with eBPF
 **Docs:** [filter language](docs/filter.md) · [control API](docs/api.md) · [HTTP layer](docs/http.md) · [capture](docs/capture.md) · [web UI](docs/ui.md) · [MCP](docs/mcp.md) · [Android](docs/android.md) · [building and testing](docs/development.md)
 
 ## Quickstart: Linux
-Download `decerter_<version>_linux_amd64.tar.gz` (or `_arm64`) and `SHA256SUMS`, or build them with `make release` (see [building](docs/development.md)). decerter needs root, Linux 6.6 or newer with BTF, cgroup v2, and for decryption a program linked against OpenSSL 3's `libssl.so.3`, such as curl on most distributions.
+Download `decerter_<version>_linux_amd64.tar.gz` (or `_arm64`) and `SHA256SUMS`, or build them with `make release` (see [building](docs/development.md)). decerter needs root, Linux 6.6 or newer with BTF, cgroup v2, and for decryption a program linked against OpenSSL 3's `libssl.so.3` or OpenSSL 4's `libssl.so.4`, such as curl on most distributions.
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
@@ -117,7 +117,7 @@ For an arm64 phone, put the arm64 binary next to the amd64 one, where setup look
 ## How it works
 - **Selection:** cgroup v2 socket hooks (`connect4/6`, `sendmsg4/6`) check the calling process against BPF maps filled from `--uid`, `--pid`, `--package`, `--dst-cidr`, `--dst-port` and the kernel part of [`--filter`](docs/filter.md). Nothing is selected until a process is named.
 - **Redirect:** a selected socket's destination is rewritten to decerter's proxy on `lo` (port 15001, one TCP listener and one UDP socket); `getpeername()` and `recvmsg()` still show the real server. The kernel builds every packet on both sides, so nothing rewrites checksums or sequence numbers, and no interface, VPN or iptables rule is added.
-- **Keys:** a uprobe on the TLS library (OpenSSL 3 on Linux; Conscrypt, Flutter's and Chrome's BoringSSL on Android) copies the session secrets into a BPF map keyed by the ClientHello's random, the model of `SSLKEYLOGFILE`. The handshake goes on untouched.
+- **Keys:** a uprobe on the TLS library (OpenSSL 3 and 4 on Linux; Conscrypt, Flutter's and Chrome's BoringSSL on Android) copies the session secrets into a BPF map keyed by the ClientHello's random, the model of `SSLKEYLOGFILE`. The handshake goes on untouched.
 - **Edit:** the proxy decrypts each record with those keys, runs it through the rules, the hold queue and the HTTP/1.1 and HTTP/2 layer, and seals it again with the same keys and the right sequence number.
 - **Capture:** `decerter capture` redirects nothing; `cgroup_skb` programs copy the selected sockets' packets to a ring buffer, written as pcapng with a Decryption Secrets Block per session.
 - On Android netd holds the cgroup hooks exclusively; decerter shares them while it runs and puts them back on exit.
@@ -139,10 +139,11 @@ What decerter adds: editing TLS traffic without a CA, by sealing changed records
 
 | TLS library | Versions | Status |
 |---|---|---|
-| OpenSSL 3 (`libssl.so.3`), Linux amd64 | 3.6.2 (Debian forky); distribution builds 3.0.13 (Ubuntu 24.04), 3.5.7 (Debian 13), 3.5.8 (AlmaLinux 10, FIPS), 3.5.9 (Fedora 45 `openssl3-libs`) | tested |
-| OpenSSL 3, Linux amd64 | every other release 3.0.0–3.6.5 (offsets generated from each release's source) | built, untested |
-| OpenSSL 3, Linux arm64 | 3.0.0–3.6.5 | built, untested |
-| OpenSSL 4 (`libssl.so.4`), 1.1, LibreSSL, GnuTLS, NSS, rustls, Go's `crypto/tls`, other statically linked TLS on Linux | | unsupported |
+| OpenSSL 3 (`libssl.so.3`), Linux amd64 | 3.6.2 (Debian forky); distribution builds 3.0.13 (Ubuntu 24.04), 3.5.7 (Debian 13), 3.5.7 (Parrot 7.4, `parrotsec/core`), 3.5.8 (AlmaLinux 10, FIPS), 3.5.9 (Fedora 45 `openssl3-libs`), 3.6.5 (Kali rolling 2026.3, `kalilinux/kali-rolling`), 3.6.5 (BlackArch on Arch, `blackarchlinux/blackarch`) | tested |
+| OpenSSL 4 (`libssl.so.4`), Linux amd64 | 4.0.3 (Fedora 45's default, also next to `openssl3-libs` 3.5.9 with both hooked at once); 4.1.0 built from upstream source | tested |
+| OpenSSL 3 and 4, Linux amd64 | every other release 3.0.0–3.6.5 and 4.0.0–4.1.0 (offsets generated from each release's source) | built, untested |
+| OpenSSL 3 and 4, Linux arm64 | 3.0.0–3.6.5, 4.0.0–4.1.0 | built, untested |
+| OpenSSL 1.1, LibreSSL, GnuTLS, NSS, rustls, Go's `crypto/tls`, other statically linked TLS on Linux | | unsupported |
 | Conscrypt (Android's platform TLS: Java and Kotlin apps) | Android 15, x86_64 | tested |
 | Conscrypt | Android 16 and 17 offsets; arm64 | built, untested |
 | Flutter (`dart:io`'s BoringSSL in `libflutter.so`) | 3.35.7 and 3.50.0, x86_64 | tested |
@@ -233,14 +234,14 @@ sudo ./decerter keylog --uid 1001 > keys.log
 
 `run` relays (`--decrypt` prints, `--intercept` edits), [`capture`](docs/capture.md) records without redirecting, `keylog` prints secrets, [`ui`](docs/ui.md) and [`mcp`](docs/mcp.md) are clients of the [control API](docs/api.md) and run as your user, [`android`](docs/android.md) sets up a device. The examples select the user `test`, UID 1001.
 
-The proxy of `run` listens on port 15001 of `lo` (`--port`), TCP and UDP; a UDP session ends after 30 s without a datagram (`--udp-idle-timeout`). The secrets uprobe goes on the `libssl.so.3` of the dynamic linker cache, or the library `--libssl` names (OpenSSL's `libcrypto.so.3` has to be next to it); a process using another copy of OpenSSL, such as one in a container, needs `--libssl` with that copy's path (`/proc/<pid>/root/…`). `--flow-table` prints the kernel's flow table every 5 s for debugging. `--log-level` sets the JSON logs on stderr, and every flag can also come from an environment variable `DECERTER_<FLAG>`.
+The proxy of `run` listens on port 15001 of `lo` (`--port`), TCP and UDP; a UDP session ends after 30 s without a datagram (`--udp-idle-timeout`). The secrets uprobe goes on the `libssl.so.3` and the `libssl.so.4` of the dynamic linker cache, both when the host has both, each with the offsets of its own version, and on every OpenSSL 3 or newer `libssl` the selected processes map (read from `/proc/<pid>/maps` at start and every 2 s and opened through `/proc/<pid>/root`), so a container's own OpenSSL is found too; with `--libssl` only the library it names (OpenSSL's `libcrypto` with the same suffix has to be next to it). An unknown version of the linker cache's or `--libssl`'s OpenSSL stops decerter before anything is attached and names the nearest known version; a library only a process maps with an unknown version is logged and that process is relayed without secrets. `--flow-table` prints the kernel's flow table every 5 s for debugging. `--log-level` sets the JSON logs on stderr, and every flag can also come from an environment variable `DECERTER_<FLAG>`.
 
 ## Known limits
 - Only outgoing flows: sockets that `connect()` or `sendmsg()` in a selected process. Accepted (server-side) sockets are not redirected or captured, and the children of a `--pid` are not followed.
 - `getsockname()` in the app shows the loopback address in run mode. A destination that is routed but doesn't answer looks connected to the app until the proxy's 10 s dial timeout resets it.
 - One unconnected UDP socket that sends a burst to two destinations before the proxy reads them can send both to the second one.
 - A process whose TLS library decerter doesn't support (see the matrix), or a Flutter or Chromium app of a version not in decerter's tables, is relayed and captured without decryption; the log says why and names the `make` target that adds a version.
-- A Chromium library found in a running process's mappings is hooked only once that process runs, so its first sessions before the next scan (every 2 s) have no secrets: start the app after decerter.
+- A Chromium library found in a running process's mappings is hooked only once that process runs, so its first sessions before the next scan (every 2 s) have no secrets: start the app after decerter. The same holds on Linux for an OpenSSL that only a process started after decerter maps (a new container): its sessions in the first up to 2 s have no secrets, or give `--libssl`.
 - `--decrypt` drops back to plain relaying for a flow it can't keep up with (unthrottled loopback transfers, about 400 MB/s); the relay is unaffected. `--intercept` ignores the peer's `record_size_limit` and `max_fragment_length`.
 - A record rule sees one message at a time (a TLS record, one read, one datagram); layer `http` sees whole HTTP messages. HTTP bodies are not decompressed, bodies over 1 MiB go on unedited, and on HTTP/2 a held request also holds back the client's later new streams ([HTTP layer](docs/http.md)).
 - Capture: a TLS flow is held until its secrets arrive (at most 10 s and 1 MiB per flow, 64 MiB in total), so the file is in time order within a flow but not across flows. Packets between two selected local sockets appear twice. A capture of `decerter run` holds the wire side, not the app's loopback packets.

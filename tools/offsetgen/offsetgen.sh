@@ -4,8 +4,9 @@
 # usage: tools/offsetgen/offsetgen.sh all > internal/tls/openssl/offsets_gen.go
 #        tools/offsetgen/offsetgen.sh openssl-3.6.2 [openssl-3.5.4 ...] > internal/tls/openssl/offsets_gen.go
 #
-# "all" is every OpenSSL 3.x release tag of the upstream repository; alpha,
-# beta and other pre-release tags are skipped. For each release: download the
+# "all" is every OpenSSL 3.x and 4.x release tag of the upstream repository;
+# alpha, beta and other pre-release tags are skipped. 4.x (libssl.so.4) keeps
+# the 3.2+ SSL_CONNECTION layout with other offsets, so one probe serves both. For each release: download the
 # release tarball and its .sha256 once into the cache (OPENSSL_CACHE, default
 # ~/.cache/decerter-openssl), check the SHA-256, then for amd64 and arm64 configure
 # it (linux-x86_64 / linux-aarch64), generate the internal headers, compile
@@ -30,7 +31,7 @@ download="${OPENSSL_DOWNLOAD:-https://github.com/openssl/openssl/releases/downlo
 cache="${OPENSSL_CACHE:-${XDG_CACHE_HOME:-${HOME}/.cache}/decerter-openssl}"
 clang="${CLANG:-clang}"
 jobs="${OFFSETGEN_JOBS:-$(nproc)}"
-release_pattern='^openssl-3\.[0-9]+\.[0-9]+$'
+release_pattern='^openssl-[34]\.[0-9]+\.[0-9]+$'
 
 # the headers clang compiles the probe with: a sysroot's include dir, or the host's own for the host architecture
 include_flags() {
@@ -179,8 +180,8 @@ mkdir -p "${cache}"
 work="$(mktemp -d)"
 trap 'rm -rf "${work}"' EXIT
 
-# every final 3.x release in version order, the ranges are checked against it
-git ls-remote --tags --refs "${repo}" 'refs/tags/openssl-3.*' | awk '{ sub("refs/tags/", "", $2); print $2 }' | grep -E "${release_pattern}" | sort -V > "${work}/releases"
+# every final 3.x and 4.x release in version order, the ranges are checked against it
+git ls-remote --tags --refs "${repo}" 'refs/tags/openssl-3.*' 'refs/tags/openssl-4.*' | awk '{ sub("refs/tags/", "", $2); print $2 }' | grep -E "${release_pattern}" | sort -V > "${work}/releases"
 
 if [[ "$*" == "all" ]]
 then
@@ -190,7 +191,7 @@ else
 	do
 		if ! grep -qxF "${tag}" "${work}/releases"
 		then
-			echo "offsetgen: ${tag} is not an OpenSSL 3.x release tag (pre-releases are skipped)" >&2
+			echo "offsetgen: ${tag} is not an OpenSSL 3.x or 4.x release tag (pre-releases are skipped)" >&2
 			exit 1
 		fi
 

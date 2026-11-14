@@ -114,7 +114,7 @@ check-bpf-objects: ## Check that the committed bpf2go output is what generate-bp
 	./tools/bpfdrift/check.sh
 
 .PHONY: generate-openssl-offsets
-generate-openssl-offsets: ## Generate OpenSSL struct offsets of amd64 and arm64 for OPENSSL_VERSIONS (default is all, every 3.x release, or tags like openssl-3.6.2), tarballs are cached in OPENSSL_CACHE (default is ~/.cache/decerter-openssl), arm64 needs the aarch64 glibc headers in ARM64_SYSROOT (default is /usr/aarch64-linux-gnu)
+generate-openssl-offsets: ## Generate OpenSSL struct offsets of amd64 and arm64 for OPENSSL_VERSIONS (default is all, every 3.x and 4.x release, or tags like openssl-3.6.2), tarballs are cached in OPENSSL_CACHE (default is ~/.cache/decerter-openssl), arm64 needs the aarch64 glibc headers in ARM64_SYSROOT (default is /usr/aarch64-linux-gnu)
 	tmp="$$(mktemp)"; \
 	OPENSSL_CACHE="$(OPENSSL_CACHE)" ARM64_SYSROOT="$(ARM64_SYSROOT)" AMD64_SYSROOT="$(AMD64_SYSROOT)" CLANG="$(CLANG)" ./tools/offsetgen/offsetgen.sh $(OPENSSL_VERSIONS) > "$$tmp" && gofmt -w "$$tmp" && mv "$$tmp" internal/tls/openssl/offsets_gen.go || { rm -f "$$tmp"; exit 1; }
 

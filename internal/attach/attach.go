@@ -42,16 +42,19 @@ func OpenExecutable(path string) (executable *link.Executable, err error) {
 }
 
 // attach program to the entry (isReturn false) or the return (isReturn true) of symbol in executable
-func AddUprobe(executable *link.Executable, symbol string, program *ebpf.Program, isReturn bool) (closeFunction func() error, err error) {
+// the program reads cookie with bpf_get_attach_cookie, one program serves several libraries that way
+func AddUprobe(executable *link.Executable, symbol string, program *ebpf.Program, isReturn bool, cookie uint64) (closeFunction func() error, err error) {
 	var (
 		uprobeLink link.Link
 		attachErr  error
 	)
 
+	options := &link.UprobeOptions{Cookie: cookie}
+
 	if isReturn {
-		uprobeLink, attachErr = executable.Uretprobe(symbol, program, nil)
+		uprobeLink, attachErr = executable.Uretprobe(symbol, program, options)
 	} else {
-		uprobeLink, attachErr = executable.Uprobe(symbol, program, nil)
+		uprobeLink, attachErr = executable.Uprobe(symbol, program, options)
 	}
 
 	if err = attachErr; err != nil {
