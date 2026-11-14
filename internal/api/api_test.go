@@ -444,6 +444,7 @@ func TestAccessPolicyPositive(state *testing.T) {
 
 // Test if api.Listen and api.Server.Close return with the expected output: a socket file with mode 0600 or 0660, a stale socket replaced, the file removed on close.
 func TestListenPositive(state *testing.T) {
+	setSocketGroup(state, "")
 	directory := state.TempDir()
 	socketPath := filepath.Join(directory, "api.sock")
 	logger := slog.New(slog.DiscardHandler)
@@ -471,9 +472,9 @@ func TestListenPositive(state *testing.T) {
 
 	info, err := os.Lstat(socketPath)
 
-	// without root the file can't be given the group, a test run as root may find the group decerter
-	if (err != nil) || (info.Mode().Type() != os.ModeSocket) || ((info.Mode().Perm() != 0o600) && (info.Mode().Perm() != 0o660)) {
-		state.Errorf("Test of api.Listen failed, the socket should have mode 0600 or 0660, info: %v, error: %v", info, err)
+	// the test has no group decerter, whatever the host has
+	if (err != nil) || (info.Mode().Type() != os.ModeSocket) || (info.Mode().Perm() != 0o600) {
+		state.Errorf("Test of api.Listen failed, the socket should have mode 0600, info: %v, error: %v", info, err)
 		return
 	}
 
@@ -492,6 +493,7 @@ func TestListenPositive(state *testing.T) {
 
 // Test if api.Listen returns with the expected errors: a path that is no socket, a socket another server answers on.
 func TestListenNegative(state *testing.T) {
+	setSocketGroup(state, "")
 	directory := state.TempDir()
 	logger := slog.New(slog.DiscardHandler)
 	filePath := filepath.Join(directory, "file")
@@ -540,6 +542,7 @@ func TestPayloadWindowPositive(state *testing.T) {
 		Expected v1.Payload
 	}{
 		{Data: []byte("GET /\r\n\x1b\\\xff"), Offset: 0, Length: 100, Expected: v1.Payload{Offset: 0, Length: 10, Total: 10, Hex: "474554202f0d0a1b5cff", Escaped: `GET /\r\n\x1b\\\xff`}},
+		{Data: []byte("a\tb"), Offset: 0, Length: 3, Expected: v1.Payload{Offset: 0, Length: 3, Total: 3, Hex: "610962", Escaped: `a\tb`}},
 		{Data: []byte("abcdef"), Offset: 2, Length: 3, Expected: v1.Payload{Offset: 2, Length: 3, Total: 6, Hex: "636465", Escaped: "cde"}},
 		{Data: []byte("abc"), Offset: 10, Length: 3, Expected: v1.Payload{Offset: 3, Length: 0, Total: 3, Hex: "", Escaped: ""}},
 		{Data: nil, Offset: 0, Length: 4096, Expected: v1.Payload{Offset: 0, Length: 0, Total: 0, Hex: "", Escaped: ""}},

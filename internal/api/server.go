@@ -26,6 +26,9 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// the lookup in the group database of the host, the tests replace it: a host with the group and one without it must test the same
+var lookupSocketGroup = user.LookupGroup
+
 // the backend of one run: holds and rules only when the proxy intercepts, every hold event goes on the bus
 func NewBackend(info Info, limits history.Limits, keyLog func(clientRandom [32]byte) (keyLog string, found bool, err error)) (backend *Backend) {
 	bus := NewBus()
@@ -165,7 +168,7 @@ func lookupGroup(platformType platform.Type, logger *slog.Logger) (groupID int64
 		return
 	}
 
-	group, lookupErr := user.LookupGroup(socketGroup)
+	group, lookupErr := lookupSocketGroup(socketGroup)
 
 	if lookupErr != nil {
 		logger.Debug("Could not find api socket group", "error", lookupErr, "group", socketGroup)
