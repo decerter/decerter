@@ -1,0 +1,53 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+
+# pre-commit install sets these up as the git pre-commit hook; pre-commit run --all-files runs them on the tree, see docs/development.md
+# the generated and vendored files are left as their tools write them
+exclude: ^(bpf/include/bpf/|bpf/vmlinux\.h$|internal/bpf/.*/bpf_.*\.(go|o)$|test/e2e/assets/)
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: 3e8a8703264a2f4a69428a0aa4dcb512790b2c8c # v6.0.0
+    hooks:
+      - id: trailing-whitespace
+        args:
+          - --markdown-linebreak-ext=md
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-merge-conflict
+
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt
+        language: system
+        entry: bash -c 'unformatted="$(gofmt -l "$@")"; [ -z "$unformatted" ] || { echo "not gofmt-ed, run gofmt -w:"; echo "$unformatted"; exit 1; }' gofmt
+        types:
+          - go
+      - id: go-vet
+        name: go vet
+        language: system
+        entry: make vet
+        pass_filenames: false
+        types:
+          - go
+      # the golangci-lint the Makefile pins, make install-golangci-lint
+      - id: golangci-lint
+        name: golangci-lint
+        language: system
+        entry: make lint
+        pass_filenames: false
+        types:
+          - go
+      - id: spdx
+        name: SPDX lines
+        language: system
+        entry: tools/licensecheck/spdx.sh
+        pass_filenames: false
+        always_run: true
+      # the --help dump of the README, the field table of docs/filter.md and the flags named in the docs
+      - id: docs
+        name: docs drift tests
+        language: system
+        entry: go test -count=1 -tags=unit -run '^(TestReadmeHelpPositive|TestFilterDocsPositive|TestFlagDocsPositive)$' ./pkg/cmd/
+        pass_filenames: false
+        files: \.(go|md)$

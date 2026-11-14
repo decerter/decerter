@@ -1,0 +1,209 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+
+# lint, unit tests, license check, both static builds, the BPF object drift check and the Linux e2e tests;
+# build, unit and e2e-linux run on amd64 and arm64 runners, see docs/development.md
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions: {}
+
+# a newer push to a pull request cancels its older run, every push to main runs to the end
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      # the version the Makefile pins, built from the module proxy with its checksum
+      - name: Install golangci-lint
+        run: |
+          version="$(sed -n -E 's/^GOLANGCI_LINT_VERSION \?= (v[0-9.]+)$/\1/p' Makefile)"
+          [ -n "$version" ] || { echo "::error::no GOLANGCI_LINT_VERSION in the Makefile"; exit 1; }
+          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$version"
+      - run: make lint
+
+  unit:
+    name: unit (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make test-unit
+
+  license:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: make install-go-licenses
+      - run: make license-check
+
+  build:
+    name: build (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+          - ubuntu-24.04
+          - ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      # make build is the runner's own architecture, make build-arm64 always arm64
+      - run: make build build-arm64 verify-static
+      - run: ./decerter --version
+
+  # the committed bpf2go output must be what make generate-bpf-objects builds from the committed sources and bpf/vmlinux.h
+  bpf-drift:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Ubuntu 24.04 has no clang-21, apt.llvm.org has it; its signing key is pinned by hash
+      - name: Install clang-21 and llvm-strip-21
+        env:
+          LLVM_KEY_SHA256: 8b2a587ffd672c4687e7581dad4b2f6c1bb2ad6b480cd9771ba2ff48e0b8c75d
+        run: |
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/llvm.asc" https://apt.llvm.org/llvm-snapshot.gpg.key
+          echo "$LLVM_KEY_SHA256  $RUNNER_TEMP/llvm.asc" | sha256sum --check --strict
+          sudo install -d -m 0755 /etc/apt/keyrings
+          gpg --dearmor < "$RUNNER_TEMP/llvm.asc" | sudo tee /etc/apt/keyrings/apt.llvm.org.gpg > /dev/null
+          echo "deb [signed-by=/etc/apt/keyrings/apt.llvm.org.gpg] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm-21.list > /dev/null
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends clang-21 llvm-21
+          clang-21 --version
+      # make generate-bpf-objects, then the Go files byte for byte and the objects by content, see tools/bpfdrift/check.sh
+      - name: Check the committed BPF objects
+        run: |
+          if ! make check-bpf-objects; then
+            git status --short -- internal/bpf
+            echo "::error::the committed bpf2go output differs from make generate-bpf-objects, regenerate it with clang-21 and commit it with the C change"
+            exit 1
+          fi
+
+  e2e-linux:
+    name: e2e-linux (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            experimental: false
+          # decerter on arm64 Linux was never run before stage 40, its result doesn't fail the workflow yet
+          - runner: ubuntu-24.04-arm
+            experimental: true
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check the kernel
+        run: |
+          kernel="$(uname -r)"
+          echo "kernel $kernel on $(uname -m)"
+          if [ "$(printf '%s\n' 6.6 "${kernel%%-*}" | sort -V | head -n 1)" != 6.6 ]; then
+            echo "::error::kernel $kernel is older than 6.6, decerter needs Linux 6.6 or newer"
+            exit 1
+          fi
+          if [ ! -r /sys/kernel/btf/vmlinux ]; then
+            echo "::error::kernel $kernel has no /sys/kernel/btf/vmlinux (CONFIG_DEBUG_INFO_BTF), the BPF programs can't load"
+            exit 1
+          fi
+          if [ "$(stat -f -c %T /sys/fs/cgroup)" != cgroup2fs ]; then
+            echo "::error::/sys/fs/cgroup is not cgroup v2, decerter attaches to the cgroup v2 root"
+            exit 1
+          fi
+      # curl, wget, openssl, a C compiler and docker are on the runner image
+      - name: Install tshark, tcpdump and socat
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends tshark tcpdump socat
+          curl --version | grep -q -w HTTP2 || { echo "::error::curl has no HTTP/2"; exit 1; }
+      # the e2e tests look up test and nobody by name and refuse UID 0 and 1000; the runner user often has 1001 already
+      - name: Create the test user
+        run: |
+          if ! id test > /dev/null 2>&1; then
+            uid=1001
+            while getent passwd "$uid" > /dev/null || getent group "$uid" > /dev/null; do
+              uid=$((uid + 1))
+            done
+            sudo useradd --uid "$uid" --user-group --create-home --shell /bin/bash test
+          fi
+          id test
+          id nobody
+      # the distro OpenSSL cases use these images in the runner's architecture and skip an image that is missing
+      - name: Pull the distro images
+        run: |
+          for image in ubuntu:24.04 debian:13 fedora almalinux:10; do
+            docker pull --quiet "$image" || echo "::warning::could not pull $image, its distro OpenSSL case skips"
+          done
+      # make test-e2e is sudo go test; the test binary is built as the runner user, so root doesn't write to its Go caches
+      - name: Run the e2e tests
+        run: |
+          go test -c -tags=e2e -o "$RUNNER_TEMP/e2e.test" ./test/e2e/
+          cd test/e2e
+          sudo "$RUNNER_TEMP/e2e.test" -test.count=1 -test.v -test.timeout=30m

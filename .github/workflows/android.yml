@@ -1,0 +1,165 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+
+# make test-e2e-android on an emulator of the runner: weekly and by hand. The x86_64 job is the one that counts; the
+# arm64 job reports whether an arm64 runner can host the emulator at all (KVM, a Linux arm64 emulator build) and runs
+# the tests where it can, see docs/development.md
+name: android
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e-android:
+    name: e2e-android (${{ matrix.abi }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            abi: x86_64
+            experimental: false
+          # the tests and decerter's Android support are x86_64 emulator only before stage 40
+          - runner: ubuntu-24.04-arm
+            abi: arm64-v8a
+            experimental: true
+    runs-on: ${{ matrix.runner }}
+    continue-on-error: ${{ matrix.experimental }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+    env:
+      ABI: ${{ matrix.abi }}
+      EXPERIMENTAL: ${{ matrix.experimental }}
+      # cmdline-tools 19.0, the sha1 Google's repository2-3.xml lists for it is 5fdcc763663eefb86a5b8879697aa6088b041e70
+      CMDLINE_TOOLS_ZIP: commandlinetools-linux-13114758_latest.zip
+      CMDLINE_TOOLS_SHA256: 7ec965280a073311c339e571cd5de778b9975026cfcbe79f2b1cdcb1e15317ee
+      # the Flutter SDK and the ChromePublic snapshot of the dev box, see the Makefile's DECERTER_E2E_FLUTTER and DECERTER_E2E_CHROMIUM
+      FLUTTER_VERSION: 3.35.7
+      CHROMIUM_SNAPSHOT: "1744338"
+      CHROMIUM_SHA256: f4cbb1667813f5d65fa10993b9462f1cf181b3556f54611641d64996c2c9d484
+    steps:
+      # the udev rule gives the runner user /dev/kvm; without KVM the emulator is unusable
+      - name: Check KVM and the emulator
+        id: host
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules > /dev/null
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+          fi
+          reason=""
+          if [ ! -r /dev/kvm ] || [ ! -w /dev/kvm ]; then
+            reason="no usable /dev/kvm on $RUNNER_NAME ($RUNNER_ARCH), the Android emulator is unusable without KVM"
+          elif [ "$RUNNER_ARCH" = ARM64 ] && ! curl -sSfL --retry 3 https://dl.google.com/android/repository/repository2-3.xml | grep -q 'emulator-linux_aarch64'; then
+            reason="KVM is there, but the Android SDK has no emulator build for Linux arm64 hosts"
+          fi
+          if [ -z "$reason" ]; then
+            echo "usable=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EXPERIMENTAL" = true ]; then
+            echo "::notice::Android e2e ($ABI) skipped: $reason"
+            echo "usable=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::$reason"
+            exit 1
+          fi
+      - if: steps.host.outputs.usable == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - if: steps.host.outputs.usable == 'true'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      # javac for the Conscrypt test client, Gradle for the Flutter app
+      - if: steps.host.outputs.usable == 'true'
+        uses: actions/setup-java@77dd5b2ce225ea11469928ac317850245a74ae78 # v6.2.0
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Install tshark
+        if: steps.host.outputs.usable == 'true'
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends tshark
+      # the tests look for the SDK in ~/Android/Sdk of the user who ran sudo, as on the dev box
+      - name: Install the Android SDK and create the AVD decerter-a15
+        if: steps.host.outputs.usable == 'true'
+        run: |
+          sdk="$HOME/Android/Sdk"
+          curl -sSfL --retry 3 -o "$RUNNER_TEMP/$CMDLINE_TOOLS_ZIP" "https://dl.google.com/android/repository/$CMDLINE_TOOLS_ZIP"
+          echo "$CMDLINE_TOOLS_SHA256  $RUNNER_TEMP/$CMDLINE_TOOLS_ZIP" | sha256sum --check --strict
+          mkdir -p "$sdk/cmdline-tools"
+          unzip -q "$RUNNER_TEMP/$CMDLINE_TOOLS_ZIP" -d "$RUNNER_TEMP/cmdline-tools"
+          mv "$RUNNER_TEMP/cmdline-tools/cmdline-tools" "$sdk/cmdline-tools/latest"
+          sdkmanager="$sdk/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$sdkmanager" --sdk_root="$sdk" --licenses > /dev/null
+          "$sdkmanager" --sdk_root="$sdk" --install "platform-tools" "emulator" "build-tools;35.0.0" "ndk;30.0.16248370" "system-images;android-35;google_apis;$ABI" > /dev/null
+          echo no | "$sdk/cmdline-tools/latest/bin/avdmanager" create avd --name decerter-a15 --package "system-images;android-35;google_apis;$ABI"
+          echo "$sdk/platform-tools" >> "$GITHUB_PATH"
+      # the Flutter cases build test/android/flutter with this SDK, the build is cached in ~/.cache/decerter-flutter/e2e
+      - name: Cache Flutter
+        if: steps.host.outputs.usable == 'true' && matrix.abi == 'x86_64'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cache/decerter-flutter
+            ~/.pub-cache
+            ~/.gradle/caches
+          key: flutter-${{ env.FLUTTER_VERSION }}-${{ runner.arch }}-${{ hashFiles('test/android/flutter/**') }}
+          restore-keys: |
+            flutter-${{ env.FLUTTER_VERSION }}-${{ runner.arch }}-
+      - name: Install Flutter
+        if: steps.host.outputs.usable == 'true' && matrix.abi == 'x86_64'
+        run: |
+          flutter="$HOME/.cache/decerter-flutter/$FLUTTER_VERSION/flutter"
+          if [ ! -x "$flutter/bin/flutter" ]; then
+            mkdir -p "$(dirname "$flutter")"
+            git clone --quiet --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$flutter"
+          fi
+          "$flutter/bin/flutter" --disable-analytics
+          "$flutter/bin/flutter" config --jdk-dir "$JAVA_HOME" --android-sdk "$HOME/Android/Sdk"
+          "$flutter/bin/flutter" precache --android
+          echo "DECERTER_E2E_FLUTTER=$flutter" >> "$GITHUB_ENV"
+      # the ChromePublic cases install the x86_64 ChromePublic of this Chromium snapshot
+      - name: Cache the ChromePublic snapshot
+        if: steps.host.outputs.usable == 'true' && matrix.abi == 'x86_64'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/decerter-chromium/snapshot-AndroidDesktop_x64-${{ env.CHROMIUM_SNAPSHOT }}
+          key: chromium-snapshot-AndroidDesktop_x64-${{ env.CHROMIUM_SNAPSHOT }}
+      - name: Download the ChromePublic snapshot
+        if: steps.host.outputs.usable == 'true' && matrix.abi == 'x86_64'
+        run: |
+          snapshot="$HOME/.cache/decerter-chromium/snapshot-AndroidDesktop_x64-$CHROMIUM_SNAPSHOT"
+          apk="$snapshot/chrome-android-desktop/apks/ChromePublic.apk"
+          if [ ! -f "$apk" ]; then
+            mkdir -p "$snapshot"
+            curl -sSfL --retry 3 -o "$RUNNER_TEMP/chrome-android-desktop.zip" "https://commondatastorage.googleapis.com/chromium-browser-snapshots/AndroidDesktop_x64/$CHROMIUM_SNAPSHOT/chrome-android-desktop.zip"
+            echo "$CHROMIUM_SHA256  $RUNNER_TEMP/chrome-android-desktop.zip" | sha256sum --check --strict
+            unzip -q "$RUNNER_TEMP/chrome-android-desktop.zip" 'chrome-android-desktop/apks/ChromePublic.apk' -d "$snapshot"
+          fi
+          echo "DECERTER_E2E_CHROMIUM=$apk" >> "$GITHUB_ENV"
+      # make test-e2e-android is sudo go test, sudo's secure_path would drop the Go of setup-go
+      - name: Run the Android e2e tests
+        if: steps.host.outputs.usable == 'true'
+        run: |
+          sudo env "PATH=$PATH" "JAVA_HOME=$JAVA_HOME" "DECERTER_E2E_FLUTTER=${DECERTER_E2E_FLUTTER:-}" "DECERTER_E2E_CHROMIUM=${DECERTER_E2E_CHROMIUM:-}" \
+            go test -tags=e2e_android -count=1 -timeout 60m -v ./test/android/
+      - name: Print the emulator log
+        if: failure() && steps.host.outputs.usable == 'true'
+        run: |
+          for log in /tmp/decerter-emulator-*.log; do
+            [ -f "$log" ] || continue
+            echo "::group::$log"
+            sudo tail -n 200 "$log"
+            echo "::endgroup::"
+          done

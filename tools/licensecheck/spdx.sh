@@ -7,8 +7,9 @@
 # its part, as docs/development.md lists them: the first line, or the second after a shebang. The control API contract
 # (api/openapi.yaml and its Go types in api/types.go) is MIT, so any client can be generated from it. The page of decerter ui
 # (internal/ui/web: HTML, JS and CSS) has it in a comment: <!-- … --> after the doctype, // in JS, /* … */ in CSS.
-# Not checked: the vendored libbpf headers in bpf/include/bpf, which keep the headers libbpf ships, and the bpf2go output,
-# which is generated from AGPL inputs; offsets_gen.go is written with its SPDX line by tools/offsetgen and is checked.
+# Not checked: the vendored libbpf headers in bpf/include/bpf, which keep the headers libbpf ships, bpf/vmlinux.h, which
+# bpftool dumps from the kernel's BTF, and the bpf2go output, which is generated from AGPL inputs; offsets_gen.go is
+# written with its SPDX line by tools/offsetgen and is checked.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -20,7 +21,7 @@ while IFS= read -r -d '' file; do
 	[ -f "$file" ] || continue
 
 	case "$file" in
-	bpf/include/bpf/*)
+	bpf/include/bpf/* | bpf/vmlinux.h)
 		continue
 		;;
 	esac

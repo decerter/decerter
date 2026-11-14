@@ -1,7 +1,9 @@
-bpf/vmlinux.h
+# the arm64 header of make generate-vmlinux-arm64 comes from the BTF of a device; bpf/vmlinux.h is committed, the BPF objects are built from it
 bpf/vmlinux-arm64.h
 # the binaries in the root, not cmd/decerter
 /decerter
 /decerter-debug
 /decerter-arm64
 /dist/
+# Claude Code's local settings and state
+.claude/

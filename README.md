@@ -254,5 +254,6 @@ The proxy of `run` listens on port 15001 of `lo` (`--port`), TCP and UDP; a UDP 
 - The BPF C programs under `bpf/` are dual-licensed `GPL-2.0-only OR MIT`, matching their `SEC("license") = "Dual MIT/GPL"`.
 - The control API contract, [api/openapi.yaml](api/openapi.yaml), and its Go types, `api/types.go`, are `MIT`, so any client can be generated from them.
 - The vendored libbpf headers in `bpf/include/bpf/` keep their upstream license (`LGPL-2.1 OR BSD-2-Clause`).
+- `bpf/vmlinux.h` is bpftool's dump of the Linux kernel's types (`GPL-2.0-only`), only compiled into the BPF programs.
 - `internal/tlsrecord/cipher.go` and `internal/tlsrecord/keyschedule.go` contain code derived from Go's `crypto/tls` and keep the Go authors' notice (`AGPL-3.0-only AND BSD-3-Clause`); the BSD license is `LICENSE-Go.txt` in the release tarball and `internal/tlsrecord/LICENSE-Go.txt` in the repository.
 - The dependencies are under MIT, BSD-3-Clause and Apache-2.0; `make license-check` fails on one that isn't allowed, and each release tarball carries their license texts in `THIRD_PARTY_NOTICES`.

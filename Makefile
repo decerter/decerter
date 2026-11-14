@@ -108,6 +108,11 @@ generate-bpf-capture-objects: ## Generate bpf capture object files
 .PHONY: generate-bpf-objects
 generate-bpf-objects: generate-bpf-redirect-objects generate-bpf-secrets-objects generate-bpf-capture-objects ## Generate all bpf object files
 
+# clang orders the BTF of one source differently per build path, so the objects are compared by content (tools/bpfdrift)
+.PHONY: check-bpf-objects
+check-bpf-objects: ## Check that the committed bpf2go output is what generate-bpf-objects builds from the committed sources and bpf/vmlinux.h: the Go files byte for byte, the objects by content
+	./tools/bpfdrift/check.sh
+
 .PHONY: generate-openssl-offsets
 generate-openssl-offsets: ## Generate OpenSSL struct offsets of amd64 and arm64 for OPENSSL_VERSIONS (default is all, every 3.x release, or tags like openssl-3.6.2), tarballs are cached in OPENSSL_CACHE (default is ~/.cache/decerter-openssl), arm64 needs the aarch64 glibc headers in ARM64_SYSROOT (default is /usr/aarch64-linux-gnu)
 	tmp="$$(mktemp)"; \
