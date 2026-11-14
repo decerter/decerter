@@ -282,7 +282,7 @@ func connect(ctx context.Context, options Options, report *printer, logger *slog
 
 	if !info.IsEmulator {
 		kind = "real device, experimental"
-		logger.Warn("Real devices are experimental: decerter was tested on the Android 15 x86_64 emulator only, not on a phone or on arm64", "serial", adb.Serial, "model", info.Model)
+		logger.Warn("Real devices are experimental: decerter was tested on the x86_64 and arm64 Android 15 emulators only, not on a phone", "serial", adb.Serial, "model", info.Model)
 	}
 
 	report.line("device", "%s, %s (%s)", adb.Serial, info.Model, kind)
@@ -357,7 +357,7 @@ func deviceBinary(info DeviceInfo, options Options) (architecture string, binary
 		return
 	}
 
-	binary, err = filepath.Abs(ChooseBinary(architecture, runtime.GOARCH, options.Executable, options.Binary))
+	binary, err = filepath.Abs(ChooseBinary(architecture, runtime.GOOS, runtime.GOARCH, options.Executable, options.Binary))
 
 	if err != nil {
 		return

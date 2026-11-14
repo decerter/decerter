@@ -100,6 +100,12 @@ jobs:
       # make build is the runner's own architecture, make build-arm64 always arm64
       - run: make build build-arm64 verify-static
       - run: ./decerter --version
+      # decerter for an Apple Silicon Mac has only the host commands, and the Android tests run there too
+      - name: Build and vet for macOS arm64
+        if: matrix.runner == 'ubuntu-24.04'
+        run: |
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o /dev/null ./cmd/decerter
+          GOOS=darwin GOARCH=arm64 go vet -tags e2e_android ./cmd/... ./pkg/... ./internal/android/... ./internal/ui/... ./test/android/
 
   # the committed bpf2go output must be what make generate-bpf-objects builds from the committed sources and bpf/vmlinux.h
   bpf-drift:
@@ -142,14 +148,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - runner: ubuntu-24.04
-            experimental: false
-          # decerter on arm64 Linux was never run before stage 40, its result doesn't fail the workflow yet
-          - runner: ubuntu-24.04-arm
-            experimental: true
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
-    continue-on-error: ${{ matrix.experimental }}
     timeout-minutes: 45
     permissions:
       contents: read

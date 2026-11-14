@@ -32,9 +32,10 @@ const (
 	FilterMap            bpf.BpfMapName     = 3  // value: "filter_map"
 	FlowMap              bpf.BpfMapName     = 4  // value: "flow_map"
 	PortMap              bpf.BpfMapName     = 5  // value: "port_map"
-	RouteMap             bpf.BpfMapName     = 6  // value: "route_map"
-	TgidMap              bpf.BpfMapName     = 7  // value: "tgid_map"
-	UidMap               bpf.BpfMapName     = 8  // value: "uid_map"
+	PrefixLengthsMap     bpf.BpfMapName     = 6  // value: "prefix_lengths_map"
+	RouteMap             bpf.BpfMapName     = 7  // value: "route_map"
+	TgidMap              bpf.BpfMapName     = 8  // value: "tgid_map"
+	UidMap               bpf.BpfMapName     = 9  // value: "uid_map"
 	ClientSockops        bpf.BpfProgramName = 0  // value: "client_sockops"
 	ForgetReleasedSocket bpf.BpfProgramName = 1  // value: "forget_released_socket"
 	LearnUdpClient       bpf.BpfProgramName = 2  // value: "learn_udp_client"
@@ -46,6 +47,9 @@ const (
 	RestoreGetpeername6  bpf.BpfProgramName = 8  // value: "restore_getpeername6"
 	RestoreRecvmsg4      bpf.BpfProgramName = 9  // value: "restore_recvmsg4"
 	RestoreRecvmsg6      bpf.BpfProgramName = 10 // value: "restore_recvmsg6"
+	// keys of prefix_lengths_map, ROUTE_LENGTHS and CIDR_LENGTHS in C
+	routeLengths uint32 = 0
+	cidrLengths  uint32 = 1
 )
 
 // the volatile consts of the object by their bpf2go names, with the C types' sizes: bools are uint8 1 or 0
@@ -104,15 +108,16 @@ func LoadBpfObjects(proxyPort uint16, proxyTgid uint32, recordOnly bool, blockQu
 	}
 
 	bpfMaps = map[bpf.BpfMapName]*ebpf.Map{
-		CidrMap:   objs.CidrMap,
-		ClientMap: objs.ClientMap,
-		CommMap:   objs.CommMap,
-		FilterMap: objs.FilterMap,
-		FlowMap:   objs.FlowMap,
-		PortMap:   objs.PortMap,
-		RouteMap:  objs.RouteMap,
-		TgidMap:   objs.TgidMap,
-		UidMap:    objs.UidMap,
+		CidrMap:          objs.CidrMap,
+		ClientMap:        objs.ClientMap,
+		CommMap:          objs.CommMap,
+		FilterMap:        objs.FilterMap,
+		FlowMap:          objs.FlowMap,
+		PortMap:          objs.PortMap,
+		PrefixLengthsMap: objs.PrefixLengthsMap,
+		RouteMap:         objs.RouteMap,
+		TgidMap:          objs.TgidMap,
+		UidMap:           objs.UidMap,
 	}
 	bpfPrograms = map[bpf.BpfProgramName]*ebpf.Program{
 		ClientSockops:        objs.ClientSockops,
@@ -152,9 +157,27 @@ func UpdateBpfMaps(filter Filter, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (err err
 		}
 	}
 
+	// the lengths of the new prefixes join the ones in use before the prefixes are added, the programs search only the lengths in use
+	cidrKeys := []bpfPrefixKey{}
+
 	for _, destinationCIDR := range filter.DestinationCIDRs {
-		// bits after the prefix length are not part of the key, masked so the map shows the prefix as given
-		err = bpfMaps[CidrMap].Update(prefixToKey(destinationCIDR.Masked()), uint8(1), ebpf.UpdateAny)
+		cidrKeys = append(cidrKeys, prefixToKey(destinationCIDR))
+	}
+
+	inUse, err := readPrefixLengths(bpfMaps[PrefixLengthsMap], cidrLengths)
+
+	if err != nil {
+		return
+	}
+
+	err = writePrefixLengths(bpfMaps[PrefixLengthsMap], cidrLengths, addPrefixLengths(inUse, cidrKeys))
+
+	if err != nil {
+		return
+	}
+
+	for index, destinationCIDR := range filter.DestinationCIDRs {
+		err = bpfMaps[CidrMap].Update(cidrKeys[index], uint8(1), ebpf.UpdateAny)
 
 		if err != nil {
 			err = fmt.Errorf("update %s %s: %w", bpfMapCidrMap, destinationCIDR, err)
@@ -214,18 +237,29 @@ func UpdateBpfMaps(filter Filter, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (err err
 	return
 }
 
-// new routes are written before the stale ones are deleted, so a still routed prefix never disappears in between
+// the lengths of the new routes are added to the lengths in use first, then new routes are written before the stale ones are deleted, so a still
+// routed prefix never disappears in between; the lengths of the new routes alone are written last
 func UpdateRouteMap(routes map[netip.Prefix]bool, bpfMaps map[bpf.BpfMapName]*ebpf.Map) (err error) {
 	var (
 		key   bpfPrefixKey
 		value uint8
 	)
 
+	wanted := map[bpfPrefixKey]uint8{}
+
+	for prefix, routable := range routes {
+		wanted[prefixToKey(prefix)] = 0
+
+		if routable {
+			wanted[prefixToKey(prefix)] = 1
+		}
+	}
+
 	staleKeys := []bpfPrefixKey{}
 	iterator := bpfMaps[RouteMap].Iterate()
 
 	for iterator.Next(&key, &value) {
-		if _, ok := routes[keyToPrefix(key)]; !ok {
+		if _, ok := wanted[key]; !ok {
 			staleKeys = append(staleKeys, key)
 		}
 	}
@@ -237,17 +271,23 @@ func UpdateRouteMap(routes map[netip.Prefix]bool, bpfMaps map[bpf.BpfMapName]*eb
 		return
 	}
 
-	for prefix, routable := range routes {
-		value = 0
+	inUse, err := readPrefixLengths(bpfMaps[PrefixLengthsMap], routeLengths)
 
-		if routable {
-			value = 1
-		}
+	if err != nil {
+		return
+	}
 
-		err = bpfMaps[RouteMap].Update(prefixToKey(prefix), value, ebpf.UpdateAny)
+	err = writePrefixLengths(bpfMaps[PrefixLengthsMap], routeLengths, addPrefixLengths(inUse, slices.Collect(maps.Keys(wanted))))
+
+	if err != nil {
+		return
+	}
+
+	for wantedKey, wantedValue := range wanted {
+		err = bpfMaps[RouteMap].Update(wantedKey, wantedValue, ebpf.UpdateAny)
 
 		if err != nil {
-			err = fmt.Errorf("update %s %s: %w", bpfMapRouteMap, prefix, err)
+			err = fmt.Errorf("update %s %s: %w", bpfMapRouteMap, keyToPrefix(wantedKey), err)
 			return
 		}
 	}
@@ -259,6 +299,39 @@ func UpdateRouteMap(routes map[netip.Prefix]bool, bpfMaps map[bpf.BpfMapName]*eb
 			err = fmt.Errorf("delete %s %s: %w", bpfMapRouteMap, keyToPrefix(staleKey), err)
 			return
 		}
+	}
+
+	err = writePrefixLengths(bpfMaps[PrefixLengthsMap], routeLengths, addPrefixLengths(bpfPrefixLengths{}, slices.Collect(maps.Keys(wanted))))
+	return
+}
+
+// the prefix lengths a prefix map has keys of, at key lengthsKey of prefix_lengths_map
+func readPrefixLengths(lengthsMap *ebpf.Map, lengthsKey uint32) (lengths bpfPrefixLengths, err error) {
+	err = lengthsMap.Lookup(lengthsKey, &lengths)
+
+	if err != nil {
+		err = fmt.Errorf("lookup %s %d: %w", bpfMapPrefixLengthsMap, lengthsKey, err)
+	}
+
+	return
+}
+
+func writePrefixLengths(lengthsMap *ebpf.Map, lengthsKey uint32, lengths bpfPrefixLengths) (err error) {
+	err = lengthsMap.Update(lengthsKey, lengths, ebpf.UpdateAny)
+
+	if err != nil {
+		err = fmt.Errorf("update %s %d: %w", bpfMapPrefixLengthsMap, lengthsKey, err)
+	}
+
+	return
+}
+
+// lengths with the prefix length of every key set: bit length%64 of Bits[length/64], like the programs read it
+func addPrefixLengths(lengths bpfPrefixLengths, keys []bpfPrefixKey) (added bpfPrefixLengths) {
+	added = lengths
+
+	for _, key := range keys {
+		added.Bits[key.Prefixlen/64] |= 1 << (key.Prefixlen % 64)
 	}
 
 	return
@@ -499,8 +572,10 @@ func endpointToKey(addressPort netip.AddrPort, ipProtocol uint8) (key bpfEndpoin
 	return
 }
 
-// IPv4 prefixes are stored IPv4-mapped, so their length grows by the 96 bits of ::ffff:0:0/96
+// IPv4 prefixes are stored IPv4-mapped, so their length grows by the 96 bits of ::ffff:0:0/96; the address is masked to the prefix, the programs
+// look a destination up by its masked address per prefix length
 func prefixToKey(prefix netip.Prefix) (key bpfPrefixKey) {
+	prefix = prefix.Masked()
 	prefixLength := prefix.Bits()
 
 	if prefix.Addr().Is4() {

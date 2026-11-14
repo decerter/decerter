@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"os/exec"
+	"runtime"
 
 	v1 "github.com/decerter/decerter/api"
 )
@@ -97,12 +98,18 @@ func Serve(ctx context.Context, listener net.Listener, handler http.Handler, log
 	return
 }
 
-// xdg-open in the background, a browser that does not start is only logged; the URL with the token is in xdg-open's arguments while it runs
-// not tied to a context: a browser xdg-open started stays when decerter ui stops
+// xdg-open, open on macOS, in the background, a browser that does not start is only logged; the URL with the token is in the opener's arguments while it runs
+// not tied to a context: a browser the opener started stays when decerter ui stops
 func Open(address string, logger *slog.Logger) {
+	opener := "xdg-open"
+
+	if runtime.GOOS == "darwin" {
+		opener = "open"
+	}
+
 	// browser opener
 	go func() {
-		err := exec.Command("xdg-open", address).Run()
+		err := exec.Command(opener, address).Run()
 
 		if err != nil {
 			logger.Warn("Could not open the browser, open the printed URL yourself", "error", err)

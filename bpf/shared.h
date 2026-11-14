@@ -27,7 +27,7 @@ struct endpoint {
 	uint8_t padding;
 };
 
-//LPM_TRIE key, prefixlen: bits of ip that have to match, IPv4 stored IPv4-mapped with prefixlen + 96, ip: network byte order
+//key of a prefix map, prefixlen: bits of ip that have to match, IPv4 stored IPv4-mapped with prefixlen + 96, ip: network byte order, masked to prefixlen
 struct prefix_key {
 	uint32_t prefixlen;
 	uint32_t ip[4];

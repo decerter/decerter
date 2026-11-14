@@ -30,7 +30,7 @@ const (
 
 // what a test server serves: plain HTTP when Certificate is nil, TLS pinned to Version and CipherSuite when they are set
 // the server picks HTTP/2 through ALPN when HTTP2 is true, or with prior knowledge on plain HTTP; KeyLog gets the server's NSS key log lines, nil is none
-// Frames counts the HTTP/2 frames of a plain server, nil counts none
+// Frames counts the HTTP/2 frames of a plain server, nil counts none; Host is the loopback address it listens on, empty is 127.0.0.1
 type serverConfig struct {
 	Certificate *certificate
 	Version     uint16
@@ -38,6 +38,7 @@ type serverConfig struct {
 	HTTP2       bool
 	KeyLog      io.Writer
 	Frames      *frameCounts
+	Host        string
 }
 
 // what a test server saw of one request; Body and ContentLength only for the paths of the HTTP layer tests, the other tests compare the rest
@@ -57,7 +58,13 @@ type testServer struct {
 
 // start a server on loopback that answers every request with the path it received, it is closed when the test ends
 func startServer(state *testing.T, config serverConfig) (server testServer) {
-	listener, listenErr := net.Listen("tcp", "127.0.0.1:0")
+	host := "127.0.0.1"
+
+	if config.Host != "" {
+		host = config.Host
+	}
+
+	listener, listenErr := net.Listen("tcp", net.JoinHostPort(host, "0"))
 
 	if listenErr != nil {
 		state.Fatalf("Could not listen for the test server, error: %s", listenErr.Error())

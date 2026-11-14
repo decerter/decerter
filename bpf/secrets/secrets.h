@@ -55,6 +55,14 @@ struct user_pt_regs {
 };
 #endif
 
+//user space pointers are masked with it before a read: arm64 Android tags heap pointers in the top byte (TBI, Scudo's malloc), the CPU ignores that byte but
+//bpf_probe_read_user's range check of a 6.6 kernel doesn't and fails the read; no user address uses the top byte, so x86_64 keeps every bit
+#if defined(__TARGET_ARCH_arm64)
+#define USER_ADDRESS_MASK	0x00FFFFFFFFFFFFFFULL
+#else
+#define USER_ADDRESS_MASK	0xFFFFFFFFFFFFFFFFULL
+#endif
+
 char __license[] SEC("license") = "Dual MIT/GPL";
 
 //Value: tgid of decerter, decerter does not use libssl so it is never read, excluded for parity with the redirect, set from Go before load
@@ -278,6 +286,8 @@ uint16_t read_secrets(uint64_t ssl_address, struct openssl_layout *layout, struc
 	bpf_probe_read_user(&secrets->handshake_secret, sizeof(secrets->handshake_secret), (void *)(ssl_address + layout->handshake_secret_offset));
 	bpf_probe_read_user(&secrets->handshake_traffic_hash, sizeof(secrets->handshake_traffic_hash), (void *)(ssl_address + layout->handshake_traffic_hash_offset));
 
+	session_address &= USER_ADDRESS_MASK;
+
 	//the TLS 1.2 master key and the negotiated cipher live in the session
 	if (session_address)
 	{
@@ -286,7 +296,7 @@ uint16_t read_secrets(uint64_t ssl_address, struct openssl_layout *layout, struc
 
 		if ((!bpf_probe_read_user(&cipher_address, sizeof(cipher_address), (void *)(session_address + layout->session_cipher_offset))) && cipher_address)
 		{
-			bpf_probe_read_user(&secrets->cipher_id, sizeof(secrets->cipher_id), (void *)(cipher_address + layout->cipher_id_offset));
+			bpf_probe_read_user(&secrets->cipher_id, sizeof(secrets->cipher_id), (void *)((cipher_address & USER_ADDRESS_MASK) + layout->cipher_id_offset));
 		}
 	}
 
@@ -404,6 +414,8 @@ uint16_t read_boringssl_session(uint64_t ssl_address, struct boringssl_layout *l
 	{
 		return LAYOUT;
 	}
+
+	s3_address &= USER_ADDRESS_MASK;
 
 	uint64_t version_address = layout->version_in_s3 ? s3_address : ssl_address;
 

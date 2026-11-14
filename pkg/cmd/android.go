@@ -18,7 +18,7 @@ var (
 		Use:   "android",
 		Short: "Set decerter up on an Android device or emulator, and put netd's hooks back",
 		Long: `decerter runs on rooted Android 15 or newer with a GKI android15-6.6 or newer kernel, x86_64 emulators and arm64 devices.
-setup runs on the Linux host as your user and leaves decerter on the device, the binary at /data/local/tmp/decerter (its data
+setup runs on the Linux or macOS host as your user and leaves decerter on the device, the binary at /data/local/tmp/decerter (its data
 directory is /data/local/tmp/decerter.d), with the control API's abstract socket @decerter-api forwarded to a host port.
 Then decerter runs on the device as root with --package <app>, and decerter ui runs on the host.
 restore runs on the device and puts netd's cgroup hooks back after decerter was killed.
@@ -37,7 +37,7 @@ Without setup, the same by hand:
 	androidSetupCmd = &cobra.Command{
 		Use:   "setup",
 		Short: "Push decerter to an Android device or emulator, forward its API and print the commands to run",
-		Long: `Run on the Linux host as your user, not as root: adb and the emulator belong to your user.
+		Long: `Run on the Linux or macOS host as your user, not as root: adb and the emulator belong to your user.
 
 setup finds adb (ADB, then the platform-tools of ANDROID_HOME, ANDROID_SDK_ROOT and ~/Android/Sdk, then PATH: the
 emulator starts its SDK's adb, and two adb versions restart each other's server) and picks the one device adb sees,
@@ -48,7 +48,8 @@ image works. A real device is accepted with a warning, it is experimental; a roo
 KernelSU) is used through su.
 
 It pushes the static decerter binary for the device's ABI to /data/local/tmp/decerter: this binary for an x86_64 emulator,
-decerter-arm64 next to it (make build-arm64) for an arm64 device, or the one --binary names. It checks that decerter has
+decerter-arm64 next to it (make build-arm64) for an arm64 device or emulator, or the one --binary names; a decerter built for
+macOS always pushes the Linux binary next to it, decerter-arm64 for the emulator of an Apple Silicon Mac. It checks that decerter has
 Conscrypt offsets for the Android release, without them TLS is relayed but not decrypted. --package is looked up on
 the device the way decerter run --package does it, and decerter android tls on the device says whether it is a Flutter or
 Chromium app and whether decerter knows the offsets of its version. A Chromium app (Chrome, WebView, an app with Cronet)
@@ -80,53 +81,6 @@ directory /data/local/tmp/decerter.d and the forwards to @decerter-api.`,
 			return
 		},
 	}
-	androidTLSCmd = &cobra.Command{
-		Use:   "tls --package <name>",
-		Short: "Say whether decerter decrypts the TLS of an app, a Flutter or Chromium app needs known offsets",
-		Long: `Runs on the device as root and prints one line per package and library (and per install directory during an update).
-Java apps get TLS from Conscrypt, whose offsets come with the Android release. A Flutter app links its own BoringSSL
-into libflutter.so (dart:io's HttpClient and SecureSocket use it): decerter reads the Dart version the engine prints,
-picks the BoringSSL offsets of that version from its table and finds ssl_log_secret through its key log labels.
-Chrome, WebView and Cronet link their own BoringSSL into libmonochrome(_64).so, libchrome.so, libwebviewchromium.so or
-libcronet.<version>.so: decerter reads the Chromium version in the library and picks the offsets of its branch. Chrome
-built on Trichrome has the library in the Trichrome library package with Chrome's versionCode, which is looked at
-too. A library may be extracted (lib/<isa>/ of the install directory) or stored uncompressed in the apk. Cronet of
-Play services lives in a module directory of com.google.android.gms; decerter run finds it in the processes' mappings.
-A library with an unknown version, or one decerter can't read (a 32 bit one too), makes the command fail after printing;
-decerter run relays such an app's TLS without decrypting it. make generate-flutter-offsets FLUTTER_VERSIONS=<release>
-adds a Flutter release to the table, make generate-chrome-offsets the newest Chrome release branches, and
-CHROME_BUILDS a Chromium build of no release branch. A Chromium app's last line says that it prefers QUIC.
-decerter android setup --package runs this for its package.`,
-		Example: `  adb shell /data/local/tmp/decerter android tls --package com.example.app`,
-		Args:    cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) (err error) {
-			if len(packageNames) == 0 {
-				err = ErrNoPackage
-				return
-			}
-
-			quiet(cmd)
-			err = internal.AndroidTLS(packageNames, &logger)
-			return
-		},
-	}
-	androidRestoreCmd = &cobra.Command{
-		Use:   "restore",
-		Short: "Put netd's cgroup hooks back after decerter was killed",
-		Long: `On Android netd holds most cgroup hooks exclusively. While decerter runs it attaches netd's programs again in shared mode,
-next to its own, and on exit it puts them back, also on SIGHUP when the adb shell closes.
-After a SIGKILL netd's programs stay shared, and a netd restart then fails until they are exclusive again.
-restore puts them back from the state file the killed decerter left in /data/local/tmp/decerter.d, then exits.
-A decerter that starts over such a state file restores first by itself.
-restore is refused while another decerter runs, and outside of Android.`,
-		Example: `  adb shell /data/local/tmp/decerter android restore`,
-		Args:    cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) (err error) {
-			quiet(cmd)
-			err = internal.RestoreAndroid(&logger)
-			return
-		},
-	}
 )
 
 func init() {
@@ -134,7 +88,7 @@ func init() {
 	androidSetupCmd.Flags().StringVar(&setupOptions.Serial, "serial", "", "use the device with this `serial` of adb devices (default is the one device adb sees)")
 	androidSetupCmd.Flags().StringVar(&setupOptions.AVD, "avd", "", "use the emulator of this `avd`, booted without a window when it doesn't run (default is none, use a running device)")
 	androidSetupCmd.Flags().StringVar(&setupOptions.Package, "package", "", "check that the app with this package `name` is installed and put it into the printed command (default is none, the command has PACKAGE in its place)")
-	androidSetupCmd.Flags().StringVar(&setupOptions.Binary, "binary", "", "push the static decerter binary at this `path` (default is this binary for x86_64, decerter-arm64 next to it for arm64)")
+	androidSetupCmd.Flags().StringVar(&setupOptions.Binary, "binary", "", "push the static decerter binary at this `path` (default is this binary when it is the Linux binary of the device's architecture, otherwise decerter-<arch> next to it, such as decerter-arm64)")
 	androidSetupCmd.Flags().Func("port", "forward this host `port` to the control API on the device (default is the port of an existing forward, or one adb picks)", parseSetupPort)
 	androidSetupCmd.Flags().BoolVar(&setupRemove, "remove", false, "remove the binary, its data directory, the forward and the Chrome flags file setup wrote from the device instead (default is false)")
 	androidSetupCmd.MarkFlagsMutuallyExclusive("serial", "avd")
@@ -143,10 +97,7 @@ func init() {
 		androidSetupCmd.MarkFlagsMutuallyExclusive("remove", flag)
 	}
 
-	androidTLSCmd.Flags().Func("package", "check the app with this package `name`, repeatable or comma separated (required)", parsePackageNames)
 	androidCmd.AddCommand(androidSetupCmd)
-	androidCmd.AddCommand(androidTLSCmd)
-	androidCmd.AddCommand(androidRestoreCmd)
 	rootCmd.AddCommand(androidCmd)
 }
 

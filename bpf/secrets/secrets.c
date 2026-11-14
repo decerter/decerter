@@ -18,7 +18,7 @@ int stash_ssl(struct pt_regs *ctx)
 		return 0;
 	}
 
-	uint64_t ssl_address = PT_REGS_PARM1(ctx);
+	uint64_t ssl_address = PT_REGS_PARM1(ctx) & USER_ADDRESS_MASK;
 
 	bpf_map_update_elem(&ssl_map, &pid_tgid, &ssl_address, BPF_ANY);
 
@@ -105,7 +105,7 @@ int log_secret(struct pt_regs *ctx)
 
 	struct label label = {};
 
-	if (bpf_probe_read_user_str(label.value, sizeof(label.value), (void *)PT_REGS_PARM2(ctx)) < 0)
+	if (bpf_probe_read_user_str(label.value, sizeof(label.value), (void *)(PT_REGS_PARM2(ctx) & USER_ADDRESS_MASK)) < 0)
 	{
 		return 0;
 	}
@@ -136,8 +136,8 @@ int log_secret(struct pt_regs *ctx)
 
 	__builtin_memset(secrets, 0, sizeof(*secrets));
 
-	uint64_t ssl_address = PT_REGS_PARM1(ctx);
-	uint64_t secret_address = PT_REGS_PARM3(ctx);
+	uint64_t ssl_address = PT_REGS_PARM1(ctx) & USER_ADDRESS_MASK;
+	uint64_t secret_address = PT_REGS_PARM3(ctx) & USER_ADDRESS_MASK;
 	uint64_t secret_length = PT_REGS_PARM4(ctx);
 
 	switch (read_boringssl_session(ssl_address, layout, secret_bit, secret_length, secrets))

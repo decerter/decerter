@@ -54,7 +54,7 @@ adb forward tcp:8080 localabstract:decerter-api for a decerter on an Android dev
 func init() {
 	uiCmd.Flags().SortFlags = false
 	uiCmd.Flags().Func("api-socket", "the control API at this `address`: a socket path, @name for an abstract socket or a loopback ip:port such as 127.0.0.1:8080 of adb forward (default is /run/decerter/api.sock on Linux, @decerter-api on Android)", parseUIAPISocket)
-	uiCmd.Flags().BoolVar(&openBrowser, "open", false, "open the URL with xdg-open, the token is then in xdg-open's command line while it runs (default is false, only print it)")
+	uiCmd.Flags().BoolVar(&openBrowser, "open", false, "open the URL with xdg-open (open on macOS), the token is then in its command line while it runs (default is false, only print it)")
 	rootCmd.AddCommand(uiCmd)
 }
 

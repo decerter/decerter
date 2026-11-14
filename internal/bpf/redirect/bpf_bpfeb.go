@@ -63,6 +63,11 @@ type bpfPrefixKey struct {
 	Ip        [4]uint32
 }
 
+type bpfPrefixLengths struct {
+	_    structs.HostLayout
+	Bits [3]uint64
+}
+
 // Names of all BPF objects in the ELF.
 //
 // Used for safe lookups in a Collection or CollectionSpec.
@@ -73,6 +78,7 @@ const (
 	bpfMapFilterMap             = "filter_map"
 	bpfMapFlowMap               = "flow_map"
 	bpfMapPortMap               = "port_map"
+	bpfMapPrefixLengthsMap      = "prefix_lengths_map"
 	bpfMapRouteMap              = "route_map"
 	bpfMapTgidMap               = "tgid_map"
 	bpfMapUidMap                = "uid_map"
@@ -152,15 +158,16 @@ type bpfProgramSpecs struct {
 //
 // It can be passed ebpf.CollectionSpec.Assign.
 type bpfMapSpecs struct {
-	CidrMap   *ebpf.MapSpec `ebpf:"cidr_map"`
-	ClientMap *ebpf.MapSpec `ebpf:"client_map"`
-	CommMap   *ebpf.MapSpec `ebpf:"comm_map"`
-	FilterMap *ebpf.MapSpec `ebpf:"filter_map"`
-	FlowMap   *ebpf.MapSpec `ebpf:"flow_map"`
-	PortMap   *ebpf.MapSpec `ebpf:"port_map"`
-	RouteMap  *ebpf.MapSpec `ebpf:"route_map"`
-	TgidMap   *ebpf.MapSpec `ebpf:"tgid_map"`
-	UidMap    *ebpf.MapSpec `ebpf:"uid_map"`
+	CidrMap          *ebpf.MapSpec `ebpf:"cidr_map"`
+	ClientMap        *ebpf.MapSpec `ebpf:"client_map"`
+	CommMap          *ebpf.MapSpec `ebpf:"comm_map"`
+	FilterMap        *ebpf.MapSpec `ebpf:"filter_map"`
+	FlowMap          *ebpf.MapSpec `ebpf:"flow_map"`
+	PortMap          *ebpf.MapSpec `ebpf:"port_map"`
+	PrefixLengthsMap *ebpf.MapSpec `ebpf:"prefix_lengths_map"`
+	RouteMap         *ebpf.MapSpec `ebpf:"route_map"`
+	TgidMap          *ebpf.MapSpec `ebpf:"tgid_map"`
+	UidMap           *ebpf.MapSpec `ebpf:"uid_map"`
 }
 
 // bpfVariableSpecs contains global variables before they are loaded into the kernel.
@@ -193,15 +200,16 @@ func (o *bpfObjects) Close() error {
 //
 // It can be passed to loadBpfObjects or ebpf.CollectionSpec.LoadAndAssign.
 type bpfMaps struct {
-	CidrMap   *ebpf.Map `ebpf:"cidr_map"`
-	ClientMap *ebpf.Map `ebpf:"client_map"`
-	CommMap   *ebpf.Map `ebpf:"comm_map"`
-	FilterMap *ebpf.Map `ebpf:"filter_map"`
-	FlowMap   *ebpf.Map `ebpf:"flow_map"`
-	PortMap   *ebpf.Map `ebpf:"port_map"`
-	RouteMap  *ebpf.Map `ebpf:"route_map"`
-	TgidMap   *ebpf.Map `ebpf:"tgid_map"`
-	UidMap    *ebpf.Map `ebpf:"uid_map"`
+	CidrMap          *ebpf.Map `ebpf:"cidr_map"`
+	ClientMap        *ebpf.Map `ebpf:"client_map"`
+	CommMap          *ebpf.Map `ebpf:"comm_map"`
+	FilterMap        *ebpf.Map `ebpf:"filter_map"`
+	FlowMap          *ebpf.Map `ebpf:"flow_map"`
+	PortMap          *ebpf.Map `ebpf:"port_map"`
+	PrefixLengthsMap *ebpf.Map `ebpf:"prefix_lengths_map"`
+	RouteMap         *ebpf.Map `ebpf:"route_map"`
+	TgidMap          *ebpf.Map `ebpf:"tgid_map"`
+	UidMap           *ebpf.Map `ebpf:"uid_map"`
 }
 
 func (m *bpfMaps) Close() error {
@@ -212,6 +220,7 @@ func (m *bpfMaps) Close() error {
 		m.FilterMap,
 		m.FlowMap,
 		m.PortMap,
+		m.PrefixLengthsMap,
 		m.RouteMap,
 		m.TgidMap,
 		m.UidMap,

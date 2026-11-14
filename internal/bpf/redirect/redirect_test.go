@@ -69,6 +69,46 @@ func TestPrefixKeyPositive(state *testing.T) {
 	}
 }
 
+// Test if redirect.prefixToKey masks the address to the prefix, as the programs look a destination up by its masked address.
+func TestPrefixKeyMaskedPositive(state *testing.T) {
+	positiveCases := []struct {
+		Prefix netip.Prefix
+		Masked netip.Prefix
+	}{
+		{Prefix: netip.MustParsePrefix("10.1.2.3/8"), Masked: netip.MustParsePrefix("10.0.0.0/8")},
+		{Prefix: netip.MustParsePrefix("192.168.1.77/31"), Masked: netip.MustParsePrefix("192.168.1.76/31")},
+		{Prefix: netip.MustParsePrefix("2001:db8::1:2/64"), Masked: netip.MustParsePrefix("2001:db8::/64")},
+		{Prefix: netip.MustParsePrefix("fe80::1234/127"), Masked: netip.MustParsePrefix("fe80::1234/127")},
+		{Prefix: netip.MustParsePrefix("1.2.3.4/0"), Masked: netip.MustParsePrefix("0.0.0.0/0")},
+	}
+
+	for _, positive := range positiveCases {
+		key := prefixToKey(positive.Prefix)
+
+		if (key != prefixToKey(positive.Masked)) || (keyToPrefix(key) != positive.Masked) {
+			state.Errorf("Test of redirect.prefixToKey function failed, prefix %s should give the key of %s, back: %s", positive.Prefix, positive.Masked, keyToPrefix(key))
+			return
+		}
+	}
+}
+
+// Test if redirect.addPrefixLengths sets the bit of each key's prefixlen like the programs read it, and keeps the bits it had.
+func TestAddPrefixLengthsPositive(state *testing.T) {
+	keys := []bpfPrefixKey{
+		prefixToKey(netip.MustParsePrefix("::/0")),
+		prefixToKey(netip.MustParsePrefix("2001:db8::/63")),
+		prefixToKey(netip.MustParsePrefix("2001:db8::/64")),
+		prefixToKey(netip.MustParsePrefix("0.0.0.0/0")),
+		prefixToKey(netip.MustParsePrefix("127.0.0.1/32")),
+	}
+	lengths := addPrefixLengths(bpfPrefixLengths{Bits: [3]uint64{0, 1 << 2, 0}}, keys)
+	expected := [3]uint64{1<<0 | 1<<63, 1<<0 | 1<<2 | 1<<(96-64), 1 << 0}
+
+	if lengths.Bits != expected {
+		state.Errorf("Test of redirect.addPrefixLengths function failed, bits should be %x, bits: %x", expected, lengths.Bits)
+	}
+}
+
 // Test if redirect.commToKey and redirect.commToString return with the expected output: NUL padded, cut to 15 bytes like the kernel cuts a name.
 func TestCommPositive(state *testing.T) {
 	positiveCases := []struct {

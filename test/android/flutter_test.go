@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -41,10 +42,8 @@ const (
 	flutterBuildTimeout time.Duration = 15 * time.Minute
 	// a cold start of the app and its one request
 	flutterTimeout time.Duration = 30 * time.Second
-	// both ABIs in one apk, the emulator runs the x86_64 one
+	// both ABIs in one apk, the emulator runs the one of its ABI
 	flutterPlatforms string = "android-x64,android-arm64"
-	// the stored library of the emulator's ABI, the negative case changes its Dart version
-	flutterEntry string = "lib/x86_64/libflutter.so"
 	// what decerter logs per Flutter app
 	flutterHookedLog  string = `"msg":"Attached secrets uprobe"`
 	flutterUnknownLog string = `"msg":"Could not hook the Flutter app, its TLS is relayed without secrets"`
@@ -54,9 +53,14 @@ const (
 )
 
 var (
-	// the version string the Dart VM prints, the negative case makes its major version unknown
-	dartVersionPattern = regexp.MustCompile(`[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.]+)? \([a-z]+\) \([^)\x00]*\) on "android_x64"`)
-	flutterRun         atomic.Uint64
+	// the stored library of each ABI and the version string its Dart VM prints, the negative case makes the major version of both unknown
+	flutterEntries = []flutterEntry{
+		{Name: "lib/x86_64/libflutter.so", Pattern: dartVersionPattern("android_x64")},
+		{Name: "lib/arm64-v8a/libflutter.so", Pattern: dartVersionPattern("android_arm64")},
+	}
+	flutterRun atomic.Uint64
+	// part of every result id: logcat keeps the lines of earlier test runs, which count from run1 too
+	flutterRunPrefix = strconv.FormatInt(time.Now().UnixNano(), 36)
 	// the Flutter test apps of TestMain, one per SDK; why the Flutter cases skip, empty when they run
 	flutterApps       []flutterApp
 	flutterSkipReason string
@@ -64,6 +68,12 @@ var (
 	flutterInstalled string
 	flutterUID       uint32
 )
+
+// a libflutter.so in the apk and the Dart version string of its engine
+type flutterEntry struct {
+	Name    string
+	Pattern *regexp.Regexp
+}
 
 // the test app built with one Flutter SDK: the apk, and a copy whose engine prints a Dart version decerter doesn't know; err is why it is missing
 type flutterApp struct {
@@ -130,7 +140,7 @@ func buildFlutterApp(account hostAccount, sdk string, flutterSDK string) (app fl
 
 	cache := filepath.Join(account.Home, ".cache", "decerter-flutter", "e2e")
 	app.APK = filepath.Join(cache, app.Version+"-"+sourcesHash+".apk")
-	app.Doctored = filepath.Join(cache, app.Version+"-"+sourcesHash+"-unknown-dart.apk")
+	app.Doctored = filepath.Join(cache, app.Version+"-"+sourcesHash+"-unknown-dart-both.apk")
 	_, statErr := os.Stat(app.APK)
 
 	if statErr != nil {
@@ -185,8 +195,9 @@ func buildFlutterAPK(ctx context.Context, account hostAccount, environment []str
 		{flutter, "create", "--org", "io.decerter", "--project-name", "decerter_flutter", "--platforms", "android", project},
 		{"rm", "-rf", "--", filepath.Join(project, "test")},
 		{"cp", "-r", "--", sources + "/.", project},
-		{"sed", "-i", `s#<manifest xmlns:android="http://schemas.android.com/apk/res/android">#&\n    <uses-permission android:name="android.permission.INTERNET"/>#`, manifest},
-		{"sed", "-i", `s#ndkVersion = flutter.ndkVersion#ndkVersion = "` + ndkVersion + `"#`, filepath.Join(project, "android", "app", "build.gradle.kts")},
+		// perl, not sed -i: BSD sed on a Mac takes the script for a backup suffix
+		{"perl", "-pi", "-e", `s#<manifest xmlns:android="http://schemas.android.com/apk/res/android">#$&\n    <uses-permission android:name="android.permission.INTERNET"/>#`, manifest},
+		{"perl", "-pi", "-e", `s#ndkVersion = flutter.ndkVersion#ndkVersion = "` + ndkVersion + `"#`, filepath.Join(project, "android", "app", "build.gradle.kts")},
 		{flutter, "build", "apk", "--release", "--target-platform", flutterPlatforms},
 		{"cp", "--", filepath.Join(project, "build", "app", "outputs", "flutter-apk", "app-release.apk"), apk},
 	}
@@ -208,8 +219,8 @@ func buildFlutterAPK(ctx context.Context, account hostAccount, environment []str
 	return
 }
 
-// the same apk with another major Dart version in the x86_64 libflutter.so: the bytes are changed in place (the entry is stored), its CRC in the
-// local and the central header, then apksigner signs it again with the debug key that signed the build, so it installs over it
+// the same apk with another major Dart version in the libflutter.so of both ABIs: the bytes are changed in place (the entries are stored), their CRC in
+// the local and the central header, then apksigner signs it again with the debug key that signed the build, so it installs over it
 func doctorAPK(ctx context.Context, account hostAccount, environment []string, sdk string, apk string, doctored string) (err error) {
 	data, err := os.ReadFile(apk)
 
@@ -217,7 +228,40 @@ func doctorAPK(ctx context.Context, account hostAccount, environment []string, s
 		return
 	}
 
-	name := []byte(flutterEntry)
+	for _, entry := range flutterEntries {
+		err = changeDartVersion(data, entry)
+
+		if err != nil {
+			err = fmt.Errorf("%s: %w", apk, err)
+			return
+		}
+	}
+
+	unsigned := doctored + ".unsigned"
+	err = os.WriteFile(unsigned, data, 0o644)
+
+	if err != nil {
+		return
+	}
+
+	defer func() {
+		err = errors.Join(err, os.Remove(unsigned))
+	}()
+
+	apksigner, err := newestBuildTool(sdk, "apksigner")
+
+	if err != nil {
+		return
+	}
+
+	keystore := filepath.Join(account.Home, ".android", "debug.keystore")
+	_, err = runAsUser(ctx, account, environment, "/", apksigner, "sign", "--ks", keystore, "--ks-pass", "pass:android", "--ks-key-alias", "androiddebugkey", "--key-pass", "pass:android", "--v4-signing-enabled", "false", "--out", doctored, unsigned)
+	return
+}
+
+// the major version's first digit of the entry's Dart version becomes 9, 3.14.0 is 9.14.0: as long as before, and no Flutter release has it
+func changeDartVersion(data []byte, entry flutterEntry) (err error) {
+	name := []byte(entry.Name)
 	localStart := -1
 
 	// the local header whose name is the entry: signature, then the name at 30
@@ -258,50 +302,36 @@ func doctorAPK(ctx context.Context, account hostAccount, environment []string, s
 	}
 
 	if (localStart < 0) || (centralStart < 0) || (binary.LittleEndian.Uint16(data[localStart+8:]) != 0) {
-		err = fmt.Errorf("%s has no stored %s", apk, flutterEntry)
+		err = fmt.Errorf("no stored %s", entry.Name)
 		return
 	}
 
 	dataStart := localStart + 30 + len(name) + int(binary.LittleEndian.Uint16(data[localStart+28:]))
 	dataEnd := dataStart + int(binary.LittleEndian.Uint32(data[centralStart+20:]))
-	location := dartVersionPattern.FindIndex(data[dataStart:dataEnd])
+	location := entry.Pattern.FindIndex(data[dataStart:dataEnd])
 
 	if location == nil {
-		err = fmt.Errorf("no Dart version string in %s of %s", flutterEntry, apk)
+		err = fmt.Errorf("no Dart version string in %s", entry.Name)
 		return
 	}
 
-	// the major version's first digit becomes 9, 3.14.0 is 9.14.0: as long as before, and no Flutter release has it
 	data[dataStart+location[0]] = '9'
 	checksum := crc32.ChecksumIEEE(data[dataStart:dataEnd])
 	binary.LittleEndian.PutUint32(data[localStart+14:], checksum)
 	binary.LittleEndian.PutUint32(data[centralStart+16:], checksum)
-	unsigned := doctored + ".unsigned"
-	err = os.WriteFile(unsigned, data, 0o644)
+	return
+}
 
-	if err != nil {
-		return
-	}
-
-	defer func() {
-		err = errors.Join(err, os.Remove(unsigned))
-	}()
-
-	apksigner, err := newestBuildTool(sdk, "apksigner")
-
-	if err != nil {
-		return
-	}
-
-	keystore := filepath.Join(account.Home, ".android", "debug.keystore")
-	_, err = runAsUser(ctx, account, environment, "/", apksigner, "sign", "--ks", keystore, "--ks-pass", "pass:android", "--ks-key-alias", "androiddebugkey", "--key-pass", "pass:android", "--v4-signing-enabled", "false", "--out", doctored, unsigned)
+// the version string the Dart VM of an engine for platform prints: 3.9.2 (stable) (Wed …) on "android_arm64"
+func dartVersionPattern(platform string) (pattern *regexp.Regexp) {
+	pattern = regexp.MustCompile(`[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.]+)? \([a-z]+\) \([^)\x00]*\) on "` + platform + `"`)
 	return
 }
 
 // what flutter, gradle and apksigner get: the invoking user's home, the SDKs, no analytics
 func flutterEnvironmentOf(account hostAccount, sdk string, flutterSDK string) (environment []string) {
 	environment = []string{
-		"PATH=" + filepath.Join(flutterSDK, "bin") + ":/usr/local/bin:/usr/bin:/bin",
+		"PATH=" + filepath.Join(flutterSDK, "bin") + ":" + javaPath("/usr/local/bin:/usr/bin:/bin"),
 		"HOME=" + account.Home,
 		"LC_ALL=C.UTF-8",
 		"ANDROID_SDK_ROOT=" + sdk,
@@ -310,6 +340,7 @@ func flutterEnvironmentOf(account hostAccount, sdk string, flutterSDK string) (e
 		"DART_SUPPRESS_ANALYTICS=true",
 		"CI=true",
 	}
+	environment = append(environment, javaHome()...)
 	return
 }
 
@@ -459,7 +490,7 @@ func testFlutter(ctx context.Context, server httpsServer, path string, expected 
 		return
 	}
 
-	id := fmt.Sprintf("run%d", flutterRun.Add(1))
+	id := fmt.Sprintf("run%s-%d", flutterRunPrefix, flutterRun.Add(1))
 	_, err = device.shell(ctx, fmt.Sprintf("am start -S -W -n %s --es url %s --es ca %s --es id %s", flutterActivity, server.url(path), base64.StdEncoding.EncodeToString(certificate), id))
 
 	if err != nil {

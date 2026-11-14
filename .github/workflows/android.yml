@@ -26,7 +26,8 @@ jobs:
           - runner: ubuntu-24.04
             abi: x86_64
             experimental: false
-          # the tests and decerter's Android support are x86_64 emulator only before stage 40
+          # the tests run on an arm64 emulator too (on an Apple Silicon Mac, 2026-11-14), but the SDK has no emulator for Linux arm64 hosts, so this leg
+          # skips until it has one
           - runner: ubuntu-24.04-arm
             abi: arm64-v8a
             experimental: true

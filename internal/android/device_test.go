@@ -252,15 +252,20 @@ func TestCheckDeviceNegative(state *testing.T) {
 func TestChooseBinaryPositive(state *testing.T) {
 	positiveCases := []struct {
 		ABI      string
+		OS       string
 		Host     string
 		Override string
 		Expected string
 	}{
-		{ABI: "x86_64", Host: "amd64", Override: "", Expected: "/opt/decerter/decerter"},
-		{ABI: "arm64-v8a", Host: "amd64", Override: "", Expected: "/opt/decerter/decerter-arm64"},
-		{ABI: "arm64-v8a", Host: "arm64", Override: "", Expected: "/opt/decerter/decerter"},
-		{ABI: "x86_64", Host: "arm64", Override: "", Expected: "/opt/decerter/decerter-amd64"},
-		{ABI: "arm64-v8a", Host: "amd64", Override: "./out/decerter-arm64", Expected: "./out/decerter-arm64"},
+		{ABI: "x86_64", OS: "linux", Host: "amd64", Override: "", Expected: "/opt/decerter/decerter"},
+		{ABI: "arm64-v8a", OS: "linux", Host: "amd64", Override: "", Expected: "/opt/decerter/decerter-arm64"},
+		{ABI: "arm64-v8a", OS: "linux", Host: "arm64", Override: "", Expected: "/opt/decerter/decerter"},
+		{ABI: "x86_64", OS: "linux", Host: "arm64", Override: "", Expected: "/opt/decerter/decerter-amd64"},
+		{ABI: "arm64-v8a", OS: "linux", Host: "amd64", Override: "./out/decerter-arm64", Expected: "./out/decerter-arm64"},
+		// a Mac runs a macOS decerter, the device gets the Linux binary next to it even for the same architecture
+		{ABI: "arm64-v8a", OS: "darwin", Host: "arm64", Override: "", Expected: "/opt/decerter/decerter-arm64"},
+		{ABI: "x86_64", OS: "darwin", Host: "amd64", Override: "", Expected: "/opt/decerter/decerter-amd64"},
+		{ABI: "arm64-v8a", OS: "darwin", Host: "arm64", Override: "./out/decerter-arm64", Expected: "./out/decerter-arm64"},
 	}
 
 	for _, positive := range positiveCases {
@@ -271,10 +276,10 @@ func TestChooseBinaryPositive(state *testing.T) {
 			return
 		}
 
-		binary := ChooseBinary(architecture, positive.Host, "/opt/decerter/decerter", positive.Override)
+		binary := ChooseBinary(architecture, positive.OS, positive.Host, "/opt/decerter/decerter", positive.Override)
 
 		if binary != positive.Expected {
-			state.Errorf("Test of android.ChooseBinary function failed, abi %s on %s, binary should be %s, binary: %s", positive.ABI, positive.Host, positive.Expected, binary)
+			state.Errorf("Test of android.ChooseBinary function failed, abi %s on %s/%s, binary should be %s, binary: %s", positive.ABI, positive.OS, positive.Host, positive.Expected, binary)
 			return
 		}
 	}

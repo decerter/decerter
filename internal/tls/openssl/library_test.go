@@ -7,6 +7,7 @@ package openssl
 import (
 	"encoding/binary"
 	"os"
+	"runtime"
 	"slices"
 	"testing"
 )
@@ -146,7 +147,8 @@ func TestFindInLinkerCacheSystemPositive(state *testing.T) {
 		state.Skipf("Test of openssl.findInLinkerCache skipped, no linker cache on this host: %s", err.Error())
 	}
 
-	flags, found := linkerCacheFlags["amd64"]
+	// the flags of the architecture the test runs on, like decerter itself
+	flags, found := linkerCacheFlags[runtime.GOARCH]
 	path := findInLinkerCache(cache, "libc.so.6", flags)
 
 	if !found || (path == "") {

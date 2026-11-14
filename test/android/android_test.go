@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -34,6 +35,7 @@ const (
 	// the binaries on the device; decerter is found by name with pidof
 	decerterBinary   string = "decerter"
 	clientBinary string = "client"
+	decerterPackage  string = "github.com/decerter/decerter/cmd/decerter"
 	dexName      string = "decerter-https.dex"
 	caName       string = "ca.crt"
 	// what decerter logs once it is attached, per mode
@@ -50,6 +52,14 @@ var (
 	errSkip = errors.New("android e2e skipped")
 )
 
+// one go build of the tests: the binary's name in the work directory, its package and its GOOS and GOARCH
+type goBuild struct {
+	Name         string
+	Package      string
+	OS           string
+	Architecture string
+}
+
 var (
 	// why the tests skip, empty when they run; dexSkipReason and tsharkSkipReason only skip the cases that need them
 	skipReason       string
@@ -58,6 +68,8 @@ var (
 	device           emulator
 	workDirectory    string
 	appUID           uint32
+	// the GOARCH of the emulator ABIs the tests build for, x86_64 and arm64-v8a
+	deviceArchitectures = []string{"amd64", "arm64"}
 	// the attach list of /sys/fs/cgroup before the first case, every case has to leave it like this
 	baseline   string
 	tsharkPath string
@@ -84,6 +96,12 @@ func TestMain(main *testing.M) {
 		code = main.Run()
 	default:
 		fmt.Fprintf(os.Stderr, "could not set up the Android e2e tests: %s\n", err.Error())
+	}
+
+	// one line for every case that skipped after the emulator dropped off adb, and the run fails
+	if offline := deviceOffline(); offline != nil {
+		fmt.Fprintf(os.Stderr, "the Android e2e tests failed, the emulator dropped off adb and every case after that skipped: %s\n", offline.Error())
+		code = 1
 	}
 
 	teardownErr := teardown()
@@ -231,7 +249,9 @@ func setup() (err error) {
 	return
 }
 
-// build decerter and the client for the emulator: static linux/amd64 like make build
+// build decerter for the host, which runs decerter android setup and decerter ui, and decerter and the client for the emulator of either ABI: static linux binaries
+// like make build and make build-arm64, named <name>-<arch>; the emulator's ABI is only known once it runs, and setup picks decerter-<arch> next to the
+// host's decerter unless that is the Linux binary of the device's architecture
 func buildBinaries(ctx context.Context) (err error) {
 	goPath, lookErr := exec.LookPath("go")
 
@@ -239,13 +259,17 @@ func buildBinaries(ctx context.Context) (err error) {
 		return
 	}
 
-	packages := map[string]string{
-		decerterBinary:   "github.com/decerter/decerter/cmd/decerter",
-		clientBinary: "./client",
+	builds := []goBuild{{Name: decerterBinary, Package: decerterPackage, OS: runtime.GOOS, Architecture: runtime.GOARCH}}
+
+	for _, architecture := range deviceArchitectures {
+		builds = append(builds,
+			goBuild{Name: decerterBinary + "-" + architecture, Package: decerterPackage, OS: "linux", Architecture: architecture},
+			goBuild{Name: clientBinary + "-" + architecture, Package: "./client", OS: "linux", Architecture: architecture},
+		)
 	}
 
-	for name, buildPackage := range packages {
-		_, err = runHost(ctx, buildTimeout, []string{"GOOS=linux", "GOARCH=amd64", "CGO_ENABLED=0"}, goPath, "build", "-trimpath", "-tags", "netgo,osusergo,e2e_android", "-o", filepath.Join(workDirectory, name), buildPackage)
+	for _, build := range builds {
+		_, err = runHost(ctx, buildTimeout, []string{"GOOS=" + build.OS, "GOARCH=" + build.Architecture, "CGO_ENABLED=0"}, goPath, "build", "-trimpath", "-tags", "netgo,osusergo,e2e_android", "-o", filepath.Join(workDirectory, build.Name), build.Package)
 
 		if err != nil {
 			return
@@ -348,8 +372,9 @@ func pushFiles(ctx context.Context) (err error) {
 		return
 	}
 
+	// the binaries of the emulator's ABI, by their plain names on the device
 	for _, name := range []string{decerterBinary, clientBinary} {
-		err = device.push(ctx, filepath.Join(workDirectory, name), deviceDirectory+"/"+name, "755")
+		err = device.push(ctx, filepath.Join(workDirectory, name+"-"+device.Architecture), deviceDirectory+"/"+name, "755")
 
 		if err != nil {
 			return
@@ -377,7 +402,10 @@ func teardown() (err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
 	defer cancel()
 
-	if (baseline != "") && (device.Serial != "") {
+	// nothing on an offline emulator answers, it is only stopped
+	isReachable := (device.Serial != "") && (deviceOffline() == nil)
+
+	if (baseline != "") && isReachable {
 		list, listErr := attachList(ctx)
 
 		if err = listErr; (err == nil) && (list != baseline) {
@@ -385,7 +413,7 @@ func teardown() (err error) {
 		}
 	}
 
-	if device.Serial != "" {
+	if isReachable {
 		err = errors.Join(err, uninstallFlutter(ctx), uninstallChromium(ctx))
 		// sync before the emulator is killed, a removal still in the page cache would be lost
 		_, removeErr := device.shell(ctx, "rm -rf "+deviceDirectory+" "+dataDirectory+" "+setupBinary+" "+chromeCommandLine+" && sync")
@@ -408,10 +436,14 @@ func teardown() (err error) {
 	return
 }
 
-// skip a case when the suite can't run on a device
+// skip a case when the suite can't run on a device, or the emulator went offline in an earlier case
 func requireDevice(state *testing.T) {
 	if skipReason != "" {
 		state.Skip(skipReason)
+	}
+
+	if offline := deviceOffline(); offline != nil {
+		state.Skipf("skipped, an earlier case lost the emulator: %s", offline.Error())
 	}
 }
 

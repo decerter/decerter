@@ -83,7 +83,7 @@ func TestSetupPositive(state *testing.T) {
 		"device   " + device.Serial + ", ",
 		"root     adbd runs as root",
 		"binary   " + setupBinary + ", decerter ",
-		"tls      Conscrypt offsets for Android 15 on x86_64",
+		"tls      Conscrypt offsets for Android 15 on " + device.ABI,
 		fmt.Sprintf("package  %s, uid %d", appPackage, appUID),
 		// the test app is no Flutter app: a system app or one without libflutter.so
 		"app      " + appPackage + ": ",
@@ -204,13 +204,28 @@ func TestSetupHangupPositive(state *testing.T) {
 // Test if decerter android setup refuses a device adb doesn't have, an AVD that doesn't exist, a binary that can't run on the device and a package that isn't installed, and changes nothing on the device.
 func TestSetupNegative(state *testing.T) {
 	guardDevice(state)
+	// a dynamically linked binary of the device's own architecture, its toybox, so the case doesn't depend on the host (macOS has no ELF binaries)
+	// adb runs as the user who ran sudo and can't write to the work directory, the test writes the file
+	dynamicBinary := filepath.Join(workDirectory, "toybox")
+	toybox, err := device.run(state.Context(), adbTimeout, "exec-out", "cat", "/system/bin/toybox")
+
+	if err != nil {
+		state.Fatalf("Could not read the device's toybox, error: %s", err.Error())
+	}
+
+	err = os.WriteFile(dynamicBinary, []byte(toybox), 0o644)
+
+	if err != nil {
+		state.Fatalf("Could not write the device's toybox, error: %s", err.Error())
+	}
+
 	negativeCases := []struct {
 		Arguments []string
 		Text      string
 	}{
 		{Arguments: []string{"--serial", "emulator-5998"}, Text: "no such device emulator-5998, adb sees " + device.Serial + " (device)"},
 		{Arguments: []string{"--avd", "no-such-avd"}, Text: "unknown AVD no-such-avd, the AVDs of this user: "},
-		{Arguments: []string{"--serial", device.Serial, "--binary", "/bin/ls"}, Text: "/bin/ls is dynamically linked"},
+		{Arguments: []string{"--serial", device.Serial, "--binary", dynamicBinary}, Text: dynamicBinary + " is dynamically linked"},
 		{Arguments: []string{"--serial", device.Serial, "--package", "no.such.app"}, Text: `unknown package \"no.such.app\", the closest installed packages: `},
 		{Arguments: []string{"--serial", device.Serial, "--remove", "--port", "8080"}, Text: "if any flags in the group [remove port] are set none of the others can be"},
 	}
@@ -414,7 +429,7 @@ func runSetup(ctx context.Context, account hostAccount, sdk string, adb string, 
 
 // setup boots the AVD when no emulator runs and the AVD is there; otherwise TestMain runs it against the running emulator later
 func coldSetup(ctx context.Context, account hostAccount, sdk string, adb string) (result setupRun, err error) {
-	probe := emulator{SDK: sdk, ADB: adb, Serial: "", account: account, process: nil, waitErr: nil, logFile: nil}
+	probe := emulator{SDK: sdk, ADB: adb, Serial: "", ABI: "", Architecture: "", account: account, process: nil, waitErr: nil, logFile: nil}
 	devices, err := probe.run(ctx, adbTimeout, "devices")
 
 	if err != nil {
@@ -454,7 +469,7 @@ func stopBooted(result setupRun) (err error) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
 	defer cancel()
-	booted := emulator{SDK: device.SDK, ADB: device.ADB, Serial: result.BootedSerial, account: device.account, process: nil, waitErr: nil, logFile: nil}
+	booted := emulator{SDK: device.SDK, ADB: device.ADB, Serial: result.BootedSerial, ABI: device.ABI, Architecture: device.Architecture, account: device.account, process: nil, waitErr: nil, logFile: nil}
 	_, err = booted.run(ctx, adbTimeout, "emu", "kill")
 
 	if err != nil {

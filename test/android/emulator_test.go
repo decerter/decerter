@@ -16,12 +16,14 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
 
 const (
-	// the AVD of stage 6: system-images;android-35;google_apis;x86_64, a userdebug build whose adbd may run as root (the playstore images may not)
+	// the AVD of stage 6: system-images;android-35;google_apis;x86_64 (arm64-v8a on an Apple Silicon Mac), a userdebug build whose adbd may run as
+	// root (the playstore images may not)
 	avdName string = "decerter-a15"
 	// a console port of its own, so the serial is known before the emulator is up
 	emulatorPort   string = "5580"
@@ -44,6 +46,12 @@ var (
 	errNoRoot           = errors.New("adbd cannot run as root")
 	errUnsupportedImage = errors.New("unsupported emulator image")
 	errBootTimeout      = errors.New("the emulator did not boot in time")
+	errOffline          = errors.New("the emulator went offline")
+)
+
+var (
+	// the first adb error that said the emulator of the tests is gone, nil while it is there; the cases after it skip and TestMain fails with this one message
+	offlineErr atomic.Pointer[error]
 )
 
 // the user who ran sudo: adb and the emulator run as this user, so they use its adb server, adb key and AVD; root when there is none
@@ -52,15 +60,18 @@ type hostAccount struct {
 	Home       string
 }
 
-// the device the tests run on and how to reach it; process is the emulator the tests started, nil for one that was running already
+// the device the tests run on and how to reach it; ABI and Architecture (its GOARCH) come from the running image; process is the emulator the tests
+// started, nil for one that was running already
 type emulator struct {
-	SDK     string
-	ADB     string
-	Serial  string
-	account hostAccount
-	process *exec.Cmd
-	waitErr chan error
-	logFile *os.File
+	SDK          string
+	ADB          string
+	Serial       string
+	ABI          string
+	Architecture string
+	account      hostAccount
+	process      *exec.Cmd
+	waitErr      chan error
+	logFile      *os.File
 }
 
 // the user behind sudo, from SUDO_UID and SUDO_GID
@@ -156,22 +167,46 @@ func findD8(sdk string) (d8 string, err error) {
 	return
 }
 
-// the environment adb and the emulator get, nothing of root's
+// the environment adb, the emulator and the SDK's tools get, nothing of root's but JAVA_HOME
 func (account hostAccount) environment(sdk string) (environment []string) {
 	environment = []string{
-		"PATH=/usr/local/bin:/usr/bin:/bin",
+		"PATH=" + javaPath("/usr/local/bin:/usr/bin:/bin"),
 		"HOME=" + account.Home,
 		"LC_ALL=C",
 		"ANDROID_SDK_ROOT=" + sdk,
 		"ANDROID_HOME=" + sdk,
 		"ANDROID_AVD_HOME=" + filepath.Join(account.Home, ".android", "avd"),
 	}
+	environment = append(environment, javaHome()...)
+	return
+}
+
+// JAVA_HOME of the tests for apksigner, d8 and Gradle, empty without one: a Mac has no java on PATH, only a stub in /usr/bin that needs it
+func javaHome() (environment []string) {
+	home := os.Getenv("JAVA_HOME")
+
+	if home != "" {
+		environment = []string{"JAVA_HOME=" + home}
+	}
+
+	return
+}
+
+// path with JAVA_HOME's bin in front when JAVA_HOME is set
+func javaPath(path string) (withJava string) {
+	withJava = path
+	home := os.Getenv("JAVA_HOME")
+
+	if home != "" {
+		withJava = filepath.Join(home, "bin") + ":" + path
+	}
+
 	return
 }
 
 // use an emulator adb already knows, or boot the AVD headless; then wait for the boot and make adbd root
 func connectEmulator(ctx context.Context, account hostAccount, sdk string, adb string, logPath string) (device emulator, err error) {
-	device = emulator{SDK: sdk, ADB: adb, Serial: "", account: account, process: nil, waitErr: nil, logFile: nil}
+	device = emulator{SDK: sdk, ADB: adb, Serial: "", ABI: "", Architecture: "", account: account, process: nil, waitErr: nil, logFile: nil}
 	devices, devicesErr := device.run(ctx, adbTimeout, "devices")
 
 	if err = devicesErr; err != nil {
@@ -216,7 +251,7 @@ func (device *emulator) start(logPath string) (err error) {
 	_, statErr := os.Stat(filepath.Join(device.account.Home, ".android", "avd", avdName+".ini"))
 
 	if statErr != nil {
-		err = fmt.Errorf("%w: %s is not in %s, create it from system-images;android-35;google_apis;x86_64: %w", errNoAVD, avdName, filepath.Join(device.account.Home, ".android", "avd"), statErr)
+		err = fmt.Errorf("%w: %s is not in %s, create it from system-images;android-35;google_apis;x86_64, or arm64-v8a on an arm64 host: %w", errNoAVD, avdName, filepath.Join(device.account.Home, ".android", "avd"), statErr)
 		return
 	}
 
@@ -282,7 +317,7 @@ func (device *emulator) waitForBoot(ctx context.Context) (err error) {
 	return
 }
 
-// x86_64 and Android 15 or newer
+// x86_64 or arm64-v8a and Android 15 or newer; the ABI picks the binaries the tests push
 func (device *emulator) checkImage(ctx context.Context) (err error) {
 	abi, abiErr := device.shell(ctx, "getprop ro.product.cpu.abi")
 	level, levelErr := device.shell(ctx, "getprop ro.build.version.sdk")
@@ -291,10 +326,13 @@ func (device *emulator) checkImage(ctx context.Context) (err error) {
 		return
 	}
 
+	device.ABI = strings.TrimSpace(abi)
+	architectures := map[string]string{"x86_64": "amd64", "arm64-v8a": "arm64"}
+	device.Architecture = architectures[device.ABI]
 	sdkLevel, parseErr := strconv.Atoi(strings.TrimSpace(level))
 
-	if (parseErr != nil) || (sdkLevel < minimumSDKLevel) || (strings.TrimSpace(abi) != "x86_64") {
-		err = fmt.Errorf("%w: %s is %s with API level %s, the tests need x86_64 and API level %d or newer", errUnsupportedImage, device.Serial, strings.TrimSpace(abi), strings.TrimSpace(level), minimumSDKLevel)
+	if (parseErr != nil) || (sdkLevel < minimumSDKLevel) || (device.Architecture == "") {
+		err = fmt.Errorf("%w: %s is %s with API level %s, the tests need x86_64 or arm64-v8a and API level %d or newer", errUnsupportedImage, device.Serial, device.ABI, strings.TrimSpace(level), minimumSDKLevel)
 	}
 
 	return
@@ -384,6 +422,41 @@ func (device *emulator) run(ctx context.Context, timeout time.Duration, argument
 
 	if err != nil {
 		err = fmt.Errorf("adb %s: %w: %s%s", strings.Join(arguments, " "), err, strings.TrimSpace(stderr.String()), strings.TrimSpace(output))
+		device.checkOffline(stderr.String(), err)
+	}
+
+	return
+}
+
+// remember the first adb failure that says the device of the tests went away, once TestMain connected to it: an emulator that dropped off adb doesn't
+// come back by itself, so the cases after it could only fail; during the boot and adb root the same errors are expected and only retried
+func (device *emulator) checkOffline(stderr string, adbErr error) {
+	if !isTestDevice(device.Serial) {
+		return
+	}
+
+	// adb lost its transport, or the emulator is gone from its list
+	for _, text := range []string{"device offline", "device '" + device.Serial + "' not found", "no devices/emulators found"} {
+		if strings.Contains(stderr, text) {
+			wrapped := fmt.Errorf("%w: %s: %w", errOffline, device.Serial, adbErr)
+			offlineErr.CompareAndSwap(nil, &wrapped)
+			return
+		}
+	}
+}
+
+// the emulator TestMain connected to, the global device is only set once it booted and adbd is root
+func isTestDevice(serial string) (isTest bool) {
+	isTest = (serial != "") && (serial == device.Serial)
+	return
+}
+
+// the error that the emulator went offline, nil while it is there
+func deviceOffline() (err error) {
+	pointer := offlineErr.Load()
+
+	if pointer != nil {
+		err = *pointer
 	}
 
 	return

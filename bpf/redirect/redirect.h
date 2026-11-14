@@ -34,8 +34,12 @@
 //UDP destination port of QUIC (HTTP/3) that block_quic makes fail
 #define QUIC_PORT		443
 
-//prefix length of a full address in an LPM_TRIE lookup key, IPv4 is stored IPv4-mapped
+//prefix length of a full address in a prefix_key, IPv4 is stored IPv4-mapped
 #define ADDRESS_BITS	128
+
+//keys of prefix_lengths_map, one per prefix map
+#define ROUTE_LENGTHS	0
+#define CIDR_LENGTHS	1
 
 //second word of an IPv4-mapped IPv6 address (::ffff:0:0/96)
 #define IPV4_MAPPED		0x0000FFFF
@@ -93,14 +97,39 @@ struct port_key {
 	uint8_t padding;
 };
 
-//Key: destination prefix of a route, Value: 1 for routes the kernel can send on, 0 for blackhole, unreachable and prohibit routes, mirrored from the routing tables by Go
+//bits: bit (length % 64) of bits[length / 64] is set while a prefix map has a key with that prefixlen, 0 to 128
+struct prefix_lengths {
+	uint64_t bits[3];
+};
+
+//ip: address searched for, lengths_key: ROUTE_LENGTHS or CIDR_LENGTHS, found: 1 once a prefix contains ip, value: the value of that prefix, the context of search_prefix_length
+struct prefix_search {
+	uint32_t ip[4];
+	uint32_t lengths_key;
+	uint8_t found;
+	uint8_t value;
+	uint16_t padding;
+};
+
+//the prefix maps are hashes searched once per prefix length in use, not LPM_TRIEs: the LPM_TRIE of Android's arm64 GKI 6.6.30 (API 35 emulator) trips
+//UBSAN's bounds check in trie_update_elem on keys longer than 8 bytes and the kernel panics (bpf_lpm_trie_key's data[0], a flexible array since Linux 6.9)
+
+//Key: destination prefix of a route, ip masked to prefixlen, Value: 1 for routes the kernel can send on, 0 for blackhole, unreachable and prohibit routes, mirrored from the routing tables by Go
 struct {
-	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 65535);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, struct prefix_key);
 	__type(value, uint8_t);
 } route_map SEC(".maps");
+
+//Key: ROUTE_LENGTHS or CIDR_LENGTHS, Value: the prefix lengths route_map or cidr_map has keys of, written by Go before keys of a new length are added and after the last key of a length is deleted
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(max_entries, 2);
+	__type(key, uint32_t);
+	__type(value, struct prefix_lengths);
+} prefix_lengths_map SEC(".maps");
 
 //Key: 0, Value: which destination filters are set, a program can't ask if cidr_map or port_map is empty and an unset filter has to pass everything, written by Go after the sets
 struct {
@@ -110,9 +139,9 @@ struct {
 	__type(value, struct filter_config);
 } filter_map SEC(".maps");
 
-//Key: destination prefix of the CIDR filter, IPv4 stored IPv4-mapped like in route_map, Value: 1, only read while filter_config.cidr_filter is set
+//Key: destination prefix of the CIDR filter, IPv4 stored IPv4-mapped like in route_map, ip masked to prefixlen, Value: 1, only read while filter_config.cidr_filter is set
 struct {
-	__uint(type, BPF_MAP_TYPE_LPM_TRIE);
+	__uint(type, BPF_MAP_TYPE_HASH);
 	__uint(max_entries, 65535);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
 	__type(key, struct prefix_key);
@@ -142,6 +171,113 @@ struct {
 	__type(key, struct endpoint);
 	__type(value, uint64_t);
 } client_map SEC(".maps");
+
+//Look up ip masked to one prefix length in the prefix map of the search, index 0 is the longest length, bpf_loop callback: 0 to go on, 1 to stop
+static long search_prefix_length(uint64_t index, void *context)
+{
+	struct prefix_search *search = context;
+
+	if ((!search) || (index > ADDRESS_BITS))
+	{
+		return 1;
+	}
+
+	uint32_t lengths_key = search->lengths_key;
+	struct prefix_lengths *lengths = bpf_map_lookup_elem(&prefix_lengths_map, &lengths_key);
+
+	if (!lengths)
+	{
+		return 1;
+	}
+
+	uint32_t length = ADDRESS_BITS - (uint32_t)index;
+
+	if (!((lengths->bits[length / 64] >> (length % 64)) & 1))
+	{
+		return 0;
+	}
+
+	struct prefix_key key = {
+		.prefixlen = length,
+		.ip = {0, 0, 0, 0}
+	};
+
+	//each word keeps the bits of the prefix that fall into it, network byte order
+	for (uint32_t word = 0; word < 4; word++)
+	{
+		uint32_t word_bits = 0;
+
+		if (length > word * 32)
+		{
+			word_bits = length - word * 32;
+		}
+
+		if (word_bits > 32)
+		{
+			word_bits = 32;
+		}
+
+		uint32_t mask = (word_bits == 0) ? 0 : (uint32_t)(0xFFFFFFFFULL << (32 - word_bits));
+
+		key.ip[word] = search->ip[word] & bpf_htonl(mask);
+	}
+
+	uint8_t *found = NULL;
+
+	switch (lengths_key)
+	{
+	case ROUTE_LENGTHS:
+		found = bpf_map_lookup_elem(&route_map, &key);
+		break;
+	case CIDR_LENGTHS:
+		found = bpf_map_lookup_elem(&cidr_map, &key);
+		break;
+	default:
+		return 1;
+	}
+
+	if (!found)
+	{
+		return 0;
+	}
+
+	search->found = 1;
+	search->value = *found;
+
+	return 1;
+}
+
+//Find the longest prefix of a prefix map that contains the destination of the flow with one hash lookup per prefix length the map has, and copy its value
+//bpf_loop and not bpf_for: Android's 6.6 verifier doesn't see the bpf_for loop converge and stops after a million instructions, a callback is verified on its own
+bool lookup_prefix(uint32_t lengths_key, struct flow *flow, uint8_t *value)
+{
+	if ((!flow) || (!value))
+	{
+		return false;
+	}
+
+	struct prefix_search search = {
+		.ip = {flow->ip[0], flow->ip[1], flow->ip[2], flow->ip[3]},
+		.lengths_key = lengths_key,
+		.found = 0,
+		.value = 0,
+		.padding = 0
+	};
+
+	if (bpf_loop(ADDRESS_BITS + 1, search_prefix_length, &search, 0) < 0)
+	{
+		return false;
+	}
+
+	if (!search.found)
+	{
+		return false;
+	}
+
+	*value = search.value;
+
+	return true;
+}
 
 //Check if the process is selected: its uid is in uid_map or its tgid in tgid_map, decerter itself never is
 bool is_selected_process(uint32_t tgid, uint32_t uid)
@@ -214,17 +350,11 @@ bool is_selected_flow(struct flow *flow)
 		}
 	}
 
-	if (filter_config->cidr_filter)
-	{
-		struct prefix_key key = {
-			.prefixlen = ADDRESS_BITS,
-			.ip = {flow->ip[0], flow->ip[1], flow->ip[2], flow->ip[3]}
-		};
+	uint8_t matched = 0;
 
-		if (!bpf_map_lookup_elem(&cidr_map, &key))
-		{
-			return false;
-		}
+	if ((filter_config->cidr_filter) && (!lookup_prefix(CIDR_LENGTHS, flow, &matched)))
+	{
+		return false;
 	}
 
 	if (filter_config->comm_filter)
@@ -311,13 +441,9 @@ bool has_route(struct flow *flow)
 		return false;
 	}
 
-	struct prefix_key key = {
-		.prefixlen = ADDRESS_BITS,
-		.ip = {flow->ip[0], flow->ip[1], flow->ip[2], flow->ip[3]}
-	};
-	uint8_t *routable = bpf_map_lookup_elem(&route_map, &key);
+	uint8_t routable = 0;
 
-	return (routable) && (*routable == 1);
+	return (lookup_prefix(ROUTE_LENGTHS, flow, &routable)) && (routable == 1);
 }
 
 //Check if the original destination of the flow is a unicast address, a multicast or broadcast send can't be relayed by one upstream socket

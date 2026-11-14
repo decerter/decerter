@@ -55,12 +55,14 @@ sudo -u test curl -s https://example.com/ | grep -o '<title>.*</title>'
 curl checked the server's real certificate; decerter sealed the changed HTTP/2 response with the session's own keys. Next: hold and edit requests by hand in [`decerter ui`](docs/ui.md), let an LLM drive decerter with [`decerter mcp`](docs/mcp.md), or write a pcapng that Wireshark decrypts by itself with [`decerter capture`](docs/capture.md).
 
 ## Quickstart: Android
-On the Linux host, with the Android SDK (platform-tools and the emulator, in `~/Android/Sdk` or `ANDROID_HOME`; setup takes the SDK's `adb` before one on `PATH`) and an AVD of the Google APIs x86_64 image of Android 15 (API 35), whose `adbd` can run as root:
+On the Linux host (or an Apple Silicon Mac, below), with the Android SDK (platform-tools and the emulator, in `~/Android/Sdk` or `ANDROID_HOME`; setup takes the SDK's `adb` before one on `PATH`) and an AVD of the Google APIs x86_64 image of Android 15 (API 35), whose `adbd` can run as root:
 
 ```sh
 sdkmanager "platform-tools" "emulator" "system-images;android-35;google_apis;x86_64"
 avdmanager create avd --name decerter-a15 --package "system-images;android-35;google_apis;x86_64"
 ```
+
+On an Apple Silicon Mac, take the `arm64-v8a` image in place of `x86_64` and build decerter from source there (there is no macOS release): `make build build-arm64` gives `./decerter` for macOS, which has only the host commands (`android setup`, `ui`, `mcp`, `help`), and `./decerter-arm64`, which setup pushes to the arm64 emulator. The commands below are the same with `./decerter`.
 
 `decerter android setup` runs as your user, not as root. With `--avd` it boots the AVD without a window, pushes decerter to the emulator, checks that decerter can hook the app's TLS, forwards the control API to a host port and prints the commands to run (to watch the app, start the emulator with a window yourself, `emulator -avd decerter-a15`, and leave out `--avd`). Chrome is on every Google APIs image and brings its own BoringSSL:
 
@@ -114,7 +116,7 @@ The flow list in the UI (and the curl above) shows Chrome's TLS 1.3 flows to `ex
 adb -s emulator-5554 emu kill
 ```
 
-For an arm64 phone, put the arm64 binary next to the amd64 one, where setup looks for it: `tar -xzOf ../decerter_*_linux_arm64.tar.gz --wildcards '*/decerter' > decerter-arm64 && chmod +x decerter-arm64`. Real devices are experimental: only the x86_64 emulator was tested. [docs/android.md](docs/android.md) covers `--package`, `decerter android tls`, Flutter, Chrome and Cronet apps, `decerter android restore` and the steps without setup.
+For an arm64 phone, put the arm64 binary next to the amd64 one, where setup looks for it: `tar -xzOf ../decerter_*_linux_arm64.tar.gz --wildcards '*/decerter' > decerter-arm64 && chmod +x decerter-arm64`. Real devices are experimental: only the x86_64 and arm64 emulators were tested. [docs/android.md](docs/android.md) covers `--package`, `decerter android tls`, Flutter, Chrome and Cronet apps, `decerter android restore` and the steps without setup.
 
 ## How it works
 - **Selection:** cgroup v2 socket hooks (`connect4/6`, `sendmsg4/6`) check the calling process against BPF maps filled from `--uid`, `--pid`, `--package`, `--dst-cidr`, `--dst-port` and the kernel part of [`--filter`](docs/filter.md). Nothing is selected until a process is named.
@@ -144,16 +146,17 @@ What decerter adds: editing TLS traffic without a CA, by sealing changed records
 | OpenSSL 3 (`libssl.so.3`), Linux amd64 | 3.6.2 (Debian forky); distribution builds 3.0.13 (Ubuntu 24.04), 3.5.7 (Debian 13), 3.5.7 (Parrot 7.4, `parrotsec/core`), 3.5.8 (AlmaLinux 10, FIPS), 3.5.9 (Fedora 45 `openssl3-libs`), 3.6.5 (Kali rolling 2026.3, `kalilinux/kali-rolling`), 3.6.5 (BlackArch on Arch, `blackarchlinux/blackarch`) | tested |
 | OpenSSL 4 (`libssl.so.4`), Linux amd64 | 4.0.3 (Fedora 45's default, also next to `openssl3-libs` 3.5.9 with both hooked at once); 4.1.0 built from upstream source | tested |
 | OpenSSL 3 and 4, Linux amd64 | every other release 3.0.0–3.6.5 and 4.0.0–4.1.0 (offsets generated from each release's source) | built, untested |
-| OpenSSL 3 and 4, Linux arm64 | 3.0.0–3.6.5, 4.0.0–4.1.0 | built, untested |
+| OpenSSL 3 and 4, Linux arm64 | distribution builds on Debian 13 arm64 (2026-11-14): 3.0.13 (Ubuntu 24.04), 3.5.7 (Debian 13, the host and `debian:13`), 3.5.7 (Parrot), 3.5.8 (AlmaLinux 10), 3.6.5 (Kali rolling), 4.0.3 (Fedora 45) and 3.5.9 (Fedora 45 `openssl3-libs`) | tested |
+| OpenSSL 3 and 4, Linux arm64 | every other release 3.0.0–3.6.5 and 4.0.0–4.1.0 | built, untested |
 | OpenSSL 1.1, LibreSSL, GnuTLS, NSS, rustls, Go's `crypto/tls`, other statically linked TLS on Linux | | unsupported |
-| Conscrypt (Android's platform TLS: Java and Kotlin apps) | Android 15, x86_64 | tested |
-| Conscrypt | Android 16 and 17 offsets; arm64 | built, untested |
-| Flutter (`dart:io`'s BoringSSL in `libflutter.so`) | 3.35.7 and 3.50.0, x86_64 | tested |
-| Flutter | 3.24.0–3.50.0 (74 releases, 38 Dart versions); arm64 (finder unit-tested on real arm64 engines) | built, untested |
+| Conscrypt (Android's platform TLS: Java and Kotlin apps) | Android 15, x86_64; Android 15, arm64 (emulator, 2026-11-14) | tested |
+| Conscrypt | Android 16 and 17 offsets | built, untested |
+| Flutter (`dart:io`'s BoringSSL in `libflutter.so`) | 3.35.7 and 3.50.0, x86_64; 3.35.7, arm64 (emulator, 2026-11-14) | tested |
+| Flutter | 3.24.0–3.50.0 (74 releases, 38 Dart versions) | built, untested |
 | Flutter | before 3.24.0; 32-bit apps | unsupported |
-| Chrome (Trichrome) | 124.0.6367.219, x86_64 | tested |
-| Chromium (ChromePublic snapshot) | 160.0.8161.0, x86_64 | tested |
-| Chrome, WebView, Cronet | release branches of milestones 124–160 and the listed builds 122.0.6238.4, 125.0.6383.0, 126.0.6452.4, 127.0.6493.0; arm64 | built, untested |
+| Chrome (Trichrome) | 124.0.6367.219, x86_64 and arm64 (emulator, 2026-11-14) | tested |
+| Chromium (ChromePublic snapshot) | 160.0.8161.0, x86_64 (snapshot 1744338) and arm64 (snapshot 1744436, 2026-11-14) | tested |
+| Chrome, WebView, Cronet | release branches of milestones 124–160 and the listed builds 122.0.6238.4, 125.0.6383.0, 126.0.6452.4, 127.0.6493.0 | built, untested |
 | Cronet bundled in apps | YouTube's Cronet 125.0.6383.0 is found and hooked, its key log lines were counted but not checked; Play services' Cronet 126.0.6452.4 is hooked, no traffic seen | built, untested |
 | WebView in an app | maps Trichrome's library, so it is expected to work like Chrome | built, untested |
 | Mainline Cronet (`HttpEngine`, tethering APEX) | uses the APEX's own `libssl.so` | unsupported |
@@ -175,10 +178,12 @@ What decerter adds: editing TLS traffic without a CA, by sealing changed records
 | Platform | Status |
 |---|---|
 | Linux amd64, kernel 7.0.3 (Debian forky) | tested: every mode, `make test-e2e` |
-| Linux kernel 6.6 | tested as the Android 15 emulator's 6.6.50 kernel (run, capture, keylog, API); every BPF object loads there; a desktop 6.6 kernel was not run |
+| Linux kernel 6.6 | tested as the Android 15 emulators' kernels, 6.6.50 (x86_64) and 6.6.30 (arm64) (run, capture, keylog, API); every BPF object loads there; a desktop 6.6 kernel was not run |
 | Linux before 6.6 | unsupported |
-| Linux arm64 | built, untested |
+| Linux arm64, kernel 6.12 (Debian 13 in a Lima `vz` VM on an Apple Silicon Mac) | tested on 2026-11-14: `make test-unit` and `make test-e2e` (every mode, the distribution OpenSSL cases; BlackArch has no arm64 image) |
 | Android 15 emulator, x86_64 (Google APIs image, userdebug, `adb root`) | tested: `make test-e2e-android` |
+| Android 15 emulator, arm64-v8a (Google APIs image, kernel 6.6.30, on an Apple Silicon Mac) | tested on 2026-11-14: the Android e2e tests from the Mac (setup, `--package`, Conscrypt, Flutter, Chrome, ChromePublic, Cronet, `--block-quic`, restore) |
+| macOS arm64 as the host of `decerter android setup` and `decerter ui` | tested on 2026-11-14 with the arm64 emulator |
 | Android 16 and 17 (GKI android16-6.12, android17-6.18) | built, untested |
 | Rooted arm64 phones (Magisk, KernelSU, `su`) | experimental: built, untested |
 | Google Play images, Android before 15, 32-bit apps | unsupported |
@@ -192,7 +197,8 @@ so there is no CA certificate to install, no proxy setting and no change to the 
 
 decerter runs as root on Linux 6.6 or newer with BTF, and on rooted Android 15 or newer (GKI android15-6.6 or newer).
 Nothing is selected until --uid or --pid, --package on Android, or a proc.uid or proc.pid term of --filter, names a process.
-On Android, decerter android setup on the Linux host pushes decerter to the device and prints how to run it.
+On Android, decerter android setup on the Linux or macOS host pushes decerter to the device and prints how to run it;
+a decerter built for macOS (make build on a Mac) has only the host commands: android setup, ui, mcp and help.
 Logs are JSON lines on stderr; stdout carries the output of the command.
 
 Every flag can also be set with an environment variable DECERTER_<FLAG>, upper case with - as _, for example DECERTER_LOG_LEVEL=debug.
@@ -250,7 +256,7 @@ The proxy of `run` listens on port 15001 of `lo` (`--port`), TCP and UDP; a UDP 
 - The history, rules and captures live in memory and in `/run/decerter` only while decerter runs; the event stream has no replay.
 - `decerter mcp`: escaping and the untrusted-data marker make injected instructions visible as data; they can't make a model ignore them. Give `--allow-write` only to a client whose tool calls you watch.
 - Android: decerter needs root and shares netd's cgroup hooks while it runs; after a `kill -9`, `decerter android restore` puts them back. An app's DNS is sent by netd as root and is not in the app's scope.
-- Not verified: arm64 at runtime (Linux and Android); real phones, Magisk, KernelSU and setup's `su` path; Android 16 and 17; the Wireshark GUI (tshark was used); `decerter ui` in Firefox and editing an HTTP/2 hold in a browser; a real LLM client for `decerter mcp`; the socket's `decerter` group on a host that has the group; HTTP/2 holds on Android; server push, gRPC edits and `Expect: 100-continue` end to end; UDP and DTLS in run-mode captures; a ring buffer overrun; WebView in an app; musl distributions.
+- Not verified: real phones, Magisk, KernelSU and setup's `su` path; Android 16 and 17; the Wireshark GUI (tshark was used); `decerter ui` in Firefox and editing an HTTP/2 hold in a browser; a real LLM client for `decerter mcp`; the socket's `decerter` group on a host that has the group; HTTP/2 holds on Android; server push, gRPC edits and `Expect: 100-continue` end to end; UDP and DTLS in run-mode captures; a ring buffer overrun; WebView in an app; musl distributions.
 
 ## License
 - The core (Go code, tools, tests) is licensed under the [GNU Affero General Public License v3.0 only](LICENSE) (`AGPL-3.0-only`).

@@ -246,12 +246,13 @@ func CheckDevice(info DeviceInfo) (err error) {
 	return
 }
 
-// the binary for a device: override when given, this decerter when the device has the host's architecture, otherwise decerter-<arch> next to it (make build-arm64)
-func ChooseBinary(deviceArchitecture string, hostArchitecture string, executable string, override string) (binary string) {
+// the binary for a device: override when given, this decerter when it is a Linux binary of the device's architecture, otherwise decerter-<arch> next to it
+// (make build-arm64); on a Mac this decerter is a macOS binary, so the device always gets decerter-<arch>
+func ChooseBinary(deviceArchitecture string, hostOS string, hostArchitecture string, executable string, override string) (binary string) {
 	switch {
 	case override != "":
 		binary = override
-	case deviceArchitecture == hostArchitecture:
+	case (hostOS == "linux") && (deviceArchitecture == hostArchitecture):
 		binary = executable
 	default:
 		binary = filepath.Join(filepath.Dir(executable), "decerter-"+deviceArchitecture)
