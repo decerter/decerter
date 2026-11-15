@@ -200,7 +200,7 @@ func lookupFlow(cookie uint64, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map) (flo
 		return
 	}
 
-	flow, err = redirect.FlowByCookie(cookie, captureBpfMaps[capturebpf.FlowMap])
+	flow, err = flowByCookie(cookie, captureBpfMaps[capturebpf.FlowMap])
 	return
 }
 
@@ -352,7 +352,7 @@ func (gate *gate) forgetOutOfScope(now time.Time) {
 		}
 
 		if gate.captureBpfMaps != nil {
-			isOpen, lookupErr := capturebpf.HasFlow(cookie, gate.captureBpfMaps)
+			isOpen, lookupErr := isFlowOpen(cookie, gate.captureBpfMaps)
 
 			if lookupErr != nil {
 				gate.logger.Debug("Could not look up flow", "error", lookupErr, "cookie", cookie)

@@ -11,7 +11,6 @@ import (
 
 	"github.com/decerter/decerter/internal/bpf"
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
-	"github.com/decerter/decerter/internal/bpf/secrets"
 	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/pcapng"
 	"github.com/decerter/decerter/internal/tlsrecord"
@@ -406,7 +405,7 @@ func (recorder *recorder) lookup(cookie uint64, heldFlow *flow) (keyLog string) 
 		return
 	}
 
-	keyLog, found, lookupErr := secrets.LookupKeyLog(heldFlow.clientRandom, recorder.secretsBpfMaps)
+	keyLog, found, lookupErr := keyLogByRandom(heldFlow.clientRandom, recorder.secretsBpfMaps)
 
 	if lookupErr != nil {
 		recorder.logger.Debug("Could not look up tls secrets", "error", lookupErr, "cookie", cookie)
@@ -482,7 +481,7 @@ func (recorder *recorder) forgetIdleFlows(now time.Time) (err error) {
 		isDecryptedSession := idleFlow.isDTLS && (idleFlow.state == decryptedFlowState)
 
 		if (isOpenConnection || isDecryptedSession) && (recorder.captureBpfMaps != nil) {
-			isOpen, lookupErr := capturebpf.HasFlow(cookie, recorder.captureBpfMaps)
+			isOpen, lookupErr := isFlowOpen(cookie, recorder.captureBpfMaps)
 
 			if lookupErr != nil {
 				recorder.logger.Debug("Could not look up flow", "error", lookupErr, "cookie", cookie)

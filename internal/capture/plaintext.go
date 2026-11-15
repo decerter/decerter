@@ -10,7 +10,6 @@ import (
 	"time"
 
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
-	"github.com/decerter/decerter/internal/bpf/secrets"
 	"github.com/decerter/decerter/internal/pcapng"
 	"github.com/decerter/decerter/internal/tlsrecord"
 )
@@ -461,7 +460,7 @@ func (recorder *recorder) unlock(cookie uint64, heldFlow *flow) (err error) {
 		return
 	}
 
-	sessionSecrets, found, lookupErr := secrets.Lookup(heldFlow.clientRandom, recorder.secretsBpfMaps)
+	sessionSecrets, found, lookupErr := secretsByRandom(heldFlow.clientRandom, recorder.secretsBpfMaps)
 
 	if lookupErr != nil {
 		recorder.logger.Debug("Could not look up tls secrets", "error", lookupErr, "cookie", cookie)
@@ -908,7 +907,7 @@ func (recorder *recorder) holdDatagram(cookie uint64, heldFlow *flow, packet cap
 
 // the secrets of a held DTLS session are there: a new record layer gets them first and then the held datagrams, so every record is written with the timestamp of its own datagram
 func (recorder *recorder) unlockDatagrams(cookie uint64, heldFlow *flow) (err error) {
-	sessionSecrets, found, lookupErr := secrets.Lookup(heldFlow.clientRandom, recorder.secretsBpfMaps)
+	sessionSecrets, found, lookupErr := secretsByRandom(heldFlow.clientRandom, recorder.secretsBpfMaps)
 
 	if lookupErr != nil {
 		recorder.logger.Debug("Could not look up tls secrets", "error", lookupErr, "cookie", cookie)

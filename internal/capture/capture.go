@@ -17,12 +17,22 @@ import (
 
 	"github.com/decerter/decerter/internal/bpf"
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
+	"github.com/decerter/decerter/internal/bpf/redirect"
+	"github.com/decerter/decerter/internal/bpf/secrets"
 	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
 	"golang.org/x/sys/unix"
+)
+
+// the lookups in the bpf maps, the tests have no maps and set their own
+var (
+	isFlowOpen      = capturebpf.HasFlow
+	flowByCookie    = redirect.FlowByCookie
+	secretsByRandom = secrets.Lookup
+	keyLogByRandom  = secrets.LookupKeyLog
 )
 
 const (
@@ -312,7 +322,7 @@ func (hub *Hub) Run(ctx context.Context) (err error) {
 			hub.countDropped()
 			hub.gate.forgetOutOfScope(now)
 			hub.forgetFlows(func(cookie uint64) (isOpen bool, err error) {
-				isOpen, err = capturebpf.HasFlow(cookie, hub.captureBpfMaps)
+				isOpen, err = isFlowOpen(cookie, hub.captureBpfMaps)
 				return
 			})
 		}

@@ -574,3 +574,72 @@ func clientHello(serverName string) (hello []byte, err error) {
 
 	return
 }
+
+// Test if capture.Hub counts the bytes and datagrams of a UDP flow, keeps a flow whose socket is open or can't be looked up, closes the others in the history and is done when its reader is.
+func TestHubForgetFlowsPositive(state *testing.T) {
+	flows := history.New(history.DefaultLimits(), nil)
+	hub, err := NewHub(capturebpf.MaxSnaplen, nil, nil, nil, flows, false, slog.New(slog.DiscardHandler))
+
+	if err != nil {
+		state.Fatalf("Test of capture.NewHub failed, error: %s", err.Error())
+	}
+
+	hub.gate.lookup = testLookup
+	query := []byte("query")
+
+	// 1 is open, the lookup of 2 fails, 3 is gone
+	for cookie := range uint64(3) {
+		data := UDPPacket(nil, Endpoint{Address: hubClient.Address, Port: 40000 + uint16(cookie)}, hubServer, query)
+		err = hub.gate.handle(capturebpf.Packet{Cookie: cookie + 1, FlowCookie: cookie + 1, TimestampNs: 1, Length: uint32(len(data)), IsIngress: false, Data: data}, time.Now(), hub.emit)
+
+		if err != nil {
+			state.Fatalf("Test of capture.Hub failed, cannot hand a packet out, error: %s", err.Error())
+		}
+	}
+
+	hub.forgetFlows(func(cookie uint64) (isOpen bool, err error) {
+		switch cookie {
+		case 1:
+			isOpen = true
+		case 2:
+			err = errors.New("lookup failed")
+		default:
+		}
+
+		return
+	})
+	listed, _ := flows.Flows(nil, 0, 10)
+	closed := 0
+
+	for _, flow := range listed {
+		if flow.State == api.ClosedFlowState {
+			closed++
+
+			if (flow.Up.Bytes != int64(len(query))) || (flow.Up.Datagrams != 1) {
+				state.Errorf("Test of capture.Hub failed, the closed flow should have one datagram of %d bytes, flow: %+v", len(query), flow)
+				return
+			}
+		}
+	}
+
+	if (len(hub.flows) != 2) || (hub.flows[3] != nil) || (closed != 1) {
+		state.Errorf("Test of capture.Hub failed, the flows 1 and 2 should stay and 3 be closed, hub flows: %d, closed: %d", len(hub.flows), closed)
+		return
+	}
+
+	select {
+	case <-hub.Done():
+		state.Errorf("Test of capture.Hub.Done failed, the hub should not be done before its reader")
+		return
+	default:
+	}
+
+	close(hub.doneChannel)
+
+	select {
+	case <-hub.Done():
+	default:
+		state.Errorf("Test of capture.Hub.Done failed, the hub should be done")
+		return
+	}
+}
