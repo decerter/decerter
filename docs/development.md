@@ -35,7 +35,7 @@ make license-report  # the dependencies with their licenses
 make test-unit       # unit tests with the race detector
 make test-e2e        # e2e tests on this host, as root
 make test-e2e-android
-make coverage        # test coverage of the unit tests, COVERAGE_E2E=1 adds the e2e tests
+make coverage        # test coverage of the unit tests, COVERAGE_E2E=1 adds the e2e tests, COVERAGE_ANDROID=1 the Android e2e tests
 ```
 
 - `make test-unit` includes tests that keep the docs honest: the `decerter --help` dump in the README, the field table of [filter.md](filter.md) and a check that every flag of every command is named in the README or `docs/`.
@@ -47,16 +47,18 @@ make coverage        # test coverage of the unit tests, COVERAGE_E2E=1 adds the 
 `make coverage` (`tools/coverage/coverage.sh`) runs the unit tests with the race detector and `-coverpkg` over the whole module, so a test counts for every package it runs, and writes into `coverage/` (`COVERAGE_DIR`, gitignored):
 
 ```
-coverage/packages.txt    statements and percentage per package: unit, e2e and both together
+coverage/packages.txt    statements and percentage per package: unit, e2e, android and all together
 coverage/functions.txt   go tool cover -func, every function with its percentage
 coverage/coverage.html   go tool cover -html, the source with the lines no test ran
-coverage/unit.out        the profiles of go test, e2e.out and e2e-children.out with the e2e tests
+coverage/unit.out        the profiles of go test, e2e.out and e2e-children.out with the e2e tests, android.out with the Android e2e tests
 coverage/merged.out      the profiles together, without the code that is not hand-written
 ```
 
-`COVERAGE_E2E=1 make coverage` runs the e2e tests too, with sudo as `make test-e2e` does. They run decerter in the test process, so their profile has the production packages; the cases that run the test binary as decerter (`decerter mcp`, the distribution OpenSSL cases, the capture that is stopped) write their counters into `DECERTER_E2E_COVERDIR`, which the script sets and merges. `tools/coverage/coverage.sh e2e` runs only the e2e tests and merges the unit profile of an earlier run.
+`COVERAGE_E2E=1 make coverage` runs the e2e tests too, with sudo as `make test-e2e` does. They run decerter in the test process, so their profile has the production packages; the cases that run the test binary as decerter (`decerter mcp`, the distribution OpenSSL cases, the capture that is stopped) write their counters into `DECERTER_E2E_COVERDIR`, which the script sets and merges. `tools/coverage/coverage.sh e2e` runs only the e2e tests and merges the profiles of an earlier run of the other suites; a profile from before a source file changed counts that file's statements twice, so run every suite again for numbers to keep.
 
-Left out of the numbers: the bpf2go output (`*_bpfel.go`, `*_bpfeb.go`), the generated offset tables (`*_gen.go`), `cmd/decerter` (its `main` only calls `cmd.Execute`) and the helpers under `test/`. The BPF C programs have no Go coverage; the e2e tests cover them, the redirect and capture paths in `test/e2e/redirect_test.go`. The Android e2e tests run decerter on the emulator and are not in the numbers, so `app/boringssl.go`, the netd hook sharing of `internal/attach` and what `internal/android` does over adb count only as far as the unit tests reach them.
+`COVERAGE_ANDROID=1 make coverage` runs the Android e2e tests too, with sudo and the emulator as `make test-e2e-android` does. With `DECERTER_E2E_COVERDIR` set the tests build decerter with `go build -cover` for the host and the emulator: the host's decerter (`decerter android setup`, `decerter ui`) writes its counters into that directory, the ones on the emulator into `/data/local/tmp/decerter-e2e-cover`, which the tests pull and remove at the end, and the script turns both into `android.out`. A decerter that `decerter android setup` or a printed command line starts on the device has no `GOCOVERDIR`: it is not counted and prints `warning: GOCOVERDIR not set, no coverage data emitted` when it exits. A decerter that is killed instead of stopped writes no counters either.
+
+Left out of the numbers: the bpf2go output (`*_bpfel.go`, `*_bpfeb.go`), the generated offset tables (`*_gen.go`), `cmd/decerter` (its `main` only calls `cmd.Execute`) and the helpers under `test/`. The BPF C programs have no Go coverage; the e2e tests cover them, the redirect and capture paths in `test/e2e/redirect_test.go`. Without `COVERAGE_ANDROID=1` the Android e2e tests are not in the numbers, so `app/boringssl.go`, the netd hook sharing of `internal/attach` and what `internal/android` does over adb count only as far as the unit tests reach them.
 
 ## BPF objects
 The BPF objects are built from the committed `bpf/vmlinux.h`, bpftool's dump of the dev box's kernel types (7.0.3), so every build sees the same kernel types; CO-RE relocates them to the running kernel when decerter loads. Regenerating them needs clang-21 and llvm-strip-21:

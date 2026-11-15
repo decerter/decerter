@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: AGPL-3.0-only
 
-# usage: tools/coverage/coverage.sh [unit] [e2e]
+# usage: tools/coverage/coverage.sh [unit] [e2e] [android]
 #
-# make coverage calls this. It runs the unit tests (unit, the default), the Linux e2e tests with sudo (e2e) or both with
-# -coverpkg over the whole module, so a test counts for every package it runs, and writes into COVERAGE_DIR (default
-# coverage/, gitignored):
+# make coverage calls this. It runs the unit tests (unit, the default), the Linux e2e tests with sudo (e2e), the Android
+# e2e tests with sudo on the emulator (android) or any of them with -coverpkg over the whole module, so a test counts for
+# every package it runs, and writes into COVERAGE_DIR (default coverage/, gitignored):
 #
 #   unit.out, e2e.out   the profiles of go test, as it writes them
 #   e2e-children.out    the same for the processes the e2e tests run as decerter, counted as e2e
+#   android.out         the same for the decerter the Android e2e tests build with go build -cover: the one of the host
+#                       (decerter android setup, decerter ui) and the ones that ran on the emulator
 #   merged.out          the profiles of this run together, without the code that is not hand-written
 #   functions.txt       go tool cover -func of merged.out, every function with its percentage
 #   packages.txt        statements and percentage per package for unit, e2e and both, also printed
@@ -51,8 +53,30 @@ for suite in "$@"; do
 
 		rm -rf "$children"
 		;;
+	android)
+		# as make test-e2e-android; the tests build decerter with -cover when DECERTER_E2E_COVERDIR is set, the decerter of the host writes its counters into it
+		# and the tests pull the ones of the device into its device subdirectory
+		children="$(mktemp -d)"
+		chmod 0777 "$children"
+		sudo DECERTER_E2E_COVERDIR="$children" DECERTER_E2E_FLUTTER="${DECERTER_E2E_FLUTTER:-}" DECERTER_E2E_CHROMIUM="${DECERTER_E2E_CHROMIUM:-}" go test -tags=e2e_android -count=1 -timeout 60m ./test/android/ || status=1
+		sudo chown -R "$(id -u):$(id -g)" "$children" || status=1
+		rm -f "$directory/android.out"
+		inputs=""
+
+		for counters in "$children" "$children/device"; do
+			if [ -n "$(find "$counters" -maxdepth 1 -name 'covmeta.*' 2>/dev/null)" ]; then
+				inputs="${inputs:+$inputs,}$counters"
+			fi
+		done
+
+		if [ -n "$inputs" ]; then
+			go tool covdata textfmt -i="$inputs" -o="$directory/android.out" || status=1
+		fi
+
+		rm -rf "$children"
+		;;
 	*)
-		echo "usage: $0 [unit] [e2e]" >&2
+		echo "usage: $0 [unit] [e2e] [android]" >&2
 		exit 2
 		;;
 	esac
@@ -65,7 +89,7 @@ filter_profile() {
 
 profiles=()
 
-for suite in unit e2e e2e-children; do
+for suite in unit e2e e2e-children android; do
 	if [ -s "$directory/$suite.out" ]; then
 		profiles+=("$directory/$suite.out")
 	fi
@@ -86,7 +110,7 @@ go tool cover -html="$directory/merged.out" -o "$directory/coverage.html" || sta
 
 # statements per package: a block counts once, covered when any profile ran it
 {
-	for suite in unit e2e e2e-children; do
+	for suite in unit e2e e2e-children android; do
 		if [ -s "$directory/$suite.out" ]; then
 			filter_profile "$directory/$suite.out" | sed "s|^|${suite%-children} |"
 		fi
@@ -135,14 +159,14 @@ function suitePercent(suite, part, whole) {
 }
 
 END {
-	printf "%-28s %10s %7s %7s %7s\n", "package", "statements", "unit", "e2e", "merged"
+	printf "%-28s %10s %7s %7s %7s %7s\n", "package", "statements", "unit", "e2e", "android", "merged"
 
 	for (name in packages) {
-		printf "%-28s %10d %7s %7s %7s\n", name, packages[name], suitePercent("unit", suiteCovered["unit", name], packages[name]), suitePercent("e2e", suiteCovered["e2e", name], packages[name]), percent(mergedCovered[name], packages[name]) | "sort"
+		printf "%-28s %10d %7s %7s %7s %7s\n", name, packages[name], suitePercent("unit", suiteCovered["unit", name], packages[name]), suitePercent("e2e", suiteCovered["e2e", name], packages[name]), suitePercent("android", suiteCovered["android", name], packages[name]), percent(mergedCovered[name], packages[name]) | "sort"
 	}
 
 	close("sort")
-	printf "%-28s %10d %7s %7s %7s\n", "total", all, suitePercent("unit", suiteAll["unit"], all), suitePercent("e2e", suiteAll["e2e"], all), percent(mergedAll, all)
+	printf "%-28s %10d %7s %7s %7s %7s\n", "total", all, suitePercent("unit", suiteAll["unit"], all), suitePercent("e2e", suiteAll["e2e"], all), suitePercent("android", suiteAll["android"], all), percent(mergedAll, all)
 }' | tee "$directory/packages.txt"
 
 echo "coverage report: $directory/packages.txt, $directory/functions.txt, $directory/coverage.html"

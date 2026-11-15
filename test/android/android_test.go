@@ -46,6 +46,12 @@ const (
 	sharedLog   string = `"msg":"Shared netd cgroup hook"`
 	stoppedLog  string = `"msg":"Restored netd cgroup hook"`
 	restoredLog string = `"msg":"Netd hooks are exclusive again"`
+	// with this directory of the host set, decerter is built with go build -cover and every decerter of the tests writes its coverage counters when it exits: the one
+	// of the host into the directory, the ones on the device into deviceCoverDirectory, which teardown pulls into its "device" subdirectory; go tool covdata
+	// reads both, make coverage does that
+	coverDirectoryEnvironment string = "DECERTER_E2E_COVERDIR"
+	deviceCoverDirectory      string = "/data/local/tmp/decerter-e2e-cover"
+	coverPackages             string = "github.com/decerter/decerter/..."
 )
 
 var (
@@ -67,7 +73,9 @@ var (
 	tsharkSkipReason string
 	device           emulator
 	workDirectory    string
-	appUID           uint32
+	// the host directory of the coverage counters, empty when the tests don't measure coverage
+	coverDirectory string
+	appUID         uint32
 	// the GOARCH of the emulator ABIs the tests build for, x86_64 and arm64-v8a
 	deviceArchitectures = []string{"amd64", "arm64"}
 	// the attach list of /sys/fs/cgroup before the first case, every case has to leave it like this
@@ -154,6 +162,7 @@ func setup() (err error) {
 		return
 	}
 
+	coverDirectory = os.Getenv(coverDirectoryEnvironment)
 	err = buildBinaries(ctx)
 
 	if err != nil {
@@ -213,6 +222,14 @@ func setup() (err error) {
 		return
 	}
 
+	if coverDirectory != "" {
+		_, err = device.shell(ctx, "rm -rf "+deviceCoverDirectory+" && mkdir -p "+deviceCoverDirectory)
+
+		if err != nil {
+			return
+		}
+	}
+
 	if !setupResult.IsCold {
 		setupResult = runSetup(ctx, account, sdk, adb, "--serial", device.Serial, "--package", appPackage)
 	}
@@ -269,7 +286,14 @@ func buildBinaries(ctx context.Context) (err error) {
 	}
 
 	for _, build := range builds {
-		_, err = runHost(ctx, buildTimeout, []string{"GOOS=" + build.OS, "GOARCH=" + build.Architecture, "CGO_ENABLED=0"}, goPath, "build", "-trimpath", "-tags", "netgo,osusergo,e2e_android", "-o", filepath.Join(workDirectory, build.Name), build.Package)
+		arguments := []string{"build", "-trimpath", "-tags", "netgo,osusergo,e2e_android"}
+
+		if (coverDirectory != "") && (build.Package == decerterPackage) {
+			arguments = append(arguments, "-cover", "-covermode=atomic", "-coverpkg="+coverPackages)
+		}
+
+		arguments = append(arguments, "-o", filepath.Join(workDirectory, build.Name), build.Package)
+		_, err = runHost(ctx, buildTimeout, []string{"GOOS=" + build.OS, "GOARCH=" + build.Architecture, "CGO_ENABLED=0"}, goPath, arguments...)
 
 		if err != nil {
 			return
@@ -413,6 +437,10 @@ func teardown() (err error) {
 		}
 	}
 
+	if isReachable && (coverDirectory != "") {
+		err = errors.Join(err, pullCoverage(ctx))
+	}
+
 	if isReachable {
 		err = errors.Join(err, uninstallFlutter(ctx), uninstallChromium(ctx))
 		// sync before the emulator is killed, a removal still in the page cache would be lost
@@ -433,6 +461,14 @@ func teardown() (err error) {
 		err = errors.Join(err, os.RemoveAll(workDirectory))
 	}
 
+	return
+}
+
+// the coverage counters the decerter processes of the device wrote, into the "device" subdirectory of the host's directory; nothing is left on the device
+func pullCoverage(ctx context.Context) (err error) {
+	_, err = device.run(ctx, pushTimeout, "pull", deviceCoverDirectory, filepath.Join(coverDirectory, "device"))
+	_, removeErr := device.run(ctx, adbTimeout, "shell", "rm -rf "+deviceCoverDirectory)
+	err = errors.Join(err, removeErr)
 	return
 }
 

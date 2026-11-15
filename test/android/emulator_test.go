@@ -178,6 +178,12 @@ func (account hostAccount) environment(sdk string) (environment []string) {
 		"ANDROID_AVD_HOME=" + filepath.Join(account.Home, ".android", "avd"),
 	}
 	environment = append(environment, javaHome()...)
+
+	// the decerter of the host writes its coverage counters here when it was built with -cover
+	if coverDirectory != "" {
+		environment = append(environment, "GOCOVERDIR="+coverDirectory)
+	}
+
 	return
 }
 
@@ -464,13 +470,24 @@ func deviceOffline() (err error) {
 
 // run one shell command on the device, adb returns its exit status
 func (device *emulator) shell(ctx context.Context, command string) (output string, err error) {
-	output, err = device.run(ctx, adbTimeout, "shell", command)
+	output, err = device.run(ctx, adbTimeout, "shell", coverCommand(command))
+	return
+}
+
+// the command with the directory a decerter built with -cover writes its coverage counters into, as it is without coverage
+func coverCommand(command string) (covered string) {
+	covered = command
+
+	if coverDirectory != "" {
+		covered = "export GOCOVERDIR=" + deviceCoverDirectory + "; " + command
+	}
+
 	return
 }
 
 // an adb exec-out that keeps running until it is killed, its stdout goes to stdout; the command gets a pty on the device, so its stderr has to be redirected there
 func (device *emulator) execOut(ctx context.Context, command string) (process *exec.Cmd) {
-	process = exec.CommandContext(ctx, device.ADB, "-s", device.Serial, "exec-out", command)
+	process = exec.CommandContext(ctx, device.ADB, "-s", device.Serial, "exec-out", coverCommand(command))
 	process.Env = device.account.environment(device.SDK)
 	process.Dir = "/"
 	process.SysProcAttr = &syscall.SysProcAttr{Credential: device.account.Credential}

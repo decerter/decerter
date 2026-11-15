@@ -219,15 +219,17 @@ func TestSetupNegative(state *testing.T) {
 		state.Fatalf("Could not write the device's toybox, error: %s", err.Error())
 	}
 
+	// Listed is in the log after Text: adb lists every device it sees, a phone on the host's USB too
 	negativeCases := []struct {
 		Arguments []string
 		Text      string
+		Listed    string
 	}{
-		{Arguments: []string{"--serial", "emulator-5998"}, Text: "no such device emulator-5998, adb sees " + device.Serial + " (device)"},
-		{Arguments: []string{"--avd", "no-such-avd"}, Text: "unknown AVD no-such-avd, the AVDs of this user: "},
-		{Arguments: []string{"--serial", device.Serial, "--binary", dynamicBinary}, Text: dynamicBinary + " is dynamically linked"},
-		{Arguments: []string{"--serial", device.Serial, "--package", "no.such.app"}, Text: `unknown package \"no.such.app\", the closest installed packages: `},
-		{Arguments: []string{"--serial", device.Serial, "--remove", "--port", "8080"}, Text: "if any flags in the group [remove port] are set none of the others can be"},
+		{Arguments: []string{"--serial", "emulator-5998"}, Text: "no such device emulator-5998, adb sees ", Listed: device.Serial + " (device)"},
+		{Arguments: []string{"--avd", "no-such-avd"}, Text: "unknown AVD no-such-avd, the AVDs of this user: ", Listed: ""},
+		{Arguments: []string{"--serial", device.Serial, "--binary", dynamicBinary}, Text: dynamicBinary + " is dynamically linked", Listed: ""},
+		{Arguments: []string{"--serial", device.Serial, "--package", "no.such.app"}, Text: `unknown package \"no.such.app\", the closest installed packages: `, Listed: ""},
+		{Arguments: []string{"--serial", device.Serial, "--remove", "--port", "8080"}, Text: "if any flags in the group [remove port] are set none of the others can be", Listed: ""},
 	}
 	before, err := device.run(state.Context(), adbTimeout, "forward", "--list")
 
@@ -237,9 +239,10 @@ func TestSetupNegative(state *testing.T) {
 
 	for _, negative := range negativeCases {
 		result := runSetup(state.Context(), device.account, device.SDK, device.ADB, negative.Arguments...)
+		_, listed, isFound := strings.Cut(result.Log, negative.Text)
 
-		if (result.Err == nil) || !strings.Contains(result.Log, negative.Text) {
-			state.Errorf("Test of the setup failed, arguments %q should fail with %q, error: %v, output:\n%s\nlog:\n%s", negative.Arguments, negative.Text, result.Err, result.Output, result.Log)
+		if (result.Err == nil) || !isFound || !strings.Contains(listed, negative.Listed) {
+			state.Errorf("Test of the setup failed, arguments %q should fail with %q and %q, error: %v, output:\n%s\nlog:\n%s", negative.Arguments, negative.Text, negative.Listed, result.Err, result.Output, result.Log)
 		}
 
 		if strings.Contains(result.Output, "binary   ") {
