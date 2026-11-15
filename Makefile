@@ -53,6 +53,10 @@ ANDROID_NDK ?= $(lastword $(sort $(wildcard $(HOME)/Android/Sdk/ndk/*)))
 # licenses a dependency may have, each of them can be combined with AGPL-3.0-only; any other one needs a look first
 ALLOWED_LICENSES ?= Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MIT,MPL-2.0
 
+# where make coverage writes its profiles and reports, COVERAGE_E2E=1 adds the e2e tests to the unit tests
+COVERAGE_DIR ?= coverage
+COVERAGE_E2E ?= 0
+
 # Tools Default Version
 GOLANGCI_LINT_VERSION ?= v2.12.2
 GO_LICENSES_VERSION ?= v2.0.1
@@ -184,6 +188,11 @@ test-e2e: ## Run the e2e tests with sudo, needs root and the local users test an
 .PHONY: test-e2e-android
 test-e2e-android: ## Run the Android e2e tests on the emulator with sudo, needs the Android SDK with the emulator and the AVD decerter-a15, a JDK and tshark; the Flutter cases need DECERTER_E2E_FLUTTER (default is every ~/.cache/decerter-flutter/*/flutter), the ChromePublic cases DECERTER_E2E_CHROMIUM
 	sudo DECERTER_E2E_FLUTTER="$(DECERTER_E2E_FLUTTER)" DECERTER_E2E_CHROMIUM="$(DECERTER_E2E_CHROMIUM)" go test -tags=e2e_android -count=1 -timeout 60m ./test/android/
+
+# the unit tests alone, or with the e2e tests when COVERAGE_E2E=1 (sudo, as make test-e2e); every test counts for every package it runs (-coverpkg), see tools/coverage/coverage.sh
+.PHONY: coverage
+coverage: ## Write the test coverage of the hand-written Go code into COVERAGE_DIR (default is coverage): per package, per function and as HTML; unit tests, with COVERAGE_E2E=1 the e2e tests too
+	COVERAGE_DIR="$(COVERAGE_DIR)" ./tools/coverage/coverage.sh unit $(if $(filter 1,$(COVERAGE_E2E)),e2e)
 
 ### Build ###
 .PHONY: build

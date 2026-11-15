@@ -5,5 +5,7 @@ bpf/vmlinux-arm64.h
 /decerter-debug
 /decerter-arm64
 /dist/
+# the profiles and reports of make coverage
+/coverage/
 # Claude Code's local settings and state
 .claude/
