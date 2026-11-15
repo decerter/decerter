@@ -189,7 +189,7 @@ func tlsLinePrefix(flow redirect.Flow, client netip.AddrPort, session tlsrecord.
 		layer = intercept.DTLSLayer
 	}
 
-	prefix = fmt.Sprintf("%s pid=%d uid=%d comm=%s %s client=%s version=%s suite=%s", layer, flow.Tgid, flow.UID, flow.Comm, flow.OriginalDestination, client, tlsrecord.VersionName(session.Version), tlsrecord.CipherSuiteName(session.CipherSuite))
+	prefix = fmt.Sprintf("%s pid=%d uid=%d comm=%s %s client=%s version=%s suite=%s", layer, flow.Tgid, flow.UID, intercept.EscapeField(flow.Comm), flow.OriginalDestination, client, tlsrecord.VersionName(session.Version), tlsrecord.CipherSuiteName(session.CipherSuite))
 	return
 }
 

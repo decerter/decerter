@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -20,6 +21,8 @@ import (
 
 const (
 	hexDigits string = "0123456789abcdef"
+	// the requests with a body and every answer that is no pcapng, event stream or key log
+	jsonMediaType string = "application/json"
 )
 
 func getStatus(backend *Backend, writer http.ResponseWriter, request *http.Request, logger *slog.Logger) {
@@ -791,7 +794,15 @@ func pathID(request *http.Request) (id uint64, err error) {
 }
 
 // one JSON object, unknown fields are an error so a typo does not pass unnoticed
+// only application/json: a form or text/plain body is what a web page may send without asking
 func readJSON(writer http.ResponseWriter, request *http.Request, target any) (err error) {
+	mediaType, _, parseErr := mime.ParseMediaType(request.Header.Get("Content-Type"))
+
+	if (parseErr != nil) || (mediaType != jsonMediaType) {
+		err = fmt.Errorf("%w: body: content type %q, expected %s", ErrBadRequest, request.Header.Get("Content-Type"), jsonMediaType)
+		return
+	}
+
 	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, maxRequestBytes))
 	decoder.DisallowUnknownFields()
 	err = decoder.Decode(target)
@@ -817,7 +828,7 @@ func writeJSON(writer http.ResponseWriter, status int, value any, logger *slog.L
 		return
 	}
 
-	writer.Header().Set("Content-Type", "application/json")
+	writer.Header().Set("Content-Type", jsonMediaType)
 	writer.WriteHeader(status)
 	_, err = writer.Write(append(body, '\n'))
 

@@ -3,6 +3,7 @@
 package ui
 
 import (
+	"sync"
 	"time"
 )
 
@@ -14,6 +15,11 @@ const (
 	// the query parameter of the first load and the cookie that carries the token after it; cookies are not kept apart by port, so the port is in the name
 	tokenParameter string = "token"
 	cookiePrefix   string = "decerter-ui-"
+	// the query parameter of the first load decerter ui --open hands to the browser, a code is good once and for codeLifetime
+	codeParameter string        = "code"
+	codeLifetime  time.Duration = 5 * time.Minute
+	// the browser asks for it at the root of the origin, without the cookie
+	faviconPath string = "/favicon.ico"
 	// no inline script or style, nothing from another origin, never in a frame
 	contentSecurityPolicy string = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
 	// the files of the page in the embedded web directory
@@ -40,6 +46,15 @@ const (
 type Target struct {
 	Network Network
 	Address string
+}
+
+// the secrets of one decerter ui: the token of the printed URL and of the cookie, the random path the page is served under, and the one-time code of --open
+type Credentials struct {
+	Token        string
+	Prefix       string
+	mutex        *sync.Mutex
+	code         string
+	codeDeadline time.Time
 }
 
 func (target Target) String() (text string) {

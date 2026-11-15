@@ -207,3 +207,111 @@ func TestUINegative(state *testing.T) {
 		return
 	}
 }
+
+// Test if cmd.UI with --open hands the browser opener a URL with a code that works once and not the token, so a command line other users can read holds no credential that still works.
+func TestUIOpenPositive(state *testing.T) {
+	target := startFakeAPI(state)
+	directory := state.TempDir()
+	argumentsPath := filepath.Join(directory, "arguments")
+	err := os.WriteFile(filepath.Join(directory, "xdg-open"), []byte("#!/bin/sh\nprintf '%s\\n' \"$@\" > "+argumentsPath+".tmp && mv "+argumentsPath+".tmp "+argumentsPath+"\n"), 0o700)
+
+	if err != nil {
+		state.Fatalf("Test of cmd.UI function failed, cannot write the opener, error: %s", err.Error())
+	}
+
+	state.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+	stdout := redirectStdout(state)
+	logs := newLockedBuffer()
+	logger := logging.New(logs, slog.LevelDebug)
+	errChannel := make(chan error, 1)
+	lineChannel := make(chan string, 1)
+
+	// decerter ui --open
+	go func() {
+		errChannel <- UI(target, true, &logger)
+	}()
+
+	// the printed URL
+	go func() {
+		line, readErr := bufio.NewReader(stdout.reader).ReadString('\n')
+
+		if readErr != nil {
+			line = ""
+		}
+
+		lineChannel <- strings.TrimSpace(line)
+	}()
+
+	printed := ""
+
+	select {
+	case printed = <-lineChannel:
+	case err = <-errChannel:
+		state.Fatalf("Test of cmd.UI function failed, it returned before it printed the URL, error: %v, logs: %s", err, logs.String())
+	case <-time.After(waitTimeout):
+		state.Fatalf("Test of cmd.UI function failed, no URL after %s, logs: %s", waitTimeout, logs.String())
+	}
+
+	defer func() {
+		signalSelf(state, syscall.SIGINT)
+
+		select {
+		case stopErr := <-errChannel:
+			if stopErr != nil {
+				state.Errorf("Test of cmd.UI function failed, a signal should stop it without an error, error: %v, logs: %s", stopErr, logs.String())
+			}
+		case <-time.After(waitTimeout):
+			state.Errorf("Test of cmd.UI function failed, it did not stop after the signal, logs: %s", logs.String())
+		}
+	}()
+
+	_, token, _ := strings.Cut(printed, "/?token=")
+	opened := []byte{}
+	deadline := time.Now().Add(waitTimeout)
+
+	for time.Now().Before(deadline) {
+		opened, err = os.ReadFile(argumentsPath)
+
+		if err == nil {
+			break
+		}
+
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	address := strings.TrimSpace(string(opened))
+	prefix, _, _ := strings.Cut(printed, "/?token=")
+
+	if (err != nil) || (token == "") || strings.Contains(address, token) || !strings.HasPrefix(address, prefix+"/?code=") || strings.Contains(address, "\n") {
+		state.Errorf("Test of cmd.UI function failed, the opener should get one URL with a code and without the token, printed: %q, opened: %q, error: %v", printed, address, err)
+		return
+	}
+
+	client := &http.Client{
+		CheckRedirect: func(request *http.Request, via []*http.Request) (err error) {
+			err = http.ErrUseLastResponse
+			return
+		},
+		Timeout: waitTimeout,
+	}
+
+	// the code works for the first load and never again
+	for _, expected := range []int{http.StatusSeeOther, http.StatusForbidden} {
+		response, getErr := client.Get(address)
+
+		if getErr != nil {
+			state.Errorf("Test of cmd.UI function failed, cannot load the opened URL, error: %s", getErr.Error())
+			return
+		}
+
+		if closeErr := response.Body.Close(); closeErr != nil {
+			state.Errorf("Test of cmd.UI function failed, cannot close the answer, error: %s", closeErr.Error())
+			return
+		}
+
+		if (response.StatusCode != expected) || ((expected == http.StatusSeeOther) && (len(response.Cookies()) != 1)) {
+			state.Errorf("Test of cmd.UI function failed, the opened URL should answer %d, status: %d, cookies: %v", expected, response.StatusCode, response.Cookies())
+			return
+		}
+	}
+}

@@ -45,7 +45,7 @@ sudo ./decerter run --uid "$(id -u test)" --intercept --api-socket /run/decerter
 ```
 ```sh
 # terminal 2
-sudo curl -s --unix-socket /run/decerter/api.sock -X POST -d '{"layer": "http", "direction": "down", "find": {"type": "text", "value": "Example Domain"}, "replace": {"type": "text", "value": "Edited by decerter"}}' http://decerter/api/v1/rules
+sudo curl -s --unix-socket /run/decerter/api.sock -H 'Content-Type: application/json' -X POST -d '{"layer": "http", "direction": "down", "find": {"type": "text", "value": "Example Domain"}, "replace": {"type": "text", "value": "Edited by decerter"}}' http://decerter/api/v1/rules
 sudo -u test curl -s https://example.com/ | grep -o '<title>.*</title>'
 ```
 ```

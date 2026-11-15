@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/user"
@@ -109,7 +110,64 @@ func Handler(backend *Backend, logger *slog.Logger) (handler http.Handler) {
 		writeError(writer, http.StatusNotFound, fmt.Errorf("%w: %s %s", ErrNotFound, request.Method, request.URL.Path), logger)
 	})
 
-	handler = mux
+	handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		err := checkClient(request)
+
+		if err != nil {
+			logger.Warn("Refused api request", "error", err, "method", request.Method, "path", request.URL.Path, "host", request.Host, "origin", request.Header.Get("Origin"))
+			writeError(writer, http.StatusForbidden, err, logger)
+			return
+		}
+
+		mux.ServeHTTP(writer, request)
+	})
+	return
+}
+
+// nil for a request that is no browser's: adb forward puts the api on host TCP loopback, where every web page of the host's browser could reach it
+// Origin and Sec-Fetch-Site come only from a browser (decerter ui drops them, curl and decerter mcp never send them); another Host is a name rebound to 127.0.0.1
+func checkClient(request *http.Request) (err error) {
+	if request.Header.Get("Origin") != "" {
+		err = fmt.Errorf("%w: Origin %q", ErrBrowser, request.Header.Get("Origin"))
+		return
+	}
+
+	if request.Header.Get("Sec-Fetch-Site") != "" {
+		err = fmt.Errorf("%w: Sec-Fetch-Site %q", ErrBrowser, request.Header.Get("Sec-Fetch-Site"))
+		return
+	}
+
+	if !isLocalHost(request.Host) {
+		err = fmt.Errorf("%w: %q", ErrHost, request.Host)
+	}
+
+	return
+}
+
+// decerter, localhost or a loopback address, each with or without a port
+func isLocalHost(hostField string) (isLocal bool) {
+	host := hostField
+	splitHost, port, splitErr := net.SplitHostPort(hostField)
+
+	if splitErr == nil {
+		_, portErr := strconv.ParseUint(port, 10, 16)
+
+		if portErr != nil {
+			return
+		}
+
+		host = splitHost
+	} else if strings.HasPrefix(hostField, "[") && strings.HasSuffix(hostField, "]") {
+		host = hostField[1 : len(hostField)-1]
+	}
+
+	if strings.EqualFold(host, v1.HostName) || strings.EqualFold(host, "localhost") {
+		isLocal = true
+		return
+	}
+
+	address, parseErr := netip.ParseAddr(host)
+	isLocal = (parseErr == nil) && address.IsLoopback() && (address.Zone() == "") && (address.Is4() || strings.HasPrefix(hostField, "["))
 	return
 }
 

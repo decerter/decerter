@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/cookiejar"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -41,10 +42,10 @@ type fakeAPI struct {
 
 // a running decerter ui in front of a fake API
 type testUI struct {
-	api    *fakeAPI
-	host   string
-	token  string
-	client *http.Client
+	api         *fakeAPI
+	host        string
+	credentials *Credentials
+	client      *http.Client
 }
 
 // what the ui answered, the body is read and closed
@@ -54,10 +55,11 @@ type uiAnswer struct {
 	Cookies    []*http.Cookie
 }
 
-// one request to the ui: Host empty is the listener's, Cookie the cookie value under Name (empty Name is the listener's cookie)
+// one request to the ui: Path is under the secret path unless IsRoot, Host empty is the listener's, Cookie the cookie value under Name (empty Name is the listener's cookie)
 type uiRequest struct {
 	Method     string
 	Path       string
+	IsRoot     bool
 	Host       string
 	CookieName string
 	Cookie     string
@@ -65,21 +67,34 @@ type uiRequest struct {
 	Body       string
 }
 
-// Test if the first load with the token sets the cookie and redirects to / without it, and the page, its files and the api are served with the cookie, the right Host and, for a change, the Origin.
+// Test if the first load with the token, or once with the code, sets the cookie for the secret path and redirects there without them, and the page, its files and the api are served there with the cookie, the right Host and, for a change, the Origin.
 func TestGuardPositive(state *testing.T) {
 	current := startUI(state)
-	response, body := current.do(state, uiRequest{Method: http.MethodGet, Path: "/?token=" + current.token, Cookie: "-"})
-	cookies := response.Cookies
+	code, err := current.credentials.NewCode()
 
-	if (response.StatusCode != http.StatusSeeOther) || (response.Header.Get("Location") != "/") || (len(cookies) != 1) || strings.Contains(body, current.token) {
-		state.Fatalf("Test of the ui token failed, the first load should redirect to / without the token and set one cookie, status: %d, location: %q, cookies: %v, body: %q", response.StatusCode, response.Header.Get("Location"), cookies, body)
+	if err != nil {
+		state.Fatalf("Could not make a code, error: %s", err.Error())
 	}
 
-	cookie := cookies[0]
+	base := "/" + current.credentials.Prefix + "/"
 
-	if (cookie.Name != cookieNameOf(current.host)) || (cookie.Value != current.token) || !cookie.HttpOnly || (cookie.SameSite != http.SameSiteStrictMode) || (cookie.Path != "/") || cookie.Secure || (cookie.MaxAge != 0) || !hasSecurityHeaders(response.Header) {
-		state.Fatalf("Test of the ui token failed, the cookie should be HttpOnly, SameSite=Strict, Path=/ and not Secure, cookie: %+v, headers: %v", cookie, response.Header)
+	for _, first := range []string{"/?token=" + current.credentials.Token, "/?code=" + code, "/?token=" + current.credentials.Token} {
+		response, body := current.do(state, uiRequest{Method: http.MethodGet, Path: first, IsRoot: true, Cookie: "-"})
+		cookies := response.Cookies
+
+		if (response.StatusCode != http.StatusSeeOther) || (response.Header.Get("Location") != base) || (len(cookies) != 1) || strings.Contains(body, current.credentials.Token) || strings.Contains(body, code) {
+			state.Fatalf("Test of the ui token failed, the first load %s should redirect to the secret path without the token and set one cookie, status: %d, location: %q, cookies: %v, body: %q", first, response.StatusCode, response.Header.Get("Location"), cookies, body)
+		}
+
+		cookie := cookies[0]
+
+		if (cookie.Name != cookieNameOf(current.host)) || (cookie.Value != current.credentials.Token) || !cookie.HttpOnly || (cookie.SameSite != http.SameSiteStrictMode) || (cookie.Path != base) || cookie.Secure || (cookie.MaxAge != 0) || !hasSecurityHeaders(response.Header) {
+			state.Fatalf("Test of the ui token failed, the cookie should be HttpOnly, SameSite=Strict, for the secret path and not Secure, cookie: %+v, headers: %v", cookie, response.Header)
+		}
 	}
+
+	var response uiAnswer
+	var body string
 
 	positiveCases := []struct {
 		Request     uiRequest
@@ -105,10 +120,10 @@ func TestGuardPositive(state *testing.T) {
 		}
 	}
 
-	// the api gets no cookie, Origin or Referer, and its own host name
+	// the api gets no cookie, Origin, Referer or Sec-Fetch-Site, and its own host name
 	for _, request := range current.api.seen() {
-		if (request.Header.Get("Cookie") != "") || (request.Header.Get("Origin") != "") || (request.Header.Get("Referer") != "") || (request.Host != v1.HostName) {
-			state.Errorf("Test of the ui proxy failed, the api should get no cookie, Origin or Referer and the host %s, %s %s, host %q, headers: %v", v1.HostName, request.Method, request.URL.Path, request.Host, request.Header)
+		if (request.Header.Get("Cookie") != "") || (request.Header.Get("Origin") != "") || (request.Header.Get("Referer") != "") || (request.Header.Get("Sec-Fetch-Site") != "") || (request.Host != v1.HostName) {
+			state.Errorf("Test of the ui proxy failed, the api should get no cookie, Origin, Referer or Sec-Fetch-Site and the host %s, %s %s, host %q, headers: %v", v1.HostName, request.Method, request.URL.Path, request.Host, request.Header)
 			return
 		}
 	}
@@ -119,9 +134,31 @@ func TestGuardPositive(state *testing.T) {
 	}
 }
 
-// Test if a request without the token cookie, with another Host, with a wrong token, from another site or port, or a change without the right Origin gets 403 and never reaches the api.
+// Test if a request without the token cookie, outside the secret path, with another Host, with a wrong token or a code that is used, expired or never made, from another site or port, or a change without the right Origin gets 403 and never reaches the api.
 func TestGuardNegative(state *testing.T) {
 	current := startUI(state)
+	token := current.credentials.Token
+	code, err := current.credentials.NewCode()
+
+	if err != nil {
+		state.Fatalf("Could not make a code, error: %s", err.Error())
+	}
+
+	response, _ := current.do(state, uiRequest{Method: http.MethodGet, Path: "/?code=" + code, IsRoot: true, Cookie: "-"})
+
+	if response.StatusCode != http.StatusSeeOther {
+		state.Fatalf("Test of the ui code failed, the first use of the code should be served, status: %d", response.StatusCode)
+	}
+
+	expired, err := current.credentials.NewCode()
+
+	if err != nil {
+		state.Fatalf("Could not make a code, error: %s", err.Error())
+	}
+
+	current.credentials.mutex.Lock()
+	current.credentials.codeDeadline = time.Now().Add(-time.Second)
+	current.credentials.mutex.Unlock()
 	_, port, err := net.SplitHostPort(current.host)
 
 	if err != nil {
@@ -142,17 +179,30 @@ func TestGuardNegative(state *testing.T) {
 		{Method: http.MethodGet, Path: "/api/v1/events", Cookie: "-"},
 		{Method: http.MethodPut, Path: "/api/v1/intercept", Cookie: "-", Headers: map[string]string{"Origin": "http://" + current.host}, Body: `{"enabled": true}`},
 		// a wrong token, the token anywhere but a GET of /, the cookie of another port
-		{Method: http.MethodGet, Path: "/?token=" + otherToken(current.token), Cookie: "-"},
-		{Method: http.MethodGet, Path: "/?token=", Cookie: "-"},
-		{Method: http.MethodGet, Path: "/api/v1/status?token=" + current.token, Cookie: "-"},
-		{Method: http.MethodPost, Path: "/?token=" + current.token, Cookie: "-", Headers: map[string]string{"Origin": "http://" + current.host}},
-		{Method: http.MethodGet, Path: "/", Cookie: otherToken(current.token)},
+		{Method: http.MethodGet, Path: "/?token=" + otherToken(token), IsRoot: true, Cookie: "-"},
+		{Method: http.MethodGet, Path: "/?token=", IsRoot: true, Cookie: "-"},
+		{Method: http.MethodGet, Path: "/api/v1/status?token=" + token, Cookie: "-"},
+		{Method: http.MethodGet, Path: "/?token=" + token, Cookie: "-"},
+		{Method: http.MethodPost, Path: "/?token=" + token, IsRoot: true, Cookie: "-", Headers: map[string]string{"Origin": "http://" + current.host}},
+		{Method: http.MethodGet, Path: "/", Cookie: otherToken(token)},
 		{Method: http.MethodGet, Path: "/", CookieName: cookiePrefix + "1"},
+		// a code that was used, expired, never made, or next to the token
+		{Method: http.MethodGet, Path: "/?code=" + code, IsRoot: true, Cookie: "-"},
+		{Method: http.MethodGet, Path: "/?code=" + expired, IsRoot: true, Cookie: "-"},
+		{Method: http.MethodGet, Path: "/?code=" + token, IsRoot: true, Cookie: "-"},
+		{Method: http.MethodGet, Path: "/?code=", IsRoot: true, Cookie: "-"},
+		{Method: http.MethodGet, Path: "/?code=" + code + "&token=" + token, IsRoot: true, Cookie: "-"},
+		// the cookie outside the secret path: the root, the api at the root, another path
+		{Method: http.MethodGet, Path: "/", IsRoot: true},
+		{Method: http.MethodGet, Path: "/app.js", IsRoot: true},
+		{Method: http.MethodGet, Path: "/api/v1/status", IsRoot: true},
+		{Method: http.MethodGet, Path: "/" + otherToken(current.credentials.Prefix) + "/", IsRoot: true},
+		{Method: http.MethodGet, Path: "/" + current.credentials.Prefix, IsRoot: true},
 		// another Host: DNS rebinding, localhost, another port
 		{Method: http.MethodGet, Path: "/", Host: "rebind.example:" + port},
 		{Method: http.MethodGet, Path: "/api/v1/status", Host: "localhost:" + port},
 		{Method: http.MethodGet, Path: "/", Host: otherHost},
-		{Method: http.MethodGet, Path: "/?token=" + current.token, Host: "localhost:" + port, Cookie: "-"},
+		{Method: http.MethodGet, Path: "/?token=" + token, IsRoot: true, Host: "localhost:" + port, Cookie: "-"},
 		// another site, or another port of 127.0.0.1, which is the same site to the browser
 		{Method: http.MethodGet, Path: "/api/v1/status", Headers: map[string]string{"Sec-Fetch-Site": "cross-site"}},
 		{Method: http.MethodGet, Path: "/api/v1/status", Headers: map[string]string{"Sec-Fetch-Site": "same-site"}},
@@ -177,6 +227,55 @@ func TestGuardNegative(state *testing.T) {
 	if len(current.api.seen()) != 0 {
 		state.Errorf("Test of the ui guard failed, no refused request should reach the api, requests: %d", len(current.api.seen()))
 		return
+	}
+}
+
+// Test if a browser's cookie jar, which keeps cookies apart by host but not by port, sends the token cookie to the page of decerter ui and to no other server on 127.0.0.1.
+func TestCookieScopePositive(state *testing.T) {
+	current := startUI(state)
+	cookies := make(chan string, 4)
+	other := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		cookies <- request.Header.Get("Cookie")
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer other.Close()
+	jar, err := cookiejar.New(nil)
+
+	if err != nil {
+		state.Fatalf("Could not make a cookie jar, error: %s", err.Error())
+	}
+
+	browser := &http.Client{Jar: jar, Timeout: 10 * time.Second}
+	response, err := browser.Get(URL(current.host, current.credentials.Token))
+
+	if err != nil {
+		state.Fatalf("Could not load the ui, error: %s", err.Error())
+	}
+
+	if closeErr := response.Body.Close(); closeErr != nil {
+		state.Fatalf("Could not close the body, error: %s", closeErr.Error())
+	}
+
+	if (response.StatusCode != http.StatusOK) || (response.Request.URL.Path != current.credentials.base()) {
+		state.Fatalf("Test of the ui cookie failed, the first load should end on the page under the secret path, status: %d, URL: %s", response.StatusCode, response.Request.URL)
+	}
+
+	// another port of the same host, at its root and at the path of the API
+	for _, path := range []string{"/", v1.BasePath + "/status", "/favicon.ico"} {
+		response, err = browser.Get(other.URL + path)
+
+		if err != nil {
+			state.Fatalf("Could not reach the other server, error: %s", err.Error())
+		}
+
+		if closeErr := response.Body.Close(); closeErr != nil {
+			state.Fatalf("Could not close the body, error: %s", closeErr.Error())
+		}
+
+		if cookie := <-cookies; strings.Contains(cookie, current.credentials.Token) {
+			state.Errorf("Test of the ui cookie failed, another server on 127.0.0.1 should not get the token, %s got cookie: %q", path, cookie)
+			return
+		}
 	}
 }
 
@@ -428,6 +527,18 @@ func TestTokenPositive(state *testing.T) {
 		state.Errorf("Test of URL failed, URL: %s", URL("127.0.0.1:4242", first))
 		return
 	}
+
+	if CodeURL("127.0.0.1:4242", second) != "http://127.0.0.1:4242/?code="+second {
+		state.Errorf("Test of CodeURL failed, URL: %s", CodeURL("127.0.0.1:4242", second))
+		return
+	}
+
+	credentials, err := NewCredentials()
+
+	if (err != nil) || (len(credentials.Token) != 43) || (len(credentials.Prefix) != 43) || (credentials.Token == credentials.Prefix) || (credentials.base() != "/"+credentials.Prefix+"/") {
+		state.Errorf("Test of NewCredentials failed, the token and the path should be two different tokens, credentials: %+v, error: %v", credentials, err)
+		return
+	}
 }
 
 // Test if the page has its SPDX line, no inline script, style or event handler, and its script never writes HTML.
@@ -460,10 +571,10 @@ func TestWebPositive(state *testing.T) {
 // a decerter ui on 127.0.0.1 in front of a fake api, stopped with the test; the client follows no redirect
 func startUI(state *testing.T) (current testUI) {
 	api := startFakeAPI(state)
-	token, err := NewToken()
+	credentials, err := NewCredentials()
 
 	if err != nil {
-		state.Fatalf("Could not make a token, error: %s", err.Error())
+		state.Fatalf("Could not make the credentials, error: %s", err.Error())
 	}
 
 	listener, host, err := Listen()
@@ -478,7 +589,7 @@ func startUI(state *testing.T) (current testUI) {
 
 	// ui server
 	go func() {
-		doneChannel <- Serve(ctx, listener, Handler(api.target, token, host, logger), logger)
+		doneChannel <- Serve(ctx, listener, Handler(api.target, credentials, host, logger), logger)
 	}()
 
 	transport := &http.Transport{}
@@ -492,9 +603,9 @@ func startUI(state *testing.T) (current testUI) {
 	})
 
 	current = testUI{
-		api:   api,
-		host:  host,
-		token: token,
+		api:         api,
+		host:        host,
+		credentials: credentials,
 		client: &http.Client{
 			Transport: transport,
 			CheckRedirect: func(request *http.Request, via []*http.Request) error {
@@ -506,7 +617,13 @@ func startUI(state *testing.T) (current testUI) {
 }
 
 func (current testUI) request(ctx context.Context, test uiRequest) (request *http.Request, err error) {
-	request, err = http.NewRequestWithContext(ctx, test.Method, "http://"+current.host+test.Path, strings.NewReader(test.Body))
+	path := test.Path
+
+	if !test.IsRoot {
+		path = "/" + current.credentials.Prefix + path
+	}
+
+	request, err = http.NewRequestWithContext(ctx, test.Method, "http://"+current.host+path, strings.NewReader(test.Body))
 
 	if err != nil {
 		return
@@ -524,7 +641,7 @@ func (current testUI) request(ctx context.Context, test uiRequest) (request *htt
 		cookieName = test.CookieName
 	}
 
-	cookie := current.token
+	cookie := current.credentials.Token
 
 	if test.Cookie != "" {
 		cookie = test.Cookie

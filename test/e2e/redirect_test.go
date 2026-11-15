@@ -386,6 +386,55 @@ func TestCaptureDropPositive(state *testing.T) {
 	}
 }
 
+// Test if decerter run goes on when its stdout is a pipe whose reader is gone, as with decerter run | head after head exited or Ctrl-C with | grep: the flow
+// line of a relayed flow fails with EPIPE instead of a SIGPIPE that kills decerter, and an interrupt then stops decerter cleanly with its shutdown run.
+func TestRunClosedStdoutPositive(state *testing.T) {
+	reader, writer, err := os.Pipe()
+
+	if err != nil {
+		state.Fatalf("Could not make a pipe, error: %s", err.Error())
+	}
+
+	err = reader.Close()
+
+	if err != nil {
+		state.Fatalf("Could not close the reader of the pipe, error: %s", err.Error())
+	}
+
+	state.Cleanup(func() {
+		if closeErr := writer.Close(); closeErr != nil {
+			state.Errorf("Could not close the writer of the pipe, error: %s", closeErr.Error())
+		}
+	})
+
+	server := startServer(state, serverConfig{})
+	command, _, logs, stop := startDecerterProcessTo(state, writer, nil, []string{"Redirecting flows"}, "run", "--uid", strconv.FormatUint(uint64(testUser.UID), 10), "--dst-cidr", destinationPrefix.String())
+
+	// two flows, each ends with a flow line on stdout
+	for range 2 {
+		output, curlErr := runCurl(state.Context(), testUser, []string{server.URL + "pipe"})
+
+		if (curlErr != nil) || (output != "/pipe") {
+			state.Fatalf("Test of a closed stdout failed, the flow should be relayed, output: %q, error: %v, logs:\n%s", output, curlErr, logs.String())
+		}
+	}
+
+	// the flow line is written once the proxy saw both sides close
+	time.Sleep(500 * time.Millisecond)
+	err = command.Process.Signal(syscall.Signal(0))
+
+	if err != nil {
+		state.Fatalf("Test of a closed stdout failed, decerter should still run after its flow lines failed, error: %v, logs:\n%s", err, logs.String())
+	}
+
+	err = stop()
+
+	if (err != nil) || !strings.Contains(logs.String(), "Got shutdown signal") {
+		state.Errorf("Test of a closed stdout failed, an interrupt should stop decerter cleanly, error: %v, logs:\n%s", err, logs.String())
+		return
+	}
+}
+
 // Test if a datagram to a multicast group is never redirected, one upstream socket of the proxy could not relay it: the group gets it straight from
 // the app and the proxy has no flow, although the group is in --dst-cidr and has a route. The datagram is sent with sendto: a connected udp socket
 // does not reach a group routed to lo, with or without decerter.
@@ -629,7 +678,7 @@ func reportPeers(targets string) (output string, err error) {
 	return
 }
 
-// one datagram with sendto on an unconnected socket, no answer is read
+// one datagram with sendto on an unconnected socket, no answer is read; SO_BROADCAST lets it go to a broadcast address
 func sendDatagram(target string) (output string, err error) {
 	address, err := netip.ParseAddrPort(target)
 
@@ -646,6 +695,12 @@ func sendDatagram(target string) (output string, err error) {
 	defer func() {
 		err = errors.Join(err, syscall.Close(descriptor))
 	}()
+
+	err = syscall.SetsockoptInt(descriptor, syscall.SOL_SOCKET, syscall.SO_BROADCAST, 1)
+
+	if err != nil {
+		return
+	}
 
 	err = syscall.Sendto(descriptor, []byte("sendto"), 0, sockaddr)
 	output = "sent"

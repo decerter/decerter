@@ -16,10 +16,10 @@ import (
 	"time"
 )
 
-// Test if the ui answers the browser's own favicon request with 204 and no body.
+// Test if the ui answers the browser's own favicon request, which comes at the root without the cookie, with 204 and no body.
 func TestFaviconPositive(state *testing.T) {
 	current := startUI(state)
-	answer, body := current.do(state, uiRequest{Method: http.MethodGet, Path: "/favicon.ico"})
+	answer, body := current.do(state, uiRequest{Method: http.MethodGet, Path: "/favicon.ico", IsRoot: true, Cookie: "-"})
 
 	if (answer.StatusCode != http.StatusNoContent) || (body != "") || !hasSecurityHeaders(answer.Header) {
 		state.Errorf("Test of the ui favicon failed, status should be %d without a body, status: %d, body: %q", http.StatusNoContent, answer.StatusCode, body)

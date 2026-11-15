@@ -28,10 +28,11 @@ import (
 	"github.com/decerter/decerter/internal/ui"
 )
 
-// the browser side of decerter ui: the cookie of the first load goes with every request, a change carries the page's Origin
+// the browser side of decerter ui: the cookie of the first load goes with every request under the secret path base, a change carries the page's Origin
 type uiBrowser struct {
 	client *http.Client
 	host   string
+	base   string
 	cookie *http.Cookie
 }
 
@@ -150,6 +151,12 @@ func TestUINegative(state *testing.T) {
 		{Name: "a wrong token", Method: http.MethodGet, Path: "/?token=" + strings.Repeat("x", 43), Change: func(request *http.Request) { request.Header.Del("Cookie") }},
 		{Name: "another Host", Method: http.MethodGet, Path: v1.BasePath + "/flows", Change: func(request *http.Request) { request.Host = "rebind.example:" + request.URL.Port() }},
 		{Name: "localhost", Method: http.MethodGet, Path: "/", Change: func(request *http.Request) { request.Host = "localhost:" + request.URL.Port() }},
+		{Name: "the api outside the secret path", Method: http.MethodGet, Path: v1.BasePath + "/flows", Change: func(request *http.Request) { request.URL.Path = v1.BasePath + "/flows" }},
+		{Name: "a code decerter ui never made", Method: http.MethodGet, Path: "/", Change: func(request *http.Request) {
+			request.URL.Path = "/"
+			request.URL.RawQuery = "code=" + strings.Repeat("y", 43)
+			request.Header.Del("Cookie")
+		}},
 		{Name: "another Origin", Method: http.MethodPut, Path: v1.BasePath + "/intercept", Body: on, Change: func(request *http.Request) { request.Header.Set("Origin", "http://127.0.0.1:1") }},
 		{Name: "no Origin", Method: http.MethodPut, Path: v1.BasePath + "/intercept", Body: on, Change: func(request *http.Request) {
 			request.Header.Del("Origin")
@@ -203,7 +210,7 @@ func startUI(state *testing.T, socket string) (browser uiBrowser) {
 		state.Fatalf("Could not reach the api, error: %s", err.Error())
 	}
 
-	token, err := ui.NewToken()
+	credentials, err := ui.NewCredentials()
 
 	if err != nil {
 		state.Fatalf("Could not make the token, error: %s", err.Error())
@@ -221,7 +228,7 @@ func startUI(state *testing.T, socket string) (browser uiBrowser) {
 
 	// ui server
 	go func() {
-		doneChannel <- ui.Serve(ctx, listener, ui.Handler(target, token, host, logger), logger)
+		doneChannel <- ui.Serve(ctx, listener, ui.Handler(target, credentials, host, logger), logger)
 	}()
 
 	transport := &http.Transport{}
@@ -242,11 +249,12 @@ func startUI(state *testing.T, socket string) (browser uiBrowser) {
 			},
 		},
 		host:   host,
+		base:   "",
 		cookie: nil,
 	}
 
-	// the first load of the printed URL: a cookie and a redirect to / without the token
-	response, err := browser.client.Get(ui.URL(host, token))
+	// the first load of the printed URL: a cookie for the secret path and a redirect there without the token
+	response, err := browser.client.Get(ui.URL(host, credentials.Token))
 
 	if err != nil {
 		state.Fatalf("Could not load the ui, error: %s", err.Error())
@@ -258,10 +266,13 @@ func startUI(state *testing.T, socket string) (browser uiBrowser) {
 
 	cookies := response.Cookies()
 
-	if (response.StatusCode != http.StatusSeeOther) || (response.Header.Get("Location") != "/") || (len(cookies) != 1) || !cookies[0].HttpOnly || (cookies[0].SameSite != http.SameSiteStrictMode) {
-		state.Fatalf("Test of the ui failed, the first load should set the cookie and redirect to /, status: %d, location: %q, cookies: %v", response.StatusCode, response.Header.Get("Location"), cookies)
+	location := response.Header.Get("Location")
+
+	if (response.StatusCode != http.StatusSeeOther) || (location != "/"+credentials.Prefix+"/") || (len(cookies) != 1) || !cookies[0].HttpOnly || (cookies[0].SameSite != http.SameSiteStrictMode) || (cookies[0].Path != location) {
+		state.Fatalf("Test of the ui failed, the first load should set the cookie for the secret path and redirect there, status: %d, location: %q, cookies: %v", response.StatusCode, location, cookies)
 	}
 
+	browser.base = strings.TrimSuffix(location, "/")
 	browser.cookie = cookies[0]
 	return
 }
@@ -280,7 +291,7 @@ func (browser uiBrowser) request(ctx context.Context, method string, path string
 		reader = bytes.NewReader(encoded)
 	}
 
-	request, err = http.NewRequestWithContext(ctx, method, "http://"+browser.host+path, reader)
+	request, err = http.NewRequestWithContext(ctx, method, "http://"+browser.host+browser.base+path, reader)
 
 	if err != nil {
 		return

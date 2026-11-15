@@ -540,6 +540,13 @@ func TestPrintRecordPositive(state *testing.T) {
 		printRecord(testFlow, testClient, session, record)
 		printFlow(redirect.Flow{OriginalDestination: testFlow.OriginalDestination, IPProtocol: testFlow.IPProtocol, Tgid: 1, UID: 2, Comm: "app", Mark: 0x10064}, "app --flag", testClient, "1B", "2B", 1500*time.Microsecond)
 	})
+	// a comm the process set to a terminal escape sequence
+	hostile := testFlow
+	hostile.Comm = "\x1b]0;x\x07\x1b[2J"
+	hostileOutput := captureStdout(state, func() {
+		printSession(hostile, testClient, session)
+		printFlow(redirect.Flow{OriginalDestination: testFlow.OriginalDestination, IPProtocol: testFlow.IPProtocol, Tgid: 1, UID: 2, Comm: hostile.Comm, Mark: 0}, "app", testClient, "1B", "2B", time.Millisecond)
+	})
 	expected := []string{
 		"tls pid=", "version=TLS1.2 suite=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 sni=\"a\\\"b\" alpn=\"h2\"\n",
 		"direction=down sequence=3 length=", " shown=",
@@ -551,6 +558,11 @@ func TestPrintRecordPositive(state *testing.T) {
 			state.Errorf("Test of proxy.printRecord function failed, the output should contain %q, output: %q", part, shorten(output))
 			return
 		}
+	}
+
+	if !strings.Contains(hostileOutput, "comm=\\x1b]0;x\\x07\\x1b[2J 93.184.216.34:443 client=127.0.0.1:40000 version=TLS1.2") || !strings.Contains(hostileOutput, "tcp pid=1 uid=2 comm=\\x1b]0;x\\x07\\x1b[2J 93.184.216.34:443") || strings.Contains(hostileOutput, "\x1b") {
+		state.Errorf("Test of proxy.printSession function failed, the comm should be escaped in the session and the flow line, output: %q", hostileOutput)
+		return
 	}
 
 	if strings.Contains(output, "\x00") || (strings.Count(output, "x") > intercept.MaxPrintBytes) {

@@ -11,9 +11,15 @@ info:
     name: MIT
     url: https://opensource.org/license/mit
   description: |
-    HTTP/1.1 on a unix socket, there is no TCP listener. Use any host name in the URL:
+    HTTP/1.1 on a unix socket, there is no TCP listener. The host in the URL is `decerter`, `localhost` or a loopback
+    address, with or without a port:
 
         curl --unix-socket /run/decerter/api.sock http://decerter/api/v1/status
+
+    The API is not for browsers: `adb forward` puts it on TCP 127.0.0.1 of the host, where any web page could send to
+    it, so a request with an `Origin` or `Sec-Fetch-Site` header, or another host (a name a web page rebound to
+    127.0.0.1), is refused with 403. A request body needs the Content-Type `application/json` (curl:
+    `-H 'Content-Type: application/json'`), anything else is 400. The browser goes through `decerter ui`.
 
     Access: a socket file has mode 0660 and the group `decerter` when that group exists, mode 0600 (root only) otherwise.
     An abstract socket (`@name`, the default `@decerter-api` on Android) has no mode; decerter checks the peer with SO_PEERCRED
@@ -97,6 +103,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Status"
+        "403":
+          $ref: "#/components/responses/Forbidden"
   /flows:
     get:
       operationId: listFlows
@@ -121,6 +129,8 @@ paths:
                 $ref: "#/components/schemas/FlowList"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
   /flows/{id}:
     get:
       operationId: getFlow
@@ -136,6 +146,8 @@ paths:
                 $ref: "#/components/schemas/Flow"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
   /flows/{id}/messages:
@@ -162,6 +174,8 @@ paths:
                 $ref: "#/components/schemas/MessageList"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
   /flows/{id}/exchanges:
@@ -188,6 +202,8 @@ paths:
                 $ref: "#/components/schemas/ExchangeList"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
   /exchanges/{id}:
@@ -205,6 +221,8 @@ paths:
                 $ref: "#/components/schemas/Exchange"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
   /exchanges/{id}/body:
@@ -245,6 +263,8 @@ paths:
                 $ref: "#/components/schemas/ExchangeBody"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
   /messages/{id}:
@@ -280,6 +300,8 @@ paths:
                 $ref: "#/components/schemas/MessageDetail"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
   /events:
@@ -298,6 +320,8 @@ paths:
             text/event-stream:
               schema:
                 type: string
+        "403":
+          $ref: "#/components/responses/Forbidden"
   /intercept:
     put:
       operationId: setIntercept
@@ -324,6 +348,8 @@ paths:
                 $ref: "#/components/schemas/InterceptState"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
   /holds:
@@ -337,6 +363,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HoldList"
+        "403":
+          $ref: "#/components/responses/Forbidden"
   /holds/{id}:
     put:
       operationId: editHold
@@ -359,6 +387,8 @@ paths:
                 $ref: "#/components/schemas/Hold"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -374,6 +404,8 @@ paths:
           description: Forwarded
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -393,6 +425,8 @@ paths:
           description: Dropped
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -408,6 +442,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RuleList"
+        "403":
+          $ref: "#/components/responses/Forbidden"
     post:
       operationId: addRule
       summary: Add a match-and-replace rule, it runs after the rules before it
@@ -446,6 +482,8 @@ paths:
                 $ref: "#/components/schemas/Rule"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
   /rules/{id}:
@@ -459,6 +497,8 @@ paths:
           description: Deleted
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -482,6 +522,8 @@ paths:
                 type: string
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
   /flows/pcap:
@@ -520,6 +562,8 @@ paths:
                 format: binary
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
   /captures:
@@ -533,6 +577,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/CaptureList"
+        "403":
+          $ref: "#/components/responses/Forbidden"
     post:
       operationId: startCapture
       summary: Start a capture into a file
@@ -566,6 +612,8 @@ paths:
                 $ref: "#/components/schemas/Capture"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
   /captures/{id}/stop:
@@ -584,6 +632,8 @@ paths:
                 $ref: "#/components/schemas/Capture"
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -610,6 +660,8 @@ paths:
                 format: binary
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
         "409":
@@ -649,6 +701,8 @@ paths:
                 format: binary
         "400":
           $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "409":
           $ref: "#/components/responses/Conflict"
 components:
@@ -675,13 +729,23 @@ components:
         type: string
   responses:
     BadRequest:
-      description: A parameter or the body is invalid, a filter error has a marker under its column
+      description: |
+        A parameter or the body is invalid, a filter error has a marker under its column; a body needs the Content-Type
+        application/json
       content:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
     NotFound:
       description: No such flow, message, exchange, held message or rule
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: |
+        A request from a browser: it has an Origin or Sec-Fetch-Site header, or a Host other than decerter, localhost or a
+        loopback address
       content:
         application/json:
           schema:

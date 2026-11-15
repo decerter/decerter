@@ -3,7 +3,8 @@
 // the minimal UI of decerter: every request goes through decerter ui to the control API under /api/v1 (api/openapi.yaml)
 // payloads and flow fields are attacker controlled: they reach the page only as text nodes, never as HTML
 
-const api = '/api/v1';
+// relative: the page is served under a random path, which its cookie is limited to
+const api = 'api/v1';
 // the bytes of a payload shown at once, the API's default window
 const windowLength = 4096;
 // the event stream reconnects after this when it failed for good (decerter stopped, a 403)

@@ -32,7 +32,7 @@ For tshark: it reads `-i -` through dumpcap, so your user needs dumpcap's rights
 
 ```sh
 sudo ./decerter capture --uid 1001 --api-socket /run/decerter/api.sock
-api() { sudo curl -s --unix-socket /run/decerter/api.sock "$@"; }
+api() { sudo curl -s --unix-socket /run/decerter/api.sock -H 'Content-Type: application/json' "$@"; }
 
 api -X POST -d '{"filter": "tcp.dstport == 443"}' http://decerter/api/v1/captures    # {"plaintext": true} for decrypted packets
 api http://decerter/api/v1/captures                                                 # id, filter, format, state, size

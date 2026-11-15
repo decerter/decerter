@@ -511,6 +511,10 @@ func (client apiClient) call(ctx context.Context, method string, path string, bo
 		return
 	}
 
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+
 	response, err := client.client.Do(request)
 
 	if err != nil {

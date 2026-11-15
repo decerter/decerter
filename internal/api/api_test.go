@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -309,6 +310,158 @@ func TestHandlerNegative(state *testing.T) {
 			state.Errorf("Test of api.Handler failed, DELETE %s should answer %d with a JSON error, status: %d, body: %s", path, status, answered, body)
 			return
 		}
+	}
+}
+
+// Test if api.Handler serves the clients that are no browser: curl and decerter mcp on the socket (host decerter or localhost) and on the adb forward (a loopback address with its port), and a JSON body with parameters in its Content-Type.
+func TestHandlerClientPositive(state *testing.T) {
+	test, err := newTestBackend(state.Context())
+
+	if err != nil {
+		state.Fatalf("Test of api.Handler failed, cannot make the backend, error: %s", err.Error())
+	}
+
+	defer test.stop()
+	server := httptest.NewServer(Handler(test.backend, slog.New(slog.DiscardHandler)))
+	defer server.Close()
+
+	for _, host := range []string{v1.HostName, "DECERTER", "decerter:80", "localhost", "LocalHost:8080", "127.0.0.1", "127.0.0.1:8080", "127.1.2.3:80", "[::1]", "[::1]:8080"} {
+		request, requestErr := http.NewRequestWithContext(state.Context(), http.MethodGet, server.URL+v1.BasePath+"/status", http.NoBody)
+
+		if requestErr != nil {
+			state.Fatalf("Could not make the request, error: %s", requestErr.Error())
+		}
+
+		request.Host = host
+		status, body, sendErr := sendRequest(server, request)
+
+		if (sendErr != nil) || (status != http.StatusOK) {
+			state.Errorf("Test of api.Handler failed, the host %q should be served, status: %d, body: %s, error: %v", host, status, body, sendErr)
+			return
+		}
+	}
+
+	request, err := http.NewRequestWithContext(state.Context(), http.MethodPut, server.URL+v1.BasePath+"/intercept", strings.NewReader(`{"enabled": false}`))
+
+	if err != nil {
+		state.Fatalf("Could not make the request, error: %s", err.Error())
+	}
+
+	request.Header.Set("Content-Type", "Application/JSON; charset=utf-8")
+	status, body, err := sendRequest(server, request)
+
+	if (err != nil) || (status != http.StatusOK) {
+		state.Errorf("Test of api.Handler failed, a JSON body with a charset should be read, status: %d, body: %s, error: %v", status, body, err)
+		return
+	}
+}
+
+// Test if api.Handler refuses a browser with 403 (a request with Origin or Sec-Fetch-Site, a Host that is no loopback name or address, as with DNS rebinding) and a body that is no application/json with 400, as the spec says, and nothing of it changes decerter.
+func TestHandlerClientNegative(state *testing.T) {
+	document, err := loadSpec(state.Context())
+
+	if err != nil {
+		state.Fatalf("Test of api.Handler failed, cannot load the spec, error: %s", err.Error())
+	}
+
+	test, err := newTestBackend(state.Context())
+
+	if err != nil {
+		state.Fatalf("Test of api.Handler failed, cannot make the backend, error: %s", err.Error())
+	}
+
+	defer test.stop()
+	server := httptest.NewServer(Handler(test.backend, slog.New(slog.DiscardHandler)))
+	defer server.Close()
+	document.Servers = openapi3.Servers{{URL: server.URL + v1.BasePath}}
+	router, err := legacy.NewRouter(document)
+
+	if err != nil {
+		state.Fatalf("Test of api.Handler failed, cannot build the router, error: %s", err.Error())
+	}
+
+	off := `{"enabled": false}`
+	held := strconv.FormatUint(test.heldID, 10)
+	negativeCases := []struct {
+		Method  string
+		Path    string
+		Body    string
+		Host    string
+		Headers map[string]string
+		Status  int
+	}{
+		// a web page: a simple POST and a fetch carry Origin, a no-cors GET Sec-Fetch-Site
+		{Method: http.MethodPut, Path: "/intercept", Body: off, Headers: map[string]string{"Origin": "https://attacker.example", "Content-Type": "application/json"}, Status: http.StatusForbidden},
+		{Method: http.MethodPost, Path: "/holds/" + held + "/forward", Headers: map[string]string{"Origin": "null"}, Status: http.StatusForbidden},
+		{Method: http.MethodPost, Path: "/captures", Headers: map[string]string{"Origin": "http://127.0.0.1:8080"}, Status: http.StatusForbidden},
+		{Method: http.MethodGet, Path: "/keylog", Headers: map[string]string{"Sec-Fetch-Site": "cross-site"}, Status: http.StatusForbidden},
+		{Method: http.MethodGet, Path: "/flows", Headers: map[string]string{"Sec-Fetch-Site": "same-origin"}, Status: http.StatusForbidden},
+		// DNS rebinding: the page's own name resolves to 127.0.0.1
+		{Method: http.MethodGet, Path: "/keylog", Host: "rebind.example:8080", Status: http.StatusForbidden},
+		{Method: http.MethodGet, Path: "/flows", Host: "rebind.example", Status: http.StatusForbidden},
+		{Method: http.MethodGet, Path: "/status", Host: "localhost.rebind.example", Status: http.StatusForbidden},
+		{Method: http.MethodGet, Path: "/status", Host: "127.0.0.1.nip.io", Status: http.StatusForbidden},
+		{Method: http.MethodGet, Path: "/status", Host: "192.168.1.2:8080", Status: http.StatusForbidden},
+		{Method: http.MethodGet, Path: "/status", Host: "decerter:http", Status: http.StatusForbidden},
+		{Method: http.MethodGet, Path: "/status", Host: "[fe80::1%25lo]:8080", Status: http.StatusForbidden},
+		{Method: http.MethodGet, Path: "/nothing", Host: "rebind.example", Status: http.StatusForbidden},
+		// a body a web page can send without a preflight is no JSON to the api
+		{Method: http.MethodPut, Path: "/intercept", Body: off, Headers: map[string]string{"Content-Type": "text/plain"}, Status: http.StatusBadRequest},
+		{Method: http.MethodPut, Path: "/intercept", Body: off, Headers: map[string]string{"Content-Type": "application/x-www-form-urlencoded"}, Status: http.StatusBadRequest},
+		{Method: http.MethodPost, Path: "/rules", Body: `{"find": {"type": "text", "value": "a"}, "replace": {"type": "text", "value": "b"}}`, Headers: map[string]string{"Content-Type": "multipart/form-data; boundary=x"}, Status: http.StatusBadRequest},
+		{Method: http.MethodPut, Path: "/holds/" + held, Body: `{"payload": {"type": "text", "value": "x"}}`, Status: http.StatusBadRequest},
+	}
+
+	for _, negative := range negativeCases {
+		request, requestErr := http.NewRequestWithContext(state.Context(), negative.Method, server.URL+v1.BasePath+negative.Path, strings.NewReader(negative.Body))
+
+		if requestErr != nil {
+			state.Fatalf("Could not make the request, error: %s", requestErr.Error())
+		}
+
+		if negative.Host != "" {
+			request.Host = negative.Host
+		}
+
+		for name, value := range negative.Headers {
+			request.Header.Set(name, value)
+		}
+
+		status, body, sendErr := sendRequest(server, request)
+
+		if sendErr != nil {
+			state.Fatalf("Test of api.Handler failed, %s %s, error: %s", negative.Method, negative.Path, sendErr.Error())
+		}
+
+		apiError := v1.Error{}
+
+		if (status != negative.Status) || (json.Unmarshal(body, &apiError) != nil) || (apiError.Error == "") {
+			state.Errorf("Test of api.Handler failed, %s %s with host %q and headers %v should answer %d with a JSON error, status: %d, body: %s", negative.Method, negative.Path, negative.Host, negative.Headers, negative.Status, status, body)
+			return
+		}
+
+		// every operation has the answer in the spec
+		route, pathParameters, routeErr := router.FindRoute(request)
+
+		if routeErr != nil {
+			continue
+		}
+
+		input := &openapi3filter.RequestValidationInput{Request: request, PathParams: pathParameters, Route: route, Options: &openapi3filter.Options{MultiError: false}}
+		header := http.Header{"Content-Type": []string{jsonMediaType}}
+		validateErr := openapi3filter.ValidateResponse(state.Context(), &openapi3filter.ResponseValidationInput{RequestValidationInput: input, Status: status, Header: header, Body: io.NopCloser(bytes.NewReader(body)), Options: &openapi3filter.Options{IncludeResponseStatus: true}})
+
+		if validateErr != nil {
+			state.Errorf("Test of api.Handler failed, %s %s answered %d, which the spec should have, error: %s", negative.Method, negative.Path, status, validateErr.Error())
+			return
+		}
+	}
+
+	interceptState := test.backend.Holds.State()
+
+	if !interceptState.IsEnabled || (interceptState.HeldCount != 2) || (len(test.backend.Rules.List()) != 1) {
+		state.Errorf("Test of api.Handler failed, a refused request should change nothing, intercept: %+v, rules: %d", interceptState, len(test.backend.Rules.List()))
+		return
 	}
 }
 
@@ -668,6 +821,10 @@ func send(ctx context.Context, server *httptest.Server, method string, path stri
 		return
 	}
 
+	if requestBody != "" {
+		request.Header.Set("Content-Type", jsonMediaType)
+	}
+
 	response, err := server.Client().Do(request)
 
 	if err != nil {
@@ -679,6 +836,23 @@ func send(ctx context.Context, server *httptest.Server, method string, path stri
 	}()
 
 	status, header = response.StatusCode, response.Header
+	body, err = io.ReadAll(response.Body)
+	return
+}
+
+// the status and body of the answer to request, the body is read and closed
+func sendRequest(server *httptest.Server, request *http.Request) (status int, body []byte, err error) {
+	response, err := server.Client().Do(request)
+
+	if err != nil {
+		return
+	}
+
+	defer func() {
+		err = errors.Join(err, response.Body.Close())
+	}()
+
+	status = response.StatusCode
 	body, err = io.ReadAll(response.Body)
 	return
 }

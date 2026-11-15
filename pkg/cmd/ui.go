@@ -23,8 +23,10 @@ held messages to edit, forward or drop. It only talks to the API, so it can do n
 
 decerter ui runs as your user, not as root: it only needs the API socket, which is for root and the members of the group
 decerter (groupadd decerter, usermod -aG decerter $USER, then log in again and restart decerter run). It prints a URL with a random
-token on stdout. The first load of it sets the token as a cookie and drops it from the address bar; every request
-without the cookie, or with another Host than 127.0.0.1:<port>, gets 403.
+token on stdout. The first load of it sets the token as a cookie and redirects to a random path the page is served
+under, which the cookie is limited to, so no other server on 127.0.0.1 gets it; every request without the cookie, outside
+that path, or with another Host than 127.0.0.1:<port>, gets 403. With --open the browser gets a URL with a code that
+works for one first load, so the token never goes into a command line.
 
 --api-socket takes a socket path, @name for an abstract socket, or a loopback ip:port, such as the host side of
 adb forward tcp:8080 localabstract:decerter-api for a decerter on an Android device.`,
@@ -54,7 +56,7 @@ adb forward tcp:8080 localabstract:decerter-api for a decerter on an Android dev
 func init() {
 	uiCmd.Flags().SortFlags = false
 	uiCmd.Flags().Func("api-socket", "the control API at this `address`: a socket path, @name for an abstract socket or a loopback ip:port such as 127.0.0.1:8080 of adb forward (default is /run/decerter/api.sock on Linux, @decerter-api on Android)", parseUIAPISocket)
-	uiCmd.Flags().BoolVar(&openBrowser, "open", false, "open the URL with xdg-open (open on macOS), the token is then in its command line while it runs (default is false, only print it)")
+	uiCmd.Flags().BoolVar(&openBrowser, "open", false, "open the page with xdg-open (open on macOS), with a code that works for one first load in place of the token, as command lines are readable by every user (default is false, only print the URL)")
 	rootCmd.AddCommand(uiCmd)
 }
 

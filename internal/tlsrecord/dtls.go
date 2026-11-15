@@ -23,13 +23,17 @@ const (
 	dtlsProtectedEpoch uint16 = 1
 	// the records behind the newest one that still count as new (RFC 6347 section 4.1.2.6)
 	replayWindowLength uint64 = 64
+	// the hellos a direction may put together: the ClientHello, again after a HelloVerifyRequest, and some to spare; each takes a message sequence number
+	maxDTLSMessages int = 8
 	// a datagram a relay sends may grow to this or to the length it came with, whichever is more: the IPv6 minimum MTU minus the IPv6 and UDP headers fits every path
 	MinDatagramLength int = 1232
 )
 
 // one handshake message the record layer reads, put together from its fragments, which can come in any order and more than once
+// body and received are let go once the message is complete, the entry stays so a retransmission of it is not read again
 type dtlsMessage struct {
 	messageType uint8
+	length      int
 	body        []byte
 	received    []bool
 	missing     int
@@ -78,6 +82,7 @@ type DTLSConn struct {
 	hasSecrets     bool
 	held           []heldRecord
 	heldBytes      int
+	assemblyBytes  int
 	datagrams      [2]uint64
 	err            error
 }
@@ -106,6 +111,7 @@ func NewDTLS(holdLimit int, intercept bool) (conn DTLSConn) {
 		hasSecrets:     false,
 		held:           nil,
 		heldBytes:      0,
+		assemblyBytes:  0,
 		datagrams:      [2]uint64{},
 		err:            nil,
 	}
@@ -151,7 +157,8 @@ func (conn *DTLSConn) Feed(direction Direction, datagram []byte) (records []Reco
 		}
 	}
 
-	if (err == nil) && (conn.heldBytes > conn.holdLimit) {
+	// the hellos a peer started and never finished count too, so it can't make decerter keep more than the limit
+	if (err == nil) && (conn.heldBytes+conn.assemblyBytes > conn.holdLimit) {
 		err = fmt.Errorf("%w: limit %d", ErrHoldQueueFull, conn.holdLimit)
 	}
 
@@ -428,7 +435,7 @@ func (conn *DTLSConn) handleHandshake(half *dtlsHalf, fragments []byte) (err err
 			return
 		}
 
-		body, isComplete, addErr := half.addFragment(messageType, messageSequence, length, offset, fragment)
+		body, isComplete, addErr := conn.addFragment(half, messageType, messageSequence, length, offset, fragment)
 
 		if err = addErr; err != nil {
 			return
@@ -462,20 +469,28 @@ func (conn *DTLSConn) reads(half *dtlsHalf, messageType uint8) (isRead bool) {
 }
 
 // put a fragment into its message, the body is there when every byte of it came; a message that is complete already is not given again
-func (half *dtlsHalf) addFragment(messageType uint8, messageSequence uint16, length int, offset int, fragment []byte) (body []byte, isComplete bool, err error) {
+// a direction puts at most maxDTLSMessages messages together, and the bytes of the ones not complete yet count toward the hold limit
+func (conn *DTLSConn) addFragment(half *dtlsHalf, messageType uint8, messageSequence uint16, length int, offset int, fragment []byte) (body []byte, isComplete bool, err error) {
 	message := half.messages[messageSequence]
 
 	if message == nil {
+		if len(half.messages) >= maxDTLSMessages {
+			err = fmt.Errorf("%w: more than %d hellos of one direction", ErrMalformedHandshake, maxDTLSMessages)
+			return
+		}
+
 		message = &dtlsMessage{
 			messageType: messageType,
+			length:      length,
 			body:        make([]byte, length),
 			received:    make([]bool, length),
 			missing:     length,
 		}
 		half.messages[messageSequence] = message
+		conn.assemblyBytes += 2 * length
 	}
 
-	if (message.messageType != messageType) || (len(message.body) != length) {
+	if (message.messageType != messageType) || (message.length != length) {
 		err = fmt.Errorf("%w: fragments of message %d do not match", ErrMalformedHandshake, messageSequence)
 		return
 	}
@@ -493,8 +508,15 @@ func (half *dtlsHalf) addFragment(messageType uint8, messageSequence uint16, len
 		}
 	}
 
-	body = message.body
 	isComplete = message.missing == 0
+
+	if isComplete {
+		body = message.body
+		message.body = nil
+		message.received = nil
+		conn.assemblyBytes -= 2 * length
+	}
+
 	return
 }
 
@@ -553,6 +575,8 @@ func (conn *DTLSConn) handleServerHello(body []byte) (err error) {
 	for index := range conn.halves {
 		conn.halves[index].messages = nil
 	}
+
+	conn.assemblyBytes = 0
 
 	if conn.hasSecrets {
 		err = conn.protect()

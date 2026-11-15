@@ -44,6 +44,9 @@ func parseRoutes(ribBytes []byte) (routes map[netip.Prefix]bool, err error) {
 	}
 
 	routes = map[netip.Prefix]bool{}
+	// the broadcast addresses of the local table: what goes to one reaches every host of its subnet, one upstream socket of the proxy can't relay
+	// it, so it is never routable for the proxy, whatever the unicast route around it says
+	broadcasts := map[netip.Prefix]bool{}
 
 	for _, message := range messages {
 		if (message.Header.Type != syscall.RTM_NEWROUTE) || (len(message.Data) < syscall.SizeofRtMsg) {
@@ -53,6 +56,7 @@ func parseRoutes(ribBytes []byte) (routes map[netip.Prefix]bool, err error) {
 		// struct rtmsg: family, dst_len, src_len, tos, table, protocol, scope, type, flags
 		family, prefixLength, routeType := message.Data[0], int(message.Data[1]), message.Data[7]
 		routable := false
+		isBroadcast := false
 
 		switch routeType {
 		case
@@ -65,8 +69,10 @@ func parseRoutes(ribBytes []byte) (routes map[netip.Prefix]bool, err error) {
 			syscall.RTN_UNREACHABLE,
 			syscall.RTN_PROHIBIT:
 			routable = false
+		case syscall.RTN_BROADCAST:
+			isBroadcast = true
 		default:
-			// broadcast, multicast and throw routes say nothing about a TCP destination
+			// multicast and throw routes say nothing about a TCP destination
 			continue
 		}
 
@@ -108,8 +114,9 @@ func parseRoutes(ribBytes []byte) (routes map[netip.Prefix]bool, err error) {
 			return
 		}
 
-		// a routable entry wins over an unroutable one for the same prefix in another table
-		routes[prefix] = routes[prefix] || routable
+		// a routable entry wins over an unroutable one for the same prefix in another table, a broadcast address over both
+		broadcasts[prefix] = broadcasts[prefix] || isBroadcast
+		routes[prefix] = (routes[prefix] || routable) && !broadcasts[prefix]
 	}
 
 	return

@@ -2,7 +2,7 @@
 With the [control API](api.md) on, `decerter run` reads HTTP/1.1 and HTTP/2 from the flows in scope: each request and its response is an exchange in the history, and rules and holds of layer `http` take whole HTTP messages instead of single records.
 
 ```sh
-api() { sudo curl -s --unix-socket /run/decerter/api.sock "$@"; }
+api() { sudo curl -s --unix-socket /run/decerter/api.sock -H 'Content-Type: application/json' "$@"; }
 
 # the exchanges of a flow, one with its heads, a window of its response body without chunking
 api 'http://decerter/api/v1/flows?filter=http.request.method+%3D%3D+%22POST%22'

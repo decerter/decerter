@@ -739,6 +739,13 @@ func startDecerterCommandLogs(state *testing.T, ready []string, arguments ...str
 
 // startDecerterCommandLogs with the process, for a test that signals it
 func startDecerterProcess(state *testing.T, ready []string, arguments ...string) (command *exec.Cmd, stdout *lockedBuffer, logs *lockedBuffer, stop func() error) {
+	command, stdout, logs, stop = startDecerterProcessTo(state, nil, nil, ready, arguments...)
+	return
+}
+
+// startDecerterProcess with decerter's stdout on output, nil is the stdout buffer it returns, and started through wrapper, a command that execs its last
+// argument in place (nsenter --net=…), nil is none
+func startDecerterProcessTo(state *testing.T, output *os.File, wrapper []string, ready []string, arguments ...string) (command *exec.Cmd, stdout *lockedBuffer, logs *lockedBuffer, stop func() error) {
 	executable, err := os.Executable()
 
 	if err != nil {
@@ -747,6 +754,11 @@ func startDecerterProcess(state *testing.T, ready []string, arguments ...string)
 
 	ctx, cancel := context.WithTimeout(context.Background(), decerterCommandTimeout)
 	command = exec.CommandContext(ctx, executable, arguments...)
+
+	if len(wrapper) > 0 {
+		command = exec.CommandContext(ctx, wrapper[0], slices.Concat(wrapper[1:], []string{executable}, arguments)...)
+	}
+
 	command.Env = decerterEnvironment()
 	command.Cancel = func() (cancelErr error) {
 		cancelErr = command.Process.Signal(os.Interrupt)
@@ -755,6 +767,10 @@ func startDecerterProcess(state *testing.T, ready []string, arguments ...string)
 	command.WaitDelay = 5 * time.Second
 	stdout = &lockedBuffer{mutex: &sync.Mutex{}, buffer: &bytes.Buffer{}}
 	command.Stdout = stdout
+
+	if output != nil {
+		command.Stdout = output
+	}
 	stderr, err := command.StderrPipe()
 
 	if err != nil {

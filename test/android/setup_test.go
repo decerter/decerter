@@ -66,6 +66,7 @@ type userProcess struct {
 type uiPage struct {
 	client *http.Client
 	host   string
+	base   string
 	cookie *http.Cookie
 }
 
@@ -550,7 +551,7 @@ func startUserProcess(state *testing.T, commandLine string) (process *userProces
 	return
 }
 
-// SIGTERM, then wait; once it exited this does nothing
+// SIGTERM to its process group, then wait; once it exited this does nothing
 func (process *userProcess) stop(state *testing.T) {
 	select {
 	case <-process.exited:
@@ -558,9 +559,10 @@ func (process *userProcess) stop(state *testing.T) {
 	default:
 	}
 
-	signalErr := process.command.Process.Signal(syscall.SIGTERM)
+	// the whole group: a shell that does not exec its command would leave it running, decerter ui kept serving its page after the test
+	signalErr := syscall.Kill(-process.command.Process.Pid, syscall.SIGTERM)
 
-	if (signalErr != nil) && !errors.Is(signalErr, os.ErrProcessDone) {
+	if (signalErr != nil) && !errors.Is(signalErr, syscall.ESRCH) {
 		state.Errorf("Could not stop %s, error: %s", process.command.String(), signalErr.Error())
 	}
 
@@ -573,9 +575,9 @@ func (process *userProcess) wait(state *testing.T) {
 	case <-process.exited:
 	case <-time.After(readyTimeout):
 		state.Errorf("%s did not exit, stderr:\n%s", process.command.String(), process.stderr.String())
-		killErr := process.command.Process.Kill()
+		killErr := syscall.Kill(-process.command.Process.Pid, syscall.SIGKILL)
 
-		if (killErr != nil) && !errors.Is(killErr, os.ErrProcessDone) {
+		if (killErr != nil) && !errors.Is(killErr, syscall.ESRCH) {
 			state.Errorf("Could not kill %s, error: %s", process.command.String(), killErr.Error())
 		}
 
@@ -608,7 +610,7 @@ func waitText(state *testing.T, name string, output lockedBuffer, exited <-chan 
 	}
 }
 
-// the first load of the printed URL sets the cookie and redirects to / without the token
+// the first load of the printed URL sets the cookie and redirects to the secret path without the token
 func openUI(state *testing.T, address string) (page uiPage) {
 	parsed, err := url.Parse(address)
 
@@ -624,6 +626,7 @@ func openUI(state *testing.T, address string) (page uiPage) {
 			},
 		},
 		host:   parsed.Host,
+		base:   "",
 		cookie: nil,
 	}
 	response, err := page.client.Get(address)
@@ -638,17 +641,20 @@ func openUI(state *testing.T, address string) (page uiPage) {
 
 	cookies := response.Cookies()
 
-	if (response.StatusCode != http.StatusSeeOther) || (len(cookies) != 1) {
-		state.Fatalf("Test of the setup failed, the first load of the ui should set the cookie, status: %d, cookies: %v", response.StatusCode, cookies)
+	location := response.Header.Get("Location")
+
+	if (response.StatusCode != http.StatusSeeOther) || (len(cookies) != 1) || !strings.HasPrefix(location, "/") || (cookies[0].Path != location) {
+		state.Fatalf("Test of the setup failed, the first load of the ui should set the cookie for the path it redirects to, status: %d, location: %q, cookies: %v", response.StatusCode, location, cookies)
 	}
 
+	page.base = strings.TrimSuffix(location, "/")
 	page.cookie = cookies[0]
 	return
 }
 
 // GET an api path under /api/v1 through the ui the way the page does it
 func (page uiPage) get(ctx context.Context, path string, result any) (err error) {
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+page.host+v1.BasePath+path, http.NoBody)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+page.host+page.base+v1.BasePath+path, http.NoBody)
 
 	if err != nil {
 		return

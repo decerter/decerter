@@ -3,7 +3,7 @@
 
 ```sh
 sudo ./decerter run --uid 1001 --intercept --api-socket /run/decerter/api.sock
-api() { sudo curl -s --unix-socket /run/decerter/api.sock "$@"; }   # or curl without sudo as a member of the group decerter
+api() { sudo curl -s --unix-socket /run/decerter/api.sock -H 'Content-Type: application/json' "$@"; }   # or curl without sudo as a member of the group decerter
 
 api http://decerter/api/v1/status
 api 'http://decerter/api/v1/flows?filter=tls.sni+contains+%22example%22'      # newest first, ?limit=&cursor= pages
@@ -12,7 +12,7 @@ api 'http://decerter/api/v1/messages/1?offset=0&length=4096'                  # 
 api -N http://decerter/api/v1/events                                          # server-sent events, no payloads
 ```
 
-The host name in the URL is ignored; `decerter` is a convention.
+The host in the URL is `decerter`, `localhost` or a loopback address (with or without a port), and a request body needs `Content-Type: application/json`, which the `api` function above sends.
 
 ## Access
 `--api-socket` takes a socket path or `@name` for an abstract socket. The usual ones are `/run/decerter/api.sock` on Linux and `@decerter-api` on Android.
@@ -20,6 +20,7 @@ The host name in the URL is ignored; `decerter` is a convention.
 - **Socket file:** mode 0660 and the group `decerter` when that group exists (decerter doesn't create it: `sudo groupadd decerter`, `sudo usermod -aG decerter $USER`, log in again, restart decerter), mode 0600 for root alone otherwise, with a warning. decerter creates it under a temporary name and renames it, refuses a path that exists and is no socket or a socket another decerter serves, replaces a socket a killed decerter left, and removes it on exit.
 - **Abstract socket:** it has no mode, so decerter checks the peer with `SO_PEERCRED`: root; on Android also adb's shell user (uid 2000); on Linux peers whose primary group is `decerter`.
 - **Android:** `adb forward tcp:8080 localabstract:decerter-api` makes the API reachable on the host as `http://127.0.0.1:8080/api/v1/…`; adbd connects as root after `adb root` and as shell otherwise. adb forward's port is open to every local user of the workstation.
+- **Browsers:** the API is for curl, scripts, `decerter ui` and `decerter mcp`, never for a web page. On the host side of `adb forward` every page in the workstation's browser could send to it, so it answers `403` to a request with an `Origin` or `Sec-Fetch-Site` header (only browsers send them; `decerter ui` drops them) and to a `Host` other than `decerter`, `localhost` or a loopback address (DNS rebinding: a page's own name resolved to 127.0.0.1), and `400` to a body that is not `application/json`, the type a page can't send without asking first.
 
 ## Operations
 | Method and path | Operation | What |

@@ -34,15 +34,12 @@ func Listen() (listener net.Listener, host string, err error) {
 }
 
 // the page and the /api/v1 proxy to target, every request behind the guard
-func Handler(target Target, token string, host string, logger *slog.Logger) (handler http.Handler) {
+// the paths of the mux are below the secret path, the guard takes it off
+func Handler(target Target, credentials *Credentials, host string, logger *slog.Logger) (handler http.Handler) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /{$}", serveFile(webDirectory+"/index.html"))
 	mux.HandleFunc("GET /app.js", serveFile(webDirectory+"/app.js"))
 	mux.HandleFunc("GET /app.css", serveFile(webDirectory+"/app.css"))
-	// the browser asks for it on its own, there is none
-	mux.HandleFunc("GET /favicon.ico", func(writer http.ResponseWriter, request *http.Request) {
-		writer.WriteHeader(http.StatusNoContent)
-	})
 	proxy := newProxy(target, logger)
 
 	// the methods of api/openapi.yaml; a pattern per method, "GET /" and a bare "/api/v1/" would overlap
@@ -50,7 +47,7 @@ func Handler(target Target, token string, host string, logger *slog.Logger) (han
 		mux.Handle(method+" "+v1.BasePath+"/", proxy)
 	}
 
-	handler = guard(mux, token, host, logger)
+	handler = guard(mux, credentials, host, logger)
 	return
 }
 
@@ -98,7 +95,8 @@ func Serve(ctx context.Context, listener net.Listener, handler http.Handler, log
 	return
 }
 
-// xdg-open, open on macOS, in the background, a browser that does not start is only logged; the URL with the token is in the opener's arguments while it runs
+// xdg-open, open on macOS, in the background, a browser that does not start is only logged; address is the URL with a one-time code (CodeURL), which the
+// opener and a browser it starts keep in their command line, so it holds no credential that still works once the page is loaded
 // not tied to a context: a browser the opener started stays when decerter ui stops
 func Open(address string, logger *slog.Logger) {
 	opener := "xdg-open"

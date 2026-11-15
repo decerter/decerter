@@ -172,7 +172,7 @@ func Explain(err error, target Target) (explained error) {
 	return
 }
 
-// /api/v1/… to the api and nothing else; the cookie and the browser's Origin and Referer stay here, the event stream is flushed per event
+// /api/v1/… to the api and nothing else; the cookie and the browser's Origin, Referer and Sec-Fetch-* stay here, the event stream is flushed per event
 // a client that goes away cancels its request, which closes the connection to the api
 func newProxy(target Target, logger *slog.Logger) (handler http.Handler) {
 	reverseProxy := &httputil.ReverseProxy{
@@ -181,7 +181,8 @@ func newProxy(target Target, logger *slog.Logger) (handler http.Handler) {
 			proxyRequest.Out.URL.Host = v1.HostName
 			proxyRequest.Out.Host = v1.HostName
 
-			for _, name := range []string{"Cookie", "Origin", "Referer", "Authorization"} {
+			// the api refuses a request with Origin or Sec-Fetch-Site, which only a browser sends
+			for _, name := range []string{"Cookie", "Origin", "Referer", "Authorization", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest", "Sec-Fetch-User"} {
 				proxyRequest.Out.Header.Del(name)
 			}
 		},

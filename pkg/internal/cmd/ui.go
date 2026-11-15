@@ -12,7 +12,7 @@ import (
 	"github.com/decerter/decerter/pkg/internal/logging"
 )
 
-// serve the minimal UI on 127.0.0.1 until stopped, a client of the control API at target; the URL with the token goes to stdout, openBrowser hands it to xdg-open
+// serve the minimal UI on 127.0.0.1 until stopped, a client of the control API at target; the URL with the token goes to stdout, openBrowser hands xdg-open a URL with a one-time code
 func UI(target ui.Target, openBrowser bool, logger *logging.Logger) (err error) {
 	ctx, cancel := shutdownContext()
 	defer cancel()
@@ -28,7 +28,7 @@ func UI(target ui.Target, openBrowser bool, logger *logging.Logger) (err error) 
 		return
 	}
 
-	token, err := ui.NewToken()
+	credentials, err := ui.NewCredentials()
 
 	if err != nil {
 		logger.Error("Could not make the ui token", "error", err)
@@ -42,8 +42,7 @@ func UI(target ui.Target, openBrowser bool, logger *logging.Logger) (err error) 
 		return
 	}
 
-	address := ui.URL(host, token)
-	_, err = fmt.Fprintln(os.Stdout, address)
+	_, err = fmt.Fprintln(os.Stdout, ui.URL(host, credentials.Token))
 
 	if err != nil {
 		logger.Error("Could not print the ui address", "error", err)
@@ -53,11 +52,20 @@ func UI(target ui.Target, openBrowser bool, logger *logging.Logger) (err error) 
 
 	logger.Info("Minimal ui listening, open the printed URL", "address", "http://"+host+"/", "api", target.String(), "mode", status.Mode, "processing", status.Processing, "version", status.Version)
 
+	// the browser's command line gets a code that works once, not the token
 	if openBrowser {
-		ui.Open(address, logger.Slog())
+		code, codeErr := credentials.NewCode()
+
+		if err = codeErr; err != nil {
+			logger.Error("Could not make the ui code", "error", err)
+			err = errors.Join(err, listener.Close())
+			return
+		}
+
+		ui.Open(ui.CodeURL(host, code), logger.Slog())
 	}
 
-	err = ui.Serve(ctx, listener, ui.Handler(target, token, host, logger.Slog()), logger.Slog())
+	err = ui.Serve(ctx, listener, ui.Handler(target, credentials, host, logger.Slog()), logger.Slog())
 
 	if ctx.Err() != nil {
 		logger.Info("Got shutdown signal", "cause", context.Cause(ctx))

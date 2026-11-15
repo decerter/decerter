@@ -127,6 +127,63 @@ func TestDTLSHandshakeNegative(state *testing.T) {
 	}
 }
 
+// Test if tlsrecord.DTLSConn bounds what a peer makes it keep of hellos it never finishes: at most maxDTLSMessages messages a direction, and their bytes count toward the hold limit; a finished hello lets its bytes go.
+func TestDTLSReassemblyNegative(state *testing.T) {
+	random := [randomLength]byte{}
+	clientHello := clientHelloBody(VersionDTLS12, random, true, nil)
+
+	// a new message sequence number in every datagram, each the first bytes of a hello that never ends
+	conn := NewDTLS(holdLimit(), false)
+	var err error
+
+	for sequence := range maxDTLSMessages + 1 {
+		_, err = conn.Feed(ClientDirection, dtlsRecord(HandshakeContentType, 0, uint64(sequence), dtlsFragment(handshakeClientHello, uint16(sequence), 1000, 0, make([]byte, 10))))
+
+		if (sequence < maxDTLSMessages) && (err != nil) {
+			state.Fatalf("Test of tlsrecord.DTLSConn.Feed function failed, hello %d should still be put together, error: %s", sequence, err.Error())
+		}
+	}
+
+	if !errors.Is(err, ErrMalformedHandshake) || (len(conn.halves[ClientDirection].messages) != maxDTLSMessages) {
+		state.Errorf("Test of tlsrecord.DTLSConn.Feed function failed, hello %d should be %v, messages: %d, error: %v", maxDTLSMessages+1, ErrMalformedHandshake, len(conn.halves[ClientDirection].messages), err)
+		return
+	}
+
+	// a hello of the longest length that is read, of which only a fragment comes, is over a limit below its size
+	conn = NewDTLS(maxHandshake, false)
+	_, err = conn.Feed(ClientDirection, dtlsRecord(HandshakeContentType, 0, 0, dtlsFragment(handshakeClientHello, 0, maxHandshake, 0, make([]byte, 10))))
+
+	if !errors.Is(err, ErrHoldQueueFull) {
+		state.Errorf("Test of tlsrecord.DTLSConn.Feed function failed, an unfinished hello over the limit should be %v, error: %v", ErrHoldQueueFull, err)
+		return
+	}
+
+	// the same hello in two halves under the limit: kept while it is open, let go when it is complete
+	conn = NewDTLS(4*len(clientHello), false)
+	cut := len(clientHello) / 2
+	_, err = conn.Feed(ClientDirection, dtlsRecord(HandshakeContentType, 0, 0, dtlsFragment(handshakeClientHello, 0, len(clientHello), 0, clientHello[:cut])))
+
+	if (err != nil) || (conn.assemblyBytes != 2*len(clientHello)) {
+		state.Fatalf("Test of tlsrecord.DTLSConn.Feed function failed, an open hello should count its bytes, bytes: %d, error: %v", conn.assemblyBytes, err)
+	}
+
+	_, err = conn.Feed(ClientDirection, dtlsRecord(HandshakeContentType, 0, 1, dtlsFragment(handshakeClientHello, 0, len(clientHello), cut, clientHello[cut:])))
+	message := conn.halves[ClientDirection].messages[0]
+
+	if (err != nil) || (conn.assemblyBytes != 0) || !conn.hasClientHello || (message == nil) || (message.body != nil) || (message.received != nil) {
+		state.Errorf("Test of tlsrecord.DTLSConn.Feed function failed, a complete hello should be read and let its bytes go, bytes: %d, message: %+v, error: %v", conn.assemblyBytes, message, err)
+		return
+	}
+
+	// a retransmission of the complete hello is not read again
+	_, err = conn.Feed(ClientDirection, dtlsRecord(HandshakeContentType, 0, 2, dtlsFragment(handshakeClientHello, 0, len(clientHello), 0, clientHello)))
+
+	if (err != nil) || (conn.assemblyBytes != 0) {
+		state.Errorf("Test of tlsrecord.DTLSConn.Feed function failed, a retransmitted hello should change nothing, bytes: %d, error: %v", conn.assemblyBytes, err)
+		return
+	}
+}
+
 // Test if tlsrecord.frameDTLSRecord returns with the expected output.
 func TestFrameDTLSRecordPositive(state *testing.T) {
 	positiveCases := []struct {

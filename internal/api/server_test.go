@@ -612,6 +612,7 @@ func TestWriteNegative(state *testing.T) {
 	for _, path := range []string{"/status", "/keylog", "/flows/pcap", "/events"} {
 		writer := &failingWriter{header: http.Header{}, status: 0}
 		request := httptest.NewRequestWithContext(state.Context(), http.MethodGet, v1.BasePath+path, nil)
+		request.Host = v1.HostName
 		handler.ServeHTTP(writer, request)
 
 		if writer.status != http.StatusOK {

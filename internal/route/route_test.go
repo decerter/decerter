@@ -38,6 +38,9 @@ var (
 		{Family: syscall.AF_INET, Length: 8, Table: syscall.RT_TABLE_LOCAL, Type: syscall.RTN_LOCAL, Destination: []byte{127, 0, 0, 0}},
 		{Family: syscall.AF_INET, Length: 32, Table: syscall.RT_TABLE_LOCAL, Type: syscall.RTN_BROADCAST, Destination: []byte{192, 168, 1, 255}},
 		{Family: syscall.AF_INET, Length: 8, Table: 100, Type: syscall.RTN_BLACKHOLE, Destination: []byte{10, 0, 0, 0}},
+		// a broadcast address is never routable for the proxy, also when another table has a unicast route for it
+		{Family: syscall.AF_INET, Length: 32, Table: syscall.RT_TABLE_LOCAL, Type: syscall.RTN_BROADCAST, Destination: []byte{10, 0, 0, 255}},
+		{Family: syscall.AF_INET, Length: 32, Table: 200, Type: syscall.RTN_UNICAST, Destination: []byte{10, 0, 0, 255}},
 		{Family: syscall.AF_INET, Length: 8, Table: 200, Type: syscall.RTN_UNICAST, Destination: []byte{10, 0, 0, 0}},
 		{Family: syscall.AF_INET, Length: 12, Table: 100, Type: syscall.RTN_PROHIBIT, Destination: []byte{172, 16, 0, 0}},
 		{Family: syscall.AF_INET, Length: 24, Table: 100, Type: syscall.RTN_THROW, Destination: []byte{172, 17, 0, 0}},
@@ -50,15 +53,17 @@ var (
 		{Family: syscall.AF_BRIDGE, Length: 0, Table: syscall.RT_TABLE_MAIN, Type: syscall.RTN_UNICAST, Destination: nil},
 	}
 	dumpRoutes = map[netip.Prefix]bool{
-		netip.MustParsePrefix("0.0.0.0/0"):      true,
-		netip.MustParsePrefix("192.168.1.0/24"): true,
-		netip.MustParsePrefix("127.0.0.0/8"):    true,
-		netip.MustParsePrefix("10.0.0.0/8"):     true,
-		netip.MustParsePrefix("172.16.0.0/12"):  false,
-		netip.MustParsePrefix("::/0"):           true,
-		netip.MustParsePrefix("fe80::/64"):      true,
-		netip.MustParsePrefix("2001:db8::/32"):  false,
-		netip.MustParsePrefix("::1/128"):        true,
+		netip.MustParsePrefix("0.0.0.0/0"):        true,
+		netip.MustParsePrefix("192.168.1.0/24"):   true,
+		netip.MustParsePrefix("127.0.0.0/8"):      true,
+		netip.MustParsePrefix("10.0.0.0/8"):       true,
+		netip.MustParsePrefix("172.16.0.0/12"):    false,
+		netip.MustParsePrefix("192.168.1.255/32"): false,
+		netip.MustParsePrefix("10.0.0.255/32"):    false,
+		netip.MustParsePrefix("::/0"):             true,
+		netip.MustParsePrefix("fe80::/64"):        true,
+		netip.MustParsePrefix("2001:db8::/32"):    false,
+		netip.MustParsePrefix("::1/128"):          true,
 	}
 )
 

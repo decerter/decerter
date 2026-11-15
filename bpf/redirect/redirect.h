@@ -37,6 +37,9 @@
 //prefix length of a full address in a prefix_key, IPv4 is stored IPv4-mapped
 #define ADDRESS_BITS	128
 
+//prefix length of ::ffff:0:0/96, every IPv4 prefix is at least this long in a prefix map
+#define IPV4_MAPPED_BITS	96
+
 //keys of prefix_lengths_map, one per prefix map
 #define ROUTE_LENGTHS	0
 #define CIDR_LENGTHS	1
@@ -102,13 +105,15 @@ struct prefix_lengths {
 	uint64_t bits[3];
 };
 
-//ip: address searched for, lengths_key: ROUTE_LENGTHS or CIDR_LENGTHS, found: 1 once a prefix contains ip, value: the value of that prefix, the context of search_prefix_length
+//ip: address searched for, lengths_key: ROUTE_LENGTHS or CIDR_LENGTHS, min_length: the shortest prefix length of the address's family, found: 1 once a prefix contains ip,
+//value: the value of that prefix, the context of search_prefix_length
 struct prefix_search {
 	uint32_t ip[4];
 	uint32_t lengths_key;
+	uint8_t min_length;
 	uint8_t found;
 	uint8_t value;
-	uint16_t padding;
+	uint8_t padding;
 };
 
 //the prefix maps are hashes searched once per prefix length in use, not LPM_TRIEs: the LPM_TRIE of Android's arm64 GKI 6.6.30 (API 35 emulator) trips
@@ -192,6 +197,12 @@ static long search_prefix_length(uint64_t index, void *context)
 
 	uint32_t length = ADDRESS_BITS - (uint32_t)index;
 
+	//shorter prefixes belong to the other family: an IPv6 ::/0 masks every IPv4-mapped address to its own key
+	if (length < search->min_length)
+	{
+		return 1;
+	}
+
 	if (!((lengths->bits[length / 64] >> (length % 64)) & 1))
 	{
 		return 0;
@@ -248,6 +259,7 @@ static long search_prefix_length(uint64_t index, void *context)
 }
 
 //Find the longest prefix of a prefix map that contains the destination of the flow with one hash lookup per prefix length the map has, and copy its value
+//an IPv4 destination only matches IPv4 prefixes (IPv4-mapped, at least IPV4_MAPPED_BITS long), an IPv6 one can't match them unless it is IPv4-mapped itself
 //bpf_loop and not bpf_for: Android's 6.6 verifier doesn't see the bpf_for loop converge and stops after a million instructions, a callback is verified on its own
 bool lookup_prefix(uint32_t lengths_key, struct flow *flow, uint8_t *value)
 {
@@ -256,9 +268,11 @@ bool lookup_prefix(uint32_t lengths_key, struct flow *flow, uint8_t *value)
 		return false;
 	}
 
+	bool is_ipv4 = (flow->ip[0] == 0) && (flow->ip[1] == 0) && (flow->ip[2] == bpf_htonl(IPV4_MAPPED));
 	struct prefix_search search = {
 		.ip = {flow->ip[0], flow->ip[1], flow->ip[2], flow->ip[3]},
 		.lengths_key = lengths_key,
+		.min_length = is_ipv4 ? IPV4_MAPPED_BITS : 0,
 		.found = 0,
 		.value = 0,
 		.padding = 0
