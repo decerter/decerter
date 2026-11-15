@@ -58,6 +58,8 @@ coverage/merged.out      the profiles together, without the code that is not han
 
 `COVERAGE_ANDROID=1 make coverage` runs the Android e2e tests too, with sudo and the emulator as `make test-e2e-android` does. With `DECERTER_E2E_COVERDIR` set the tests build decerter with `go build -cover` for the host and the emulator: the host's decerter (`decerter android setup`, `decerter ui`) writes its counters into that directory, the ones on the emulator into `/data/local/tmp/decerter-e2e-cover`, which the tests pull and remove at the end, and the script turns both into `android.out`. A decerter that `decerter android setup` or a printed command line starts on the device has no `GOCOVERDIR`: it is not counted and prints `warning: GOCOVERDIR not set, no coverage data emitted` when it exits. A decerter that is killed instead of stopped writes no counters either.
 
+`COVERAGE_MIN=85 make coverage` fails when the total (the last column of the `total` line, merged) is below 85 %; the `coverage` job of `ci.yml` runs the unit tests with that floor (88.8 % on 2026-11-15).
+
 Left out of the numbers: the bpf2go output (`*_bpfel.go`, `*_bpfeb.go`), the generated offset tables (`*_gen.go`), `cmd/decerter` (its `main` only calls `cmd.Execute`) and the helpers under `test/`. The BPF C programs have no Go coverage; the e2e tests cover them, the redirect and capture paths in `test/e2e/redirect_test.go`. Without `COVERAGE_ANDROID=1` the Android e2e tests are not in the numbers, so `app/boringssl.go`, the netd hook sharing of `internal/attach` and what `internal/android` does over adb count only as far as the unit tests reach them.
 
 ## BPF objects
@@ -96,6 +98,7 @@ GitHub Actions in `.github/workflows/`. Every action is pinned to a full commit 
 |---|---|---|---|---|
 | `ci.yml` | pull request, push to `main` | `lint` | amd64 | `make lint` with the golangci-lint the Makefile pins (`go install`) |
 | | | `unit` | amd64, arm64 | `make test-unit` |
+| | | `coverage` | amd64 | `make coverage COVERAGE_MIN=85`: the unit tests' coverage, fails below 85 %; `packages.txt`, `functions.txt` and `coverage.html` are the run's artifact `coverage` (30 days) |
 | | | `license` | amd64 | `make install-go-licenses`, `make license-check` |
 | | | `build` | amd64, arm64 | `make build build-arm64 verify-static`, `./decerter --version` (the runner's architecture); on amd64 also `go build` and `go vet` for macOS arm64 |
 | | | `bpf-drift` | amd64 | clang-21 and llvm-21 from apt.llvm.org (Ubuntu 24.04 has no clang-21; the signing key is pinned by SHA-256), `make check-bpf-objects` |

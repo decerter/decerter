@@ -141,7 +141,8 @@ func NewMatchRule(spec MatchSpec) (rule *MatchRule, err error) {
 			return
 		}
 
-		// a pattern that matches nothing would insert the replacement between every two bytes
+		// a pattern that matches nothing would insert the replacement between every two bytes; one that matches the empty string only at some
+		// places (\b, x*\b) replaces only its matches that are not empty, see replaceMatches
 		if pattern.Match(nil) {
 			err = fmt.Errorf("%w: the regular expression matches the empty string", ErrFind)
 			return
@@ -242,11 +243,13 @@ func (rule *MatchRule) Apply(ctx context.Context, message Message) (plain []byte
 	verdict = ForwardVerdict
 
 	if rule.pattern != nil {
-		if !rule.pattern.Match(message.Plain) {
+		replaced, count := replaceMatches(rule.pattern, message.Plain, rule.replace)
+
+		if count == 0 {
 			return
 		}
 
-		plain = rule.pattern.ReplaceAll(message.Plain, rule.replace)
+		plain = replaced
 	} else {
 		if !bytes.Contains(message.Plain, rule.find) {
 			return
@@ -344,5 +347,30 @@ func (ruleSet *RuleSet) Apply(ctx context.Context, message Message) (plain []byt
 
 	plain = current.Plain
 	verdict = ForwardVerdict
+	return
+}
+
+// every match of pattern that is not empty replaced by template expanded ($1, ${name}), count is how many; an empty match (\b, x*\b between two
+// words) is left alone, it would insert the template between bytes
+func replaceMatches(pattern *regexp.Regexp, plain []byte, template []byte) (replaced []byte, count int) {
+	last := 0
+
+	for _, match := range pattern.FindAllSubmatchIndex(plain, -1) {
+		if match[0] == match[1] {
+			continue
+		}
+
+		replaced = append(replaced, plain[last:match[0]]...)
+		replaced = pattern.Expand(replaced, template, plain, match)
+		last = match[1]
+		count++
+	}
+
+	if count == 0 {
+		replaced = plain
+		return
+	}
+
+	replaced = append(replaced, plain[last:]...)
 	return
 }

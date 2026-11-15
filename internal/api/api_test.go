@@ -656,7 +656,7 @@ func TestListenPositive(state *testing.T) {
 	}
 }
 
-// Test if api.Listen returns with the expected errors: a path that is no socket, a socket another server answers on.
+// Test if api.Listen returns with the expected errors: a path that is no socket, an ip:port, a socket another server answers on.
 func TestListenNegative(state *testing.T) {
 	setSocketGroup(state, "")
 	directory := state.TempDir()
@@ -674,6 +674,17 @@ func TestListenNegative(state *testing.T) {
 	if !errors.Is(err, ErrNotSocket) {
 		state.Errorf("Test of api.Listen function failed, error should be %v, error: %v", ErrNotSocket, err)
 		return
+	}
+
+	// an ip:port is for the clients, no file of that name is made
+	for _, address := range []string{"127.0.0.1:18090", "[::1]:18090", "localhost:8080", ":18090"} {
+		_, err = Listen(address, currentPlatform, logger)
+		_, statErr := os.Stat(address)
+
+		if !errors.Is(err, ErrTCPSocket) || !errors.Is(statErr, os.ErrNotExist) {
+			state.Errorf("Test of api.Listen function failed, address %q, error should be %v, error: %v, file: %v", address, ErrTCPSocket, err, statErr)
+			return
+		}
 	}
 
 	socketPath := filepath.Join(directory, "api.sock")

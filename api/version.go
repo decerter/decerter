@@ -14,13 +14,15 @@ var (
 	buildVersion string
 	gitCommit    string
 	buildDate    string
+	// the build info of the binary, a variable so the tests can give their own
+	readBuildInfo = debug.ReadBuildInfo
 )
 
 // one line for decerter --version: version (commit …, date …, go version os/arch), the date is the commit time, from the Makefile or the build info
 // make build and make release set the version of tools/release/version.sh; a plain go build gets the pseudo-version Go writes, v0.0.0-<time>-<hash>
 func Version() (version string) {
 	version, commit, date := buildVersion, gitCommit, buildDate
-	info, ok := debug.ReadBuildInfo()
+	info, ok := readBuildInfo()
 
 	if ok {
 		if (version == "") && (info.Main.Version != "") {

@@ -215,7 +215,7 @@ func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.Add
 	// the first datagram is all the session has when it is decided, a DTLS ClientHello fragmented over more datagrams counts as one without fields
 	// a DTLS ClientHello that can not be read is TLS without its fields
 	hello, _, _ := tlsrecord.ReadDTLSClientHello(datagram)
-	values := scopeValues(flow, cmdline, client, scope, recorder != nil).WithClientHello(tlsrecord.IsDTLSClientHello(datagram), hello.Version, hello.ServerName, hello.Protocols)
+	values := scopeValues(flow, cmdline, client, scope).WithClientHello(tlsrecord.IsDTLSClientHello(datagram), hello.Version, hello.ServerName, hello.Protocols)
 	result := isInScope(scope, values)
 
 	if cmdline == "" {
@@ -247,6 +247,7 @@ func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.Add
 
 	// out of scope the datagrams go on as they are, past the rules and the history
 	if session.isInScope {
+		values = recordedValues(values, recorder)
 		flowID := recorder.OpenFlow(cookie, values, hello.ClientRandom)
 		recorder.SetUpstream(flowID, upstreamCookie)
 		session.interceptFlow = intercept.FlowOf(flowID, cookie, flow, client, values)

@@ -22,6 +22,7 @@ import (
 
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/filter"
+	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/tlsrecord"
 	"golang.org/x/sys/unix"
@@ -45,7 +46,7 @@ var (
 
 // Test if proxy.scopeValues and proxy.isInScope return with the expected output.
 func TestScopeValuesPositive(state *testing.T) {
-	values := scopeValues(testFlow, "curl -s https://example.com/", testClient, nil, false)
+	values := scopeValues(testFlow, "curl -s https://example.com/", testClient, nil)
 	expected := filter.Values{PID: testFlow.Tgid, UID: 1001, GID: 1002, Comm: "curl", Cmdline: "curl -s https://example.com/", Exe: "", IPProtocol: syscall.IPPROTO_TCP, Source: testClient, Destination: testFlow.OriginalDestination, TLS: filter.UnknownTLSState, TLSVersion: 0, ServerName: "", Protocols: nil}
 
 	if !reflect.DeepEqual(values, expected) {
@@ -66,10 +67,28 @@ func TestScopeValuesPositive(state *testing.T) {
 		state.Fatalf("Test of proxy.scopeValues failed, cannot find test binary, error: %s", err.Error())
 	}
 
-	values = scopeValues(testFlow, "", testClient, &scope, false)
+	values = scopeValues(testFlow, "", testClient, &scope)
 
 	if values.Exe != executable {
 		state.Errorf("Test of proxy.scopeValues function failed, exe should be %s, exe: %s", executable, values.Exe)
+		return
+	}
+
+	// a scope without proc.exe does not read it, the history reads it for a flow in scope only
+	uidScope, err := filter.Parse(`proc.uid == 1001`)
+
+	if err != nil {
+		state.Fatalf("Test of proxy.scopeValues failed, cannot parse filter, error: %s", err.Error())
+	}
+
+	unread := scopeValues(testFlow, "", testClient, &uidScope)
+	recorder := history.New(history.DefaultLimits(), nil)
+	recorded := recordedValues(unread, recorder)
+	unrecorded := recordedValues(unread, nil)
+	kept := recordedValues(filter.Values{PID: testFlow.Tgid, Exe: "/usr/bin/curl"}, recorder)
+
+	if (unread.Exe != "") || (recorded.Exe != executable) || (unrecorded.Exe != "") || (kept.Exe != "/usr/bin/curl") {
+		state.Errorf("Test of proxy.recordedValues function failed, exe should be read for the history only, exe: %q %q %q %q", unread.Exe, recorded.Exe, unrecorded.Exe, kept.Exe)
 		return
 	}
 
@@ -298,7 +317,7 @@ func TestUDPSessionsPositive(state *testing.T) {
 func TestTLSObserverPositive(state *testing.T) {
 	logs := &bytes.Buffer{}
 	logger := slog.New(slog.NewTextHandler(logs, nil))
-	observer := NewTLSObserver(testFlow, testClient, intercept.Flow{}, nil, nil)
+	observer := NewTLSObserver(intercept.FlowOf(1, 1, testFlow, testClient, filter.Values{}), nil, nil)
 
 	for range observerQueueLength {
 		observer.Observe(tlsrecord.ClientDirection, []byte("x"), logger)
@@ -318,9 +337,9 @@ func TestTLSObserverPositive(state *testing.T) {
 	}
 
 	// more bytes than the backlog may hold stop it at once, a flow that is not TLS stops it without a warning
-	big := NewTLSObserver(testFlow, testClient, intercept.Flow{}, nil, nil)
+	big := NewTLSObserver(intercept.FlowOf(1, 1, testFlow, testClient, filter.Values{}), nil, nil)
 	big.Observe(tlsrecord.ClientDirection, make([]byte, maxObserverBytes+1), logger)
-	plain := NewTLSObserver(testFlow, testClient, intercept.Flow{}, nil, nil)
+	plain := NewTLSObserver(intercept.FlowOf(1, 1, testFlow, testClient, filter.Values{}), nil, nil)
 	plain.Stop(nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	if big.Active() || (len(big.chunks) != 0) || plain.Active() {
@@ -329,7 +348,7 @@ func TestTLSObserverPositive(state *testing.T) {
 	}
 }
 
-// Test if proxy.statsText and proxy.tlsLinePrefix return with the expected output.
+// Test if proxy.statsText and proxy.printSession return with the expected output.
 func TestLinesPositive(state *testing.T) {
 	text := statsText(sendStats{sealed: 1, written: 2, identical: 3, changed: 4, dropped: 5, split: 6, forwarded: 7, passed: 8})
 
@@ -339,16 +358,23 @@ func TestLinesPositive(state *testing.T) {
 	}
 
 	prefixCases := []struct {
+		Layer   intercept.Layer
 		Session tlsrecord.Session
 		Prefix  string
 	}{
-		{Session: tlsrecord.Session{Version: tlsrecord.VersionTLS13, CipherSuite: 0x1302}, Prefix: "tls pid=" + strconv.FormatUint(uint64(testFlow.Tgid), 10) + " uid=1001 comm=curl 93.184.216.34:443 client=127.0.0.1:40000 version=TLS1.3 suite=TLS_AES_256_GCM_SHA384"},
-		{Session: tlsrecord.Session{Version: tlsrecord.VersionDTLS12, CipherSuite: 0xc02b}, Prefix: "dtls pid=" + strconv.FormatUint(uint64(testFlow.Tgid), 10) + " uid=1001 comm=curl 93.184.216.34:443 client=127.0.0.1:40000 version=DTLS1.2 suite=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256"},
+		{Layer: intercept.TLSLayer, Session: tlsrecord.Session{Version: tlsrecord.VersionTLS13, CipherSuite: 0x1302}, Prefix: "tls pid=" + strconv.FormatUint(uint64(testFlow.Tgid), 10) + " uid=1001 comm=curl 93.184.216.34:443 client=127.0.0.1:40000 version=TLS1.3 suite=TLS_AES_256_GCM_SHA384 sni=\"\" alpn=\"\"\n"},
+		{Layer: intercept.DTLSLayer, Session: tlsrecord.Session{Version: tlsrecord.VersionDTLS12, CipherSuite: 0xc02b}, Prefix: "dtls pid=" + strconv.FormatUint(uint64(testFlow.Tgid), 10) + " uid=1001 comm=curl 93.184.216.34:443 client=127.0.0.1:40000 version=DTLS1.2 suite=TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 sni=\"\" alpn=\"\"\n"},
 	}
 
 	for _, positive := range prefixCases {
-		if prefix := tlsLinePrefix(testFlow, testClient, positive.Session); prefix != positive.Prefix {
-			state.Errorf("Test of proxy.tlsLinePrefix function failed, prefix should be %q, prefix: %q", positive.Prefix, prefix)
+		flow := intercept.FlowOf(1, 1, testFlow, testClient, filter.Values{})
+		flow.Session = positive.Session
+		line := captureStdout(state, func() {
+			printSession(flow, positive.Layer)
+		})
+
+		if line != positive.Prefix {
+			state.Errorf("Test of proxy.printSession function failed, line should be %q, line: %q", positive.Prefix, line)
 			return
 		}
 	}

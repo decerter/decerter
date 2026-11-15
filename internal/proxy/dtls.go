@@ -8,10 +8,8 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
-	"time"
 
 	"github.com/decerter/decerter/internal/bpf"
-	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/output"
@@ -30,29 +28,19 @@ type dtlsItem struct {
 // without a pipeline it only observes: the relays send the datagrams on themselves and the application data is printed (-decrypt)
 // with a pipeline it intercepts: the sender of each direction takes its queue in order, runs the rules on the application data, seals the records again and writes the datagrams
 // isRaw is true once the record layer gave up, every datagram goes on as it came from then on
-// holdDeadline ends the wait for the secrets, graceDeadline lets held records go on raw before it
 // session is the udp session it belongs to, a record in the rules keeps it busy; recorder gets the observed application data, nil records nothing
 type dtlsInterception struct {
-	mutex            *sync.Mutex
-	wake             *sync.Cond
+	*secretsWait
 	session          *UDPSession
-	bpfFlow          redirect.Flow
 	flow             intercept.Flow
 	pipeline         *intercept.Pipeline
 	recorder         *history.History
-	secretsBpfMaps   map[bpf.BpfMapName]*ebpf.Map
 	conn             tlsrecord.DTLSConn
 	isRaw            bool
 	isSessionPrinted bool
 	isClosed         bool
 	queues           [2][]dtlsItem
 	queuedBytes      [2]int
-	isHolding        bool
-	holdDeadline     time.Time
-	graceDeadline    time.Time
-	pollPause        time.Duration
-	pollTimer        *time.Timer
-	isPollPending    bool
 	stats            [2]sendStats
 	senders          *sync.WaitGroup
 	logger           *slog.Logger
@@ -60,23 +48,28 @@ type dtlsInterception struct {
 
 // a DTLS session found by the ClientHello in the first datagram of a udp session, pipeline nil only observes it
 func newDTLSInterception(session *UDPSession, pipeline *intercept.Pipeline, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, recorder *history.History, logger *slog.Logger) (dtls *dtlsInterception) {
-	mutex := &sync.Mutex{}
 	dtls = &dtlsInterception{
-		mutex:          mutex,
-		wake:           sync.NewCond(mutex),
-		session:        session,
-		bpfFlow:        session.flow,
-		flow:           session.interceptFlow,
-		pipeline:       pipeline,
-		recorder:       recorder,
-		secretsBpfMaps: secretsBpfMaps,
-		conn:           tlsrecord.NewDTLS(maxHoldBytes, pipeline != nil),
-		pollPause:      interceptPollStart,
-		senders:        &sync.WaitGroup{},
-		logger:         logger,
+		session:  session,
+		flow:     session.interceptFlow,
+		pipeline: pipeline,
+		recorder: recorder,
+		conn:     tlsrecord.NewDTLS(maxHoldBytes, pipeline != nil),
+		senders:  &sync.WaitGroup{},
+		logger:   logger,
 	}
-	dtls.pollTimer = time.AfterFunc(time.Hour, dtls.poll)
-	dtls.pollTimer.Stop()
+	hooks := secretsHooks{
+		isDecrypting: func() (isDecrypting bool) {
+			isDecrypting = !dtls.isRaw
+			return
+		},
+		isOver: func() (isOver bool) {
+			isOver = dtls.isClosed
+			return
+		},
+		goOn:   dtls.goOn,
+		giveUp: dtls.giveUp,
+	}
+	dtls.secretsWait = newSecretsWait(&dtls.conn, secretsBpfMaps, hooks, logger)
 	return
 }
 
@@ -178,86 +171,12 @@ func (dtls *dtlsInterception) take(direction tlsrecord.Direction, datagram []byt
 	return
 }
 
-// keep the deadlines and the poll in step with the record layer
-func (dtls *dtlsInterception) watch() {
-	if dtls.isRaw || !dtls.conn.Waiting() {
-		dtls.isHolding = false
-		return
-	}
-
-	now := time.Now()
-
-	if dtls.holdDeadline.IsZero() {
-		dtls.holdDeadline = now.Add(holdTimeout)
-	}
-
-	holding := dtls.conn.Holding()
-
-	if holding && !dtls.isHolding {
-		dtls.graceDeadline = now.Add(interceptGrace)
-		dtls.pollPause = interceptPollStart
-		dtls.isPollPending = false
-	}
-
-	dtls.isHolding = holding
-
-	if !dtls.isPollPending {
-		dtls.isPollPending = true
-		dtls.pollTimer.Reset(dtls.pollPause)
-	}
-}
-
-// secrets poll, runs on its own timer while a record waits for them
-func (dtls *dtlsInterception) poll() {
-	dtls.mutex.Lock()
-	defer dtls.mutex.Unlock()
-	dtls.isPollPending = false
-
-	if dtls.isClosed || dtls.isRaw {
-		return
-	}
-
-	now := time.Now()
-	dtls.lookup(now.After(dtls.holdDeadline))
-
-	// nothing was changed without the secrets, so the held records can go on as they came
-	if !dtls.isRaw && dtls.conn.Holding() && now.After(dtls.graceDeadline) {
-		dtls.logger.Debug("Dtls secrets are late, held records go on raw")
-		dtls.pushRecords(dtls.conn.Release())
-	}
-
-	dtls.pollPause = min(2*dtls.pollPause, interceptPollMax)
-	dtls.watch()
-	dtls.wake.Broadcast()
-}
-
-// ask secrets_map for the session and let the held records go on if they are there, isLast makes missing secrets the end of the decryption
-func (dtls *dtlsInterception) lookup(isLast bool) {
-	sessionSecrets, found, lookupErr := secretsByRandom(dtls.conn.Session().ClientRandom, dtls.secretsBpfMaps)
-
-	if lookupErr != nil {
-		dtls.giveUp(lookupErr)
-		return
-	}
-
-	if !found {
-		if isLast {
-			dtls.giveUp(ErrNoSecrets)
-		}
-
-		return
-	}
-
-	records, secretsErr := dtls.conn.SetSecrets(sessionSecrets)
-
+// observe: records the secrets let go are printed; intercept: they go to the queues
+func (dtls *dtlsInterception) goOn(records []tlsrecord.Record) {
 	if dtls.pipeline == nil {
 		dtls.show(records)
 	} else {
 		dtls.pushRecords(records)
-	}
-
-	if secretsErr != nil {
-		dtls.giveUp(secretsErr)
 	}
 }
 
@@ -284,14 +203,15 @@ func (dtls *dtlsInterception) show(records []tlsrecord.Record) {
 			continue
 		}
 
-		if !dtls.isSessionPrinted {
-			dtls.isSessionPrinted = true
-			printSession(dtls.bpfFlow, dtls.flow.Client, session)
-		}
-
-		printRecord(dtls.bpfFlow, dtls.flow.Client, session, record)
 		flow := dtls.flow
 		flow.Session = session
+
+		if !dtls.isSessionPrinted {
+			dtls.isSessionPrinted = true
+			printSession(flow, intercept.DTLSLayer)
+		}
+
+		printRecord(flow, intercept.DTLSLayer, record)
 		dtls.recorder.Observe(flow, record.Direction, intercept.DTLSLayer, record.Payload)
 	}
 }

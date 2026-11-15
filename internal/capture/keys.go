@@ -64,7 +64,7 @@ type flow struct {
 	conn            recordLayer
 	isDTLS          bool
 	isDescribed     bool
-	note            string
+	note            packetNote
 	hasClientRandom bool
 	clientRandom    [32]byte
 	serverName      string
@@ -153,7 +153,7 @@ func (recorder *recorder) emit(cookie uint64, packet capturebpf.Packet, decided 
 			conn:            nil,
 			isDTLS:          false,
 			isDescribed:     false,
-			note:            "",
+			note:            packetNote{},
 			hasClientRandom: false,
 			clientRandom:    [32]byte{},
 			serverName:      "",

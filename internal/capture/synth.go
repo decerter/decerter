@@ -4,8 +4,12 @@ package capture
 
 import (
 	"encoding/binary"
+	"iter"
 	"net/netip"
 	"syscall"
+
+	"github.com/decerter/decerter/internal/pcapng"
+	"github.com/decerter/decerter/internal/tlsrecord"
 )
 
 // header fields of the packets the writer reads and builds (RFC 791, RFC 8200, RFC 9293, RFC 768)
@@ -188,6 +192,67 @@ func segmentLength(address netip.Addr) (length int) {
 
 	if address.Is4() {
 		length = ipv4SegmentLength
+	}
+
+	return
+}
+
+// data in the payloads of synthesized TCP packets towards address, at most the MSS each; the flags are ACK, the last one has PSH too
+func segments(address netip.Addr, data []byte) (payloads iter.Seq2[uint8, []byte]) {
+	maxLength := segmentLength(address)
+	payloads = func(yield func(flags uint8, payload []byte) bool) {
+		for len(data) > 0 {
+			length := min(len(data), maxLength)
+			flags := ACKFlag
+
+			if length == len(data) {
+				flags |= PSHFlag
+			}
+
+			if !yield(flags, data[:length]) {
+				return
+			}
+
+			data = data[length:]
+		}
+	}
+	return
+}
+
+// one synthesized TCP packet between the endpoints of a connection (by tlsrecord.Direction), appended to buffer: with ACK it acknowledges the
+// sequence of the other direction, the sequence of its direction moves past its payload and one more for a SYN or a FIN
+func synthesizeSegment(buffer []byte, endpoints [2]Endpoint, sequence *[2]uint32, direction tlsrecord.Direction, flags uint8, payload []byte, timestamp uint64) (packet pcapng.Packet) {
+	other := otherDirection(direction)
+	acknowledgment := uint32(0)
+
+	if flags&ACKFlag != 0 {
+		acknowledgment = sequence[other]
+	}
+
+	data := TCPPacket(buffer, endpoints[direction], endpoints[other], sequence[direction], acknowledgment, flags, payload)
+	sequence[direction] += uint32(len(payload))
+
+	// SYN and FIN take a sequence number each
+	if flags&(SYNFlag|FINFlag) != 0 {
+		sequence[direction]++
+	}
+
+	packet = synthesizedPacket(direction, data, timestamp)
+	return
+}
+
+// a synthesized packet of a direction, without comment: the client's go out, the server's come in
+func synthesizedPacket(direction tlsrecord.Direction, data []byte, timestamp uint64) (packet pcapng.Packet) {
+	packet = pcapng.Packet{
+		Timestamp:      timestamp,
+		Direction:      pcapng.OutboundDirection,
+		OriginalLength: uint32(len(data)),
+		Data:           data,
+		Comment:        "",
+	}
+
+	if direction == tlsrecord.ServerDirection {
+		packet.Direction = pcapng.InboundDirection
 	}
 
 	return

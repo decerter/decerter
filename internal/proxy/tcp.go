@@ -163,7 +163,7 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 
 	// the scope is decided before a byte goes on; a filter with a ClientHello field waits for the first client bytes, or the first server bytes of a protocol where the server speaks first
 	// the history wants to know of every flow in scope whether it is TLS, so it waits for them too
-	values := scopeValues(flow, cmdline, clientAddressPort, scope, recorder != nil)
+	values := scopeValues(flow, cmdline, clientAddressPort, scope)
 	result := isInScope(scope, values)
 	var opening []TLSChunk
 	var clientRandom [32]byte
@@ -186,6 +186,7 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 		return
 	}
 
+	values = recordedValues(values, recorder)
 	flowID := recorder.OpenFlow(cookie, values, clientRandom)
 	recorder.SetUpstream(flowID, upstreamCookie)
 	interceptFlow := intercept.FlowOf(flowID, cookie, flow, clientAddressPort, values)
@@ -206,7 +207,7 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 	observerGroup := sync.WaitGroup{}
 
 	if secretsBpfMaps != nil {
-		observer = NewTLSObserver(flow, clientAddressPort, interceptFlow, recorder, secretsBpfMaps)
+		observer = NewTLSObserver(interceptFlow, recorder, secretsBpfMaps)
 		observer.http = flowHTTP
 
 		// tls observer of the flow, decrypts copies of the relayed bytes

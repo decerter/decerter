@@ -13,6 +13,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/decerter/decerter/internal/platform"
 )
 
 // the libssl sonames decerter looks for by name, OpenSSL 3.x and 4.x; libcrypto has the same suffix
@@ -112,15 +114,8 @@ func LibcryptoPath(libsslPath string) (libcryptoPath string) {
 
 // the libssl files of OpenSSL 3 and newer a process maps executable, from the text of /proc/<pid>/maps, as the process sees them (its mount namespace)
 func MappedLibssl(maps string) (paths []string) {
-	for line := range strings.Lines(maps) {
-		fields := strings.Fields(line)
-
-		if (len(fields) < 6) || (len(fields[1]) < 3) || (fields[1][2] != 'x') || !strings.HasPrefix(fields[5], "/") || strings.HasSuffix(strings.TrimSpace(line), "(deleted)") {
-			continue
-		}
-
-		path := strings.Join(fields[5:], " ")
-		match := libsslRegexp.FindStringSubmatch(filepath.Base(path))
+	for _, mapping := range platform.ExecutableMappings(maps) {
+		match := libsslRegexp.FindStringSubmatch(filepath.Base(mapping.Path))
 
 		if match == nil {
 			continue
@@ -128,11 +123,11 @@ func MappedLibssl(maps string) (paths []string) {
 
 		major, convertErr := strconv.Atoi(match[1])
 
-		if (convertErr != nil) || (major < firstMajor) || slices.Contains(paths, path) {
+		if (convertErr != nil) || (major < firstMajor) || slices.Contains(paths, mapping.Path) {
 			continue
 		}
 
-		paths = append(paths, path)
+		paths = append(paths, mapping.Path)
 	}
 
 	return

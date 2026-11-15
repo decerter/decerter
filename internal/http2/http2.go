@@ -316,7 +316,7 @@ func (conn *Conn) headers(peer Peer, block *headerBlock, end int64) (events []Ev
 		message.state = bodyState
 		current.hasResponse = current.hasResponse || (side == ResponseSide)
 		contentType, _ := head.Get("content-type")
-		message.isGRPC = strings.HasPrefix(strings.ToLower(contentType), grpcContentType)
+		message.isGRPC = isGRPC(contentType)
 
 		if block.endStream {
 			events = append(events, conn.end(current, side, base, true, nil, "")...)
@@ -685,5 +685,14 @@ func joinNotes(first string, second string) (note string) {
 		note = first + "; " + second
 	}
 
+	return
+}
+
+// the media type is application/grpc or one of its subtypes (application/grpc+proto), parameters may follow; grpc-web (application/grpc-web,
+// application/grpc-web-text in base64) has a framing of its own and is not split
+func isGRPC(contentType string) (isGRPC bool) {
+	rest, isPrefix := strings.CutPrefix(strings.ToLower(strings.TrimSpace(contentType)), grpcContentType)
+	rest = strings.TrimLeft(rest, " \t")
+	isGRPC = isPrefix && ((rest == "") || (rest[0] == '+') || (rest[0] == ';'))
 	return
 }

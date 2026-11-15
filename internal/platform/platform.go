@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -110,6 +111,32 @@ func CreateDataDirectory(directory string) (err error) {
 	if err != nil {
 		err = fmt.Errorf("%w: %s: %w", ErrDataDirectory, directory, err)
 		return
+	}
+
+	return
+}
+
+// the executable file mappings of a /proc/<pid>/maps text: start-end perms offset dev inode path, r-xp only, each once; a deleted file (an app
+// updated while it runs) is left out, a uprobe can't reach it by its path
+func ExecutableMappings(maps string) (mappings []Mapping) {
+	for line := range strings.Lines(maps) {
+		fields := strings.Fields(line)
+
+		if (len(fields) < 6) || (len(fields[1]) < 3) || (fields[1][2] != 'x') || !strings.HasPrefix(fields[5], "/") || strings.HasSuffix(strings.TrimSpace(line), "(deleted)") {
+			continue
+		}
+
+		offset, parseErr := strconv.ParseUint(fields[2], 16, 64)
+
+		if parseErr != nil {
+			continue
+		}
+
+		mapping := Mapping{Path: strings.Join(fields[5:], " "), Offset: offset}
+
+		if !slices.Contains(mappings, mapping) {
+			mappings = append(mappings, mapping)
+		}
 	}
 
 	return

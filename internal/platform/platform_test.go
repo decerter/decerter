@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 
 	"github.com/decerter/decerter/internal/platform"
@@ -161,5 +162,33 @@ func TestCreateDataDirectoryNegative(state *testing.T) {
 	if !errors.Is(err, platform.ErrDataDirectory) {
 		state.Errorf("Test of platform.CreateDataDirectory function failed, error should be %v, error: %v", platform.ErrDataDirectory, err)
 		return
+	}
+}
+
+// Test if platform.ExecutableMappings returns with the expected output: r-xp file mappings once each with their offset, a path with a space, no
+// data, anonymous or deleted mapping.
+func TestExecutableMappingsPositive(state *testing.T) {
+	maps := `5c4d1e000000-5c4d1e002000 r--p 00000000 fe:05 1234                      /system/bin/app_process64
+79af22718000-79af29d68000 r-xp 008cc000 fe:2e 32818                      /data/app/~~a==/com.google.android.trichromelibrary_636771938-b==/TrichromeLibrary.apk
+79af29d68000-79af29d70000 r-xp 008cc000 fe:2e 32818                      /data/app/~~a==/com.google.android.trichromelibrary_636771938-b==/TrichromeLibrary.apk
+79af73cca000-79af73ccb000 r-xp 00004000 fe:05 2426                       /system/lib64/libwebviewchromium_loader.so
+79af80000000-79af80001000 r-xp 00000000 00:00 0                          [vdso]
+79af80001000-79af80002000 r-xp 00000000 00:00 0
+79af80002000-79af80003000 r-xp 00001000 fe:2e 999                        /data/app/~~c==/io.decerter-d==/base.apk (deleted)
+79af80003000-79af80004000 r-xp 00002000 fe:2e 998                        /data/local/tmp/my lib/libcronet.126.0.6452.4.so
+79af80004000-79af80005000 rw-p 00002000 fe:2e 998                        /data/local/tmp/my lib/libcronet.126.0.6452.4.so
+`
+	expected := []platform.Mapping{
+		{Path: "/data/app/~~a==/com.google.android.trichromelibrary_636771938-b==/TrichromeLibrary.apk", Offset: 0x8cc000},
+		{Path: "/system/lib64/libwebviewchromium_loader.so", Offset: 0x4000},
+		{Path: "/data/local/tmp/my lib/libcronet.126.0.6452.4.so", Offset: 0x2000},
+	}
+
+	if mappings := platform.ExecutableMappings(maps); !slices.Equal(mappings, expected) {
+		state.Errorf("Test of platform.ExecutableMappings function failed, mappings should be %+v, mappings: %+v", expected, mappings)
+	}
+
+	if mappings := platform.ExecutableMappings("garbage\n\n1-2 r-xp zz 00:00 0 /x\n"); len(mappings) != 0 {
+		state.Errorf("Test of platform.ExecutableMappings function failed, broken lines should give none, mappings: %+v", mappings)
 	}
 }

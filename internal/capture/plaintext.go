@@ -23,6 +23,8 @@ const (
 	maxDatagramLength uint32 = 65535
 	// every comment of a synthesized packet starts with this
 	notePrefix string = "decerter: "
+	// the notes one synthesized packet carries, the notes past it are counted (packetNote)
+	maxNoteBytes int = 4096
 	// the comment of a hole: how many bytes of which side
 	missingFormat string = "%d bytes the %s sent were not captured"
 )
@@ -53,7 +55,7 @@ type connection struct {
 	isClosed      bool
 	hasGap        bool
 	isDescribed   bool
-	note          string
+	note          packetNote
 	missing       [2]uint64
 	lastTimestamp uint64
 	pending       [2][]byte
@@ -72,7 +74,7 @@ func newConnection(client Endpoint, server Endpoint) (newConnection *connection)
 		isClosed:      false,
 		hasGap:        false,
 		isDescribed:   false,
-		note:          "",
+		note:          packetNote{},
 		missing:       [2]uint64{},
 		lastTimestamp: 0,
 		pending:       [2][]byte{},
@@ -93,29 +95,20 @@ func (connection *connection) start(direction tlsrecord.Direction, next uint32) 
 	connection.sequence[direction] = next - 1
 }
 
-func (connection *connection) addNote(text string) {
-	if connection.note != "" {
-		connection.note += "; "
-	}
-
-	connection.note += text
-}
-
 func (connection *connection) hasNote() (hasNote bool) {
-	hasNote = (connection.note != "") || (connection.missing != [2]uint64{})
+	hasNote = !connection.note.isEmpty() || (connection.missing != [2]uint64{})
 	return
 }
 
 // the comment of the next packet, with one line for all the holes since the last one: with a small snaplen every packet is a hole
-func (connection *connection) takeNote() (note string) {
+func (connection *connection) takeNote() (comment string) {
 	for direction, missing := range connection.missing {
 		if missing > 0 {
-			connection.addNote(fmt.Sprintf(missingFormat, missing, directionName(tlsrecord.Direction(direction))))
+			connection.note.add(fmt.Sprintf(missingFormat, missing, directionName(tlsrecord.Direction(direction))))
 		}
 	}
 
-	note = connection.note
-	connection.note = ""
+	comment = connection.note.take()
 	connection.missing = [2]uint64{}
 	return
 }
@@ -431,7 +424,7 @@ func (recorder *recorder) writeRecords(currentFlow *flow, records []tlsrecord.Re
 
 		if !connection.isDescribed {
 			connection.isDescribed = true
-			connection.addNote(describe(currentFlow.conn.Session()))
+			connection.note.add(describe(currentFlow.conn.Session()))
 		}
 
 		err = recorder.writeData(connection, record.Direction, record.Payload, connection.timestampAt(record.Direction, connection.read[record.Direction]))
@@ -508,10 +501,10 @@ func (recorder *recorder) abandon(cookie uint64, currentFlow *flow, reason strin
 			return heldCookie == cookie
 		})
 		recorder.keylessSessions++
-		connection.addNote("tls session not decrypted: " + reason)
+		connection.note.add("tls session not decrypted: " + reason)
 		recorder.logger.Warn("Could not decrypt tls session, the flow is written encrypted", "reason", reason, "cookie", cookie, "serverName", currentFlow.serverName)
 	} else {
-		connection.addNote("tls decryption stopped, the rest of the connection is written encrypted: " + reason)
+		connection.note.add("tls decryption stopped, the rest of the connection is written encrypted: " + reason)
 		recorder.logger.Warn("Could not decrypt tls session further, the rest of the flow is written encrypted", "reason", reason, "cookie", cookie, "serverName", currentFlow.serverName)
 	}
 
@@ -777,23 +770,12 @@ func (recorder *recorder) account(currentFlow *flow) {
 
 // write bytes of a direction as synthesized packets of at most the MSS, the last one has PSH
 func (recorder *recorder) writeData(connection *connection, direction tlsrecord.Direction, data []byte, timestamp uint64) (err error) {
-	maxLength := segmentLength(connection.endpoints[direction].Address)
-
-	for len(data) > 0 {
-		length := min(len(data), maxLength)
-		flags := ACKFlag
-
-		if length == len(data) {
-			flags |= PSHFlag
-		}
-
-		err = recorder.writeSegment(connection, direction, flags, data[:length], timestamp)
+	for flags, payload := range segments(connection.endpoints[direction].Address, data) {
+		err = recorder.writeSegment(connection, direction, flags, payload, timestamp)
 
 		if err != nil {
 			return
 		}
-
-		data = data[length:]
 	}
 
 	return
@@ -801,40 +783,16 @@ func (recorder *recorder) writeData(connection *connection, direction tlsrecord.
 
 // write one synthesized packet of a connection: it acknowledges everything the other direction has written so far and carries the comment that waits
 func (recorder *recorder) writeSegment(connection *connection, direction tlsrecord.Direction, flags uint8, payload []byte, timestamp uint64) (err error) {
-	other := otherDirection(direction)
-	acknowledgment := uint32(0)
-
 	// nothing to acknowledge before the other side is known
-	if !connection.hasSYN[other] {
+	if !connection.hasSYN[otherDirection(direction)] {
 		flags &^= ACKFlag
 	}
 
-	if flags&ACKFlag != 0 {
-		acknowledgment = connection.sequence[other]
-	}
-
-	recorder.buffer = TCPPacket(recorder.buffer[:0], connection.endpoints[direction], connection.endpoints[other], connection.sequence[direction], acknowledgment, flags, payload)
-	packet := pcapng.Packet{
-		Timestamp:      timestamp,
-		Direction:      pcapng.OutboundDirection,
-		OriginalLength: uint32(len(recorder.buffer)),
-		Data:           recorder.buffer,
-		Comment:        "",
-	}
-
-	if direction == tlsrecord.ServerDirection {
-		packet.Direction = pcapng.InboundDirection
-	}
+	packet := synthesizeSegment(recorder.buffer[:0], connection.endpoints, &connection.sequence, direction, flags, payload, timestamp)
+	recorder.buffer = packet.Data
 
 	if connection.hasNote() {
-		packet.Comment = notePrefix + connection.takeNote()
-	}
-
-	connection.sequence[direction] += uint32(len(payload))
-
-	// SYN and FIN take a sequence number each
-	if flags&(SYNFlag|FINFlag) != 0 {
-		connection.sequence[direction]++
+		packet.Comment = connection.takeNote()
 	}
 
 	err = recorder.write(packet)
@@ -861,7 +819,7 @@ func (recorder *recorder) synthesizeUDP(cookie uint64, currentFlow *flow, packet
 	case decryptedFlowState:
 		err = recorder.decryptDatagram(cookie, currentFlow, pcapPacket)
 	default:
-		err = recorder.writeDatagram(pcapPacket, packet.Data, takeFlowNote(currentFlow))
+		err = recorder.writeDatagram(pcapPacket, packet.Data, currentFlow.note.take())
 	}
 
 	return
@@ -954,10 +912,10 @@ func (recorder *recorder) abandonDatagrams(cookie uint64, currentFlow *flow, rea
 
 	if currentFlow.state == heldFlowState {
 		recorder.keylessSessions++
-		addFlowNote(currentFlow, "dtls session not decrypted: "+reason)
+		currentFlow.note.add("dtls session not decrypted: " + reason)
 		recorder.logger.Warn("Could not decrypt dtls session, the flow is written encrypted", "reason", reason, "cookie", cookie)
 	} else {
-		addFlowNote(currentFlow, "dtls decryption stopped, the rest of the flow is written encrypted: "+reason)
+		currentFlow.note.add("dtls decryption stopped, the rest of the flow is written encrypted: " + reason)
 		recorder.logger.Warn("Could not decrypt dtls session further, the rest of the flow is written encrypted", "reason", reason, "cookie", cookie)
 	}
 
@@ -966,7 +924,7 @@ func (recorder *recorder) abandonDatagrams(cookie uint64, currentFlow *flow, rea
 	currentFlow.conn = nil
 
 	for _, heldPacket := range held {
-		err = recorder.writeDatagram(heldPacket, heldPacket.Data, takeFlowNote(currentFlow))
+		err = recorder.writeDatagram(heldPacket, heldPacket.Data, currentFlow.note.take())
 
 		if err != nil {
 			return
@@ -1012,14 +970,14 @@ func (recorder *recorder) decryptDatagram(cookie uint64, currentFlow *flow, pcap
 
 		if !currentFlow.isDescribed {
 			currentFlow.isDescribed = true
-			addFlowNote(currentFlow, describe(currentFlow.conn.Session()))
+			currentFlow.note.add(describe(currentFlow.conn.Session()))
 		}
 
 		recorder.buffer = UDPPacket(recorder.buffer[:0], header.source, header.destination, record.Payload)
 		packet := pcapPacket
 		packet.OriginalLength = uint32(len(recorder.buffer))
 		packet.Data = recorder.buffer
-		packet.Comment = takeFlowNote(currentFlow)
+		packet.Comment = currentFlow.note.take()
 		err = recorder.write(packet)
 
 		if err != nil {
@@ -1035,11 +993,11 @@ func (recorder *recorder) decryptDatagram(cookie uint64, currentFlow *flow, pcap
 			return
 		}
 
-		err = recorder.writeDatagram(pcapPacket, pcapPacket.Data, takeFlowNote(currentFlow))
+		err = recorder.writeDatagram(pcapPacket, pcapPacket.Data, currentFlow.note.take())
 	// a record an endpoint drops too (a datagram that does not frame, another epoch, a failed MAC): the datagram is written as it came
 	case droppedRecords(currentFlow.conn, direction) != dropped:
-		addFlowNote(currentFlow, droppedRecordNote)
-		err = recorder.writeDatagram(pcapPacket, pcapPacket.Data, takeFlowNote(currentFlow))
+		currentFlow.note.add(droppedRecordNote)
+		err = recorder.writeDatagram(pcapPacket, pcapPacket.Data, currentFlow.note.take())
 	default:
 	}
 
@@ -1070,24 +1028,5 @@ func (recorder *recorder) writeDatagram(pcapPacket pcapng.Packet, data []byte, c
 	pcapPacket.Data = recorder.buffer
 	pcapPacket.Comment = comment
 	err = recorder.write(pcapPacket)
-	return
-}
-
-func addFlowNote(currentFlow *flow, text string) {
-	if currentFlow.note != "" {
-		currentFlow.note += "; "
-	}
-
-	currentFlow.note += text
-}
-
-// the comment of the next packet of a DTLS flow, empty when there is none
-func takeFlowNote(currentFlow *flow) (comment string) {
-	if currentFlow.note == "" {
-		return
-	}
-
-	comment = notePrefix + currentFlow.note
-	currentFlow.note = ""
 	return
 }

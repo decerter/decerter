@@ -246,16 +246,7 @@ func UpdateRouteMap(routes map[netip.Prefix]bool, bpfMaps map[bpf.BpfMapName]*eb
 		value uint8
 	)
 
-	wanted := map[bpfPrefixKey]uint8{}
-
-	for prefix, routable := range routes {
-		wanted[prefixToKey(prefix)] = 0
-
-		if routable {
-			wanted[prefixToKey(prefix)] = 1
-		}
-	}
-
+	wanted := routeValues(routes)
 	staleKeys := []bpfPrefixKey{}
 	iterator := bpfMaps[RouteMap].Iterate()
 
@@ -303,6 +294,23 @@ func UpdateRouteMap(routes map[netip.Prefix]bool, bpfMaps map[bpf.BpfMapName]*eb
 	}
 
 	err = writePrefixLengths(bpfMaps[PrefixLengthsMap], routeLengths, addPrefixLengths(bpfPrefixLengths{}, slices.Collect(maps.Keys(wanted))))
+	return
+}
+
+// the route_map value of each prefix: 1 routable, 0 not
+func routeValues(routes map[netip.Prefix]bool) (values map[bpfPrefixKey]uint8) {
+	values = make(map[bpfPrefixKey]uint8, len(routes))
+
+	for prefix, routable := range routes {
+		var value uint8
+
+		if routable {
+			value = 1
+		}
+
+		values[prefixToKey(prefix)] = value
+	}
+
 	return
 }
 

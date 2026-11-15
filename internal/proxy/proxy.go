@@ -17,6 +17,7 @@ import (
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/bpf/secrets"
 	"github.com/decerter/decerter/internal/filter"
+	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/output"
 	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
@@ -35,8 +36,8 @@ func processCmdline(tgid uint32) (cmdline string, err error) {
 }
 
 // what the scope filter knows of a flow when the proxy takes it: the flow of the kernel, the client endpoint (the local end of the app's socket) and /proc; the ClientHello comes later
-// cmdline is empty when it could not be read, exe is only read when the filter asks for it or the flow goes into the API's history (isRecorded)
-func scopeValues(flow redirect.Flow, cmdline string, client netip.AddrPort, scope *filter.Filter, isRecorded bool) (values filter.Values) {
+// cmdline is empty when it could not be read, exe is only read when the filter asks for it; recordedValues adds it for a flow that goes into the history
+func scopeValues(flow redirect.Flow, cmdline string, client netip.AddrPort, scope *filter.Filter) (values filter.Values) {
 	values = filter.Values{
 		PID:         flow.Tgid,
 		UID:         flow.UID,
@@ -54,12 +55,31 @@ func scopeValues(flow redirect.Flow, cmdline string, client netip.AddrPort, scop
 		HTTP:        nil,
 	}
 
-	if isRecorded || ((scope != nil) && scope.Uses(filter.ExeField)) {
-		exe, exeErr := filter.ReadExe(flow.Tgid)
+	if (scope != nil) && scope.Uses(filter.ExeField) {
+		values = withExe(values)
+	}
 
-		if exeErr == nil {
-			values.Exe = exe
-		}
+	return
+}
+
+// the values of a flow in scope as the API's history keeps them, with the exe the scope did not need
+func recordedValues(values filter.Values, recorder *history.History) (recorded filter.Values) {
+	recorded = values
+
+	if (recorder != nil) && (recorded.Exe == "") {
+		recorded = withExe(recorded)
+	}
+
+	return
+}
+
+// the values with the path of the process's executable, unchanged when it can't be read (the process is gone)
+func withExe(values filter.Values) (exeValues filter.Values) {
+	exeValues = values
+	exe, exeErr := filter.ReadExe(values.PID)
+
+	if exeErr == nil {
+		exeValues.Exe = exe
 	}
 
 	return

@@ -52,6 +52,10 @@ func TestMatchRulePositive(state *testing.T) {
 		// a regex with a group in the template
 		{Spec: intercept.MatchSpec{Directions: intercept.UpDirections, FindType: intercept.RegexValueType, Find: `GET /(\S*) `, Replace: "GET /x/$1 "}, Direction: tlsrecord.ClientDirection, Layer: intercept.TCPLayer, Plain: []byte("GET /a HTTP/1.1\r\n"), IsMatch: true, Expected: []byte("GET /x/a HTTP/1.1\r\n")},
 		{Spec: intercept.MatchSpec{FindType: intercept.RegexValueType, Find: `(?i)host: (\S+)`, Replace: "Host: ${1}.test"}, Direction: tlsrecord.ClientDirection, Layer: intercept.TLSLayer, Plain: request, IsMatch: true, Expected: []byte("GET / HTTP/1.1\r\nHost: example.com.test\r\n\r\n")},
+		// a pattern that matches the empty string only at some places replaces only its matches that are not empty
+		{Spec: intercept.MatchSpec{FindType: intercept.RegexValueType, Find: `\b`, Replace: "|"}, Direction: tlsrecord.ClientDirection, Layer: intercept.TCPLayer, Plain: []byte("foo bar"), IsMatch: true, Expected: []byte("foo bar")},
+		{Spec: intercept.MatchSpec{FindType: intercept.RegexValueType, Find: `x*\b`, Replace: "X"}, Direction: tlsrecord.ClientDirection, Layer: intercept.TCPLayer, Plain: []byte("xx yy x"), IsMatch: true, Expected: []byte("X yy X")},
+		{Spec: intercept.MatchSpec{FindType: intercept.RegexValueType, Find: `\b(?:foo)?`, Replace: "[$0]"}, Direction: tlsrecord.ClientDirection, Layer: intercept.TCPLayer, Plain: []byte("foo bar foo"), IsMatch: true, Expected: []byte("[foo] bar [foo]")},
 		// nothing found: the message goes on as it is
 		{Spec: intercept.MatchSpec{Find: "POST", Replace: "PUT"}, Direction: tlsrecord.ClientDirection, Layer: intercept.TLSLayer, Plain: request, IsMatch: true, Expected: request},
 		// the direction, the layer and the filter decide the match, the session gives the TLS fields

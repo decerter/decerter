@@ -6,10 +6,8 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"net/netip"
 	"time"
 
-	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/output"
 	"github.com/decerter/decerter/internal/tlsrecord"
@@ -160,14 +158,15 @@ func stopOrPrint(conn *tlsrecord.Conn, observer *TLSObserver, records []tlsrecor
 			continue
 		}
 
-		if !*isSessionPrinted {
-			*isSessionPrinted = true
-			printSession(observer.flow, observer.client, session)
-		}
-
-		printRecord(observer.flow, observer.client, session, record)
 		flow := observer.interceptFlow
 		flow.Session = session
+
+		if !*isSessionPrinted {
+			*isSessionPrinted = true
+			printSession(flow, intercept.TLSLayer)
+		}
+
+		printRecord(flow, intercept.TLSLayer, record)
 		observer.recorder.Observe(flow, record.Direction, intercept.TLSLayer, record.Payload)
 
 		// the exchanges of what went on, the observer never keeps anything back
@@ -186,28 +185,16 @@ func stopOrPrint(conn *tlsrecord.Conn, observer *TLSObserver, records []tlsrecor
 	return
 }
 
-// the start of every TLS or DTLS line, the same fields as the flow line of printFlow
-func tlsLinePrefix(flow redirect.Flow, client netip.AddrPort, session tlsrecord.Session) (prefix string) {
-	layer := intercept.TLSLayer
-
-	if session.Version == tlsrecord.VersionDTLS12 {
-		layer = intercept.DTLSLayer
-	}
-
-	prefix = fmt.Sprintf("%s pid=%d uid=%d comm=%s %s client=%s version=%s suite=%s", layer, flow.Tgid, flow.UID, output.EscapeField(flow.Comm), flow.OriginalDestination, client, tlsrecord.VersionName(session.Version), tlsrecord.CipherSuiteName(session.CipherSuite))
-	return
-}
-
-// one line per decrypted session in front of its first record, sni and alpn come from the peers and are quoted
-func printSession(flow redirect.Flow, client netip.AddrPort, session tlsrecord.Session) {
+// one line per decrypted session in front of its first record, sni and alpn come from the peers and are quoted; flow has the session
+func printSession(flow intercept.Flow, layer intercept.Layer) {
 	// stdout is the output of the tool as in printFlow
-	_, _ = fmt.Fprintf(output.Stdout, "%s sni=%q alpn=%q\n", tlsLinePrefix(flow, client, session), session.ServerName, session.Protocol)
+	_, _ = fmt.Fprintf(output.Stdout, "%s sni=%q alpn=%q\n", intercept.LinePrefix(flow, layer), flow.Session.ServerName, flow.Session.Protocol)
 }
 
 // one header line per decrypted application data record and its plaintext below, in one write so the records of other flows don't get in between
-func printRecord(flow redirect.Flow, client netip.AddrPort, session tlsrecord.Session, record tlsrecord.Record) {
+func printRecord(flow intercept.Flow, layer intercept.Layer, record tlsrecord.Record) {
 	shown := min(len(record.Payload), intercept.MaxPrintBytes)
-	text := fmt.Sprintf("%s direction=%s sequence=%d length=%d shown=%d\n", tlsLinePrefix(flow, client, session), intercept.DirectionName(record.Direction), record.Sequence, len(record.Payload), shown) + intercept.Escape(record.Payload[:shown])
+	text := fmt.Sprintf("%s direction=%s sequence=%d length=%d shown=%d\n", intercept.LinePrefix(flow, layer), intercept.DirectionName(record.Direction), record.Sequence, len(record.Payload), shown) + intercept.Escape(record.Payload[:shown])
 	// stdout is the output of the tool as in printFlow
 	_, _ = output.Stdout.WriteString(text)
 }

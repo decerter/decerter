@@ -8,7 +8,9 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -311,6 +313,42 @@ func TestConnBytesPositive(state *testing.T) {
 
 	if err := checkCoverage(events, int64(len(stream))); err != nil {
 		state.Errorf("Test of http1.Conn failed, byte by byte should cover every byte, error: %s", err.Error())
+	}
+}
+
+// Test if http1.Conn returns with the expected output for pipelined messages with large bodies fed at once: a head copies only its own bytes, not the
+// bodies and messages behind it, and a trailer section after a chunked body is read up to its empty line.
+func TestConnHeadCopyPositive(state *testing.T) {
+	body := strings.Repeat("b", 4<<20)
+	stream := "POST /a HTTP/1.1\r\nContent-Length: " + strconv.Itoa(len(body)) + "\r\n\r\n" + body +
+		"POST /b HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n" + fmt.Sprintf("%x\r\n", len(body)) + body + "\r\n0\r\nT: 1\r\nU: 2\r\n\r\n" +
+		"GET /c HTTP/1.1\r\n\r\n"
+	conn := http1.New()
+	data := []byte(stream)
+	before := runtime.MemStats{}
+	after := runtime.MemStats{}
+	runtime.ReadMemStats(&before)
+	events := conn.Feed(http1.RequestSide, data)
+	runtime.ReadMemStats(&after)
+	lines := summary(events)
+	heads, ends := 0, 0
+
+	for _, event := range events {
+		switch event.Type {
+		case http1.HeadEventType:
+			heads++
+		case http1.EndEventType:
+			ends++
+		}
+	}
+
+	// the stream is 8 MiB and comes in as one slice, every copy of what follows a head would be megabytes
+	if allocated := after.TotalAlloc - before.TotalAlloc; (allocated > 1<<20) || (heads != 3) || (ends != 3) || !slices.ContainsFunc(lines, func(line string) bool { return strings.Contains(line, "trailers=[{T 1} {U 2}]") }) {
+		state.Errorf("Test of http1.Conn failed, the heads should copy only themselves, allocated: %d, heads: %d, ends: %d", allocated, heads, ends)
+	}
+
+	if err := checkCoverage(events, int64(len(stream))); err != nil {
+		state.Errorf("Test of http1.Conn failed, every byte should be covered, error: %s", err.Error())
 	}
 }
 

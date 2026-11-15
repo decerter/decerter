@@ -17,6 +17,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/decerter/decerter/internal/platform"
 )
 
 const (
@@ -196,35 +198,9 @@ func IsChromiumLibraryName(name string) (isChromium bool) {
 	return
 }
 
-// the executable file mappings of a /proc/<pid>/maps text: start-end perms offset dev inode path, r-xp only; a deleted file (an app updated while
-// it runs) is left out, a uprobe can't reach it by its path
-func ExecutableMappings(maps string) (mappings []Mapping) {
-	for line := range strings.Lines(maps) {
-		fields := strings.Fields(line)
-
-		if (len(fields) < 6) || (len(fields[1]) < 3) || (fields[1][2] != 'x') || !strings.HasPrefix(fields[5], "/") || strings.HasSuffix(strings.TrimSpace(line), "(deleted)") {
-			continue
-		}
-
-		offset, parseErr := strconv.ParseUint(fields[2], 16, 64)
-
-		if parseErr != nil {
-			continue
-		}
-
-		mapping := Mapping{Path: strings.Join(fields[5:], " "), Offset: offset}
-
-		if !slices.Contains(mappings, mapping) {
-			mappings = append(mappings, mapping)
-		}
-	}
-
-	return
-}
-
 // the Chromium library of an executable mapping: a library file of its own, or the stored apk entry that holds the mapping's offset; isChromium is false
 // for any other file
-func ChromiumMapping(mapping Mapping) (library LibraryFile, isChromium bool, err error) {
+func ChromiumMapping(mapping platform.Mapping) (library LibraryFile, isChromium bool, err error) {
 	if !strings.HasSuffix(mapping.Path, ".apk") {
 		if !IsChromiumLibraryName(mapping.Path) {
 			return

@@ -377,7 +377,7 @@ func observeChunks(chunks []TLSChunk, isClosed bool, logger *slog.Logger) (obser
 	recorder = history.New(history.DefaultLimits(), nil)
 	values := filter.Values{}
 	flowID := recorder.OpenFlow(1, values, [32]byte{})
-	observer = NewTLSObserver(testFlow, testClient, intercept.FlowOf(flowID, 1, testFlow, testClient, values), recorder, testSecretsMaps)
+	observer = NewTLSObserver(intercept.FlowOf(flowID, 1, testFlow, testClient, values), recorder, testSecretsMaps)
 
 	for _, chunk := range chunks {
 		observer.Observe(chunk.direction, chunk.data, logger)
@@ -539,16 +539,18 @@ func TestWatchTLSNegative(state *testing.T) {
 func TestPrintRecordPositive(state *testing.T) {
 	session := tlsrecord.Session{Version: tlsrecord.VersionTLS12, CipherSuite: 0xc02b, ServerName: "a\"b", Protocol: "h2"}
 	record := tlsrecord.Record{Direction: tlsrecord.ServerDirection, Sequence: 3, Payload: append([]byte("line\n\x00"), bytes.Repeat([]byte("x"), intercept.MaxPrintBytes)...)}
+	flow := intercept.FlowOf(1, 1, testFlow, testClient, filter.Values{})
+	flow.Session = session
 	output := captureStdout(state, func() {
-		printSession(testFlow, testClient, session)
-		printRecord(testFlow, testClient, session, record)
+		printSession(flow, intercept.TLSLayer)
+		printRecord(flow, intercept.TLSLayer, record)
 		printFlow(redirect.Flow{OriginalDestination: testFlow.OriginalDestination, IPProtocol: testFlow.IPProtocol, Tgid: 1, UID: 2, Comm: "app", Mark: 0x10064}, "app --flag", testClient, "1B", "2B", 1500*time.Microsecond)
 	})
 	// a comm the process set to a terminal escape sequence
-	hostile := testFlow
+	hostile := flow
 	hostile.Comm = "\x1b]0;x\x07\x1b[2J"
 	hostileOutput := captureStdout(state, func() {
-		printSession(hostile, testClient, session)
+		printSession(hostile, intercept.TLSLayer)
 		printFlow(redirect.Flow{OriginalDestination: testFlow.OriginalDestination, IPProtocol: testFlow.IPProtocol, Tgid: 1, UID: 2, Comm: hostile.Comm, Mark: 0}, "app", testClient, "1B", "2B", time.Millisecond)
 	})
 	expected := []string{

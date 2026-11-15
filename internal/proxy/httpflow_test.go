@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"net/netip"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -252,21 +253,62 @@ func TestHTTPFlowExpirePositive(state *testing.T) {
 	}
 }
 
-// Test if proxy.isTicketRecord returns with the expected output.
+var (
+	// a NewSessionTicket of 6 body bytes and a KeyUpdate (update_requested)
+	ticketRecord    = tlsrecord.Record{ContentType: tlsrecord.HandshakeContentType, Payload: []byte{newSessionTicketType, 0, 0, 6, 0, 0, 0, 60, 0, 0}}
+	keyUpdateRecord = tlsrecord.Record{ContentType: tlsrecord.HandshakeContentType, Payload: []byte{24, 0, 0, 1, 1}}
+)
+
+// Test if proxy.isTicketRecord returns with the expected output: only records of whole NewSessionTicket messages are ticket records.
 func TestIsTicketRecordPositive(state *testing.T) {
 	positiveCases := []struct {
 		Record   tlsrecord.Record
 		IsTicket bool
 	}{
-		{Record: tlsrecord.Record{ContentType: tlsrecord.HandshakeContentType, Payload: []byte{newSessionTicketType, 0, 0, 1, 0}}, IsTicket: true},
-		{Record: tlsrecord.Record{ContentType: tlsrecord.HandshakeContentType, Payload: []byte{24, 0, 0, 1, 0}}, IsTicket: false},
+		{Record: ticketRecord, IsTicket: true},
+		{Record: tlsrecord.Record{ContentType: tlsrecord.HandshakeContentType, Payload: slices.Concat(ticketRecord.Payload, ticketRecord.Payload)}, IsTicket: true},
+		{Record: tlsrecord.Record{ContentType: tlsrecord.HandshakeContentType, Payload: []byte{newSessionTicketType, 0, 0, 0}}, IsTicket: true},
+		{Record: keyUpdateRecord, IsTicket: false},
+		{Record: tlsrecord.Record{ContentType: tlsrecord.HandshakeContentType, Payload: slices.Concat(ticketRecord.Payload, keyUpdateRecord.Payload)}, IsTicket: false},
+		{Record: tlsrecord.Record{ContentType: tlsrecord.HandshakeContentType, Payload: slices.Concat(keyUpdateRecord.Payload, ticketRecord.Payload)}, IsTicket: false},
+		{Record: tlsrecord.Record{ContentType: tlsrecord.HandshakeContentType, Payload: []byte{newSessionTicketType, 0, 0, 5, 0}}, IsTicket: false},
+		{Record: tlsrecord.Record{ContentType: tlsrecord.HandshakeContentType, Payload: slices.Concat(ticketRecord.Payload, []byte{newSessionTicketType, 0})}, IsTicket: false},
 		{Record: tlsrecord.Record{ContentType: tlsrecord.HandshakeContentType, Payload: nil}, IsTicket: false},
-		{Record: tlsrecord.Record{ContentType: tlsrecord.ApplicationDataContentType, Payload: []byte{newSessionTicketType}}, IsTicket: false},
+		{Record: tlsrecord.Record{ContentType: tlsrecord.ApplicationDataContentType, Payload: ticketRecord.Payload}, IsTicket: false},
 	}
 
 	for _, positive := range positiveCases {
 		if isTicketRecord(positive.Record) != positive.IsTicket {
 			state.Errorf("Test of proxy.isTicketRecord function failed, record %+v, ticket should be %v", positive.Record, positive.IsTicket)
+			return
+		}
+	}
+}
+
+// Test if proxy.interception.canSeal returns with the expected output: bytes the HTTP layer kept go on under the keys of an application data or a ticket
+// record only, a KeyUpdate coalesced with a ticket changed the keys.
+func TestCanSealPositive(state *testing.T) {
+	plain := newTestInterception(nil, intercept.New(nil, nil, nil), nil, discardLogger())
+	encrypted := newTestInterception(nil, intercept.New(nil, nil, nil), nil, discardLogger())
+	encrypted.wasTLS = true
+	positiveCases := []struct {
+		Name         string
+		Interception *interception
+		Carrier      *tlsrecord.Record
+		CanSeal      bool
+	}{
+		{Name: "tcp", Interception: plain, Carrier: nil, CanSeal: true},
+		{Name: "tls before a record", Interception: encrypted, Carrier: nil, CanSeal: false},
+		{Name: "application data", Interception: encrypted, Carrier: &tlsrecord.Record{ContentType: tlsrecord.ApplicationDataContentType, Payload: []byte("data")}, CanSeal: true},
+		{Name: "ticket", Interception: encrypted, Carrier: &ticketRecord, CanSeal: true},
+		{Name: "key update", Interception: encrypted, Carrier: &keyUpdateRecord, CanSeal: false},
+		{Name: "ticket and key update", Interception: encrypted, Carrier: &tlsrecord.Record{ContentType: tlsrecord.HandshakeContentType, Payload: slices.Concat(ticketRecord.Payload, keyUpdateRecord.Payload)}, CanSeal: false},
+		{Name: "alert", Interception: encrypted, Carrier: &tlsrecord.Record{ContentType: tlsrecord.AlertContentType, Payload: []byte{1, 0}}, CanSeal: false},
+	}
+
+	for _, positive := range positiveCases {
+		if canSeal := positive.Interception.canSeal(positive.Carrier); canSeal != positive.CanSeal {
+			state.Errorf("Test of proxy.interception.canSeal function failed, case %q, canSeal should be %v, canSeal: %v", positive.Name, positive.CanSeal, canSeal)
 			return
 		}
 	}

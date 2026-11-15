@@ -19,7 +19,8 @@
 # Left out of merged.out: the bpf2go output (*_bpfel.go, *_bpfeb.go), the generated offset tables (*_gen.go), the main of
 # cmd/decerter, which only calls cmd.Execute, and the helpers under test/. The BPF C programs have no Go coverage, the e2e
 # tests cover them. A profile of an earlier run is kept and merged when its suite is not run again, so
-# "coverage.sh unit" after "coverage.sh e2e" still reports both. The exit status is the one of the tests.
+# "coverage.sh unit" after "coverage.sh e2e" still reports both. The exit status is the one of the tests, and 1 when
+# COVERAGE_MIN is set (a percentage, CI uses 85) and the total of merged.out is below it.
 set -uo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
@@ -170,4 +171,17 @@ END {
 }' | tee "$directory/packages.txt"
 
 echo "coverage report: $directory/packages.txt, $directory/functions.txt, $directory/coverage.html"
+
+# the floor is on the merged total, the last column of the total line
+if [ -n "${COVERAGE_MIN:-}" ]; then
+	total="$(awk '$1 == "total" { sub(/%$/, "", $NF); print $NF }' "$directory/packages.txt")"
+
+	if awk -v total="$total" -v minimum="$COVERAGE_MIN" 'BEGIN { exit !((total !~ /^[0-9.]+$/) || ((total + 0) < (minimum + 0))) }'; then
+		echo "coverage ${total}% is below the floor of ${COVERAGE_MIN}%" >&2
+		status=1
+	else
+		echo "coverage ${total}%, the floor is ${COVERAGE_MIN}%"
+	fi
+fi
+
 exit "$status"

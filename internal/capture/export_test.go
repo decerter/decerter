@@ -7,6 +7,7 @@ package capture
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"slices"
@@ -284,7 +285,7 @@ func TestWriteHistoryUDPPositive(state *testing.T) {
 }
 
 // Test if capture.WriteHistory returns with the expected output for a flow with more notes than a pcapng comment holds: 20000 dropped messages give
-// a FIN comment within maxHistoryNote that counts the notes it leaves out, and the export is written.
+// a FIN comment within maxNoteBytes that counts the notes it leaves out, and the export is written.
 func TestWriteHistoryNotesPositive(state *testing.T) {
 	opened := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
 	flow := history.ExportFlow{
@@ -318,9 +319,80 @@ func TestWriteHistoryNotesPositive(state *testing.T) {
 	}
 
 	// the SYN has the flow, the FIN the notes of the dropped messages
-	if (len(blocks) != 6) || (len(comments) != 2) || (len(comments[1]) > len(notePrefix)+maxHistoryNote+64) || !strings.Contains(comments[1], " more notes, the API has every message") {
+	if (len(blocks) != 6) || (len(comments) != 2) || (len(comments[1]) > len(notePrefix)+maxNoteBytes+64) || !strings.Contains(comments[1], " more notes, the API has every message") {
 		state.Errorf("Test of capture.WriteHistory failed, the FIN should carry one comment that counts the notes left out, packets: %d, comments: %d, length of the comments: %d", len(blocks), len(comments), len(strings.Join(comments, "")))
 		return
+	}
+}
+
+// Test if capture.WriteHistory returns with the expected output for UDP messages the history kept only partly, not at all or longer than a datagram:
+// each datagram is as long as what is written and its comment says how many bytes of which message are not in it.
+func TestWriteHistoryDatagramsPositive(state *testing.T) {
+	opened := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	large := bytes.Repeat([]byte("l"), 70000)
+	flow := history.ExportFlow{
+		Flow:   api.Flow{ID: 3, State: api.ClosedFlowState, Opened: opened, Closed: opened.Add(time.Second), Process: api.Process{PID: 8, UID: 0, Comm: "dig"}},
+		Values: filter.Values{IPProtocol: syscall.IPPROTO_UDP, Source: netip.MustParseAddrPort("192.0.2.10:40000"), Destination: netip.MustParseAddrPort("192.0.2.20:53")},
+		Messages: []history.ExportMessage{
+			{Message: api.Message{ID: 1, Direction: api.UpDirection, Time: opened, Verdict: api.ForwardVerdict, Length: 5, OriginalLength: 5}, Payload: []byte("whole")},
+			{Message: api.Message{ID: 2, Direction: api.DownDirection, Time: opened, Verdict: api.ForwardVerdict, Length: 10, OriginalLength: 10}, Payload: []byte("part")},
+			{Message: api.Message{ID: 3, Direction: api.UpDirection, Time: opened, Verdict: api.ForwardVerdict, Length: 8, OriginalLength: 8}, Payload: nil},
+			{Message: api.Message{ID: 4, Direction: api.DownDirection, Time: opened, Verdict: api.ForwardVerdict, Length: len(large), OriginalLength: len(large)}, Payload: large},
+		},
+	}
+	output := bytes.Buffer{}
+
+	if err := WriteHistory(&output, []history.ExportFlow{flow}); err != nil {
+		state.Fatalf("Test of capture.WriteHistory failed, the export should be written, error: %s", err.Error())
+	}
+
+	blocks, err := readBlocks(output.Bytes())
+
+	if err != nil {
+		state.Fatalf("Test of capture.WriteHistory failed, cannot read output, error: %s", err.Error())
+	}
+
+	expected := []struct {
+		Length  int
+		Comment string
+	}{
+		{Length: 5, Comment: notePrefix + "flow 3 of dig (pid 8, uid 0)"},
+		{Length: 4, Comment: notePrefix + "the history did not keep 6 bytes of message 2"},
+		{Length: 0, Comment: notePrefix + "the history did not keep 8 bytes of message 3"},
+		{Length: maxHistoryDatagram, Comment: notePrefix + fmt.Sprintf("%d bytes of message 4 do not fit the datagram", len(large)-maxHistoryDatagram)},
+	}
+
+	if len(blocks) != len(expected) {
+		state.Errorf("Test of capture.WriteHistory failed, there should be %d datagrams, blocks: %d", len(expected), len(blocks))
+		return
+	}
+
+	for index, block := range blocks {
+		if (block.header.protocol != syscall.IPPROTO_UDP) || (len(block.payload) != expected[index].Length) || (block.comment != expected[index].Comment) {
+			state.Errorf("Test of capture.WriteHistory failed, datagram %d should have %d bytes and the comment %q, length: %d, comment: %q", index, expected[index].Length, expected[index].Comment, len(block.payload), block.comment)
+			return
+		}
+	}
+}
+
+// Test if capture.packetNote returns with the expected output: notes joined, the ones past maxNoteBytes counted with the default or its own words,
+// empty after it was taken.
+func TestPacketNotePositive(state *testing.T) {
+	note := packetNote{}
+	empty := note.take()
+	note.add("first")
+	note.add("second")
+	joined := note.take()
+	note.add(strings.Repeat("n", maxNoteBytes))
+	note.add("left out")
+	note.add("left out too")
+	counted := note.take()
+	history := packetNote{text: "", omitted: 0, more: historyMoreNotes}
+	history.add(strings.Repeat("n", maxNoteBytes))
+	history.add("left out")
+
+	if (empty != "") || (joined != notePrefix+"first; second") || !strings.HasSuffix(counted, "n; 2 more notes") || !strings.HasSuffix(history.take(), "; 1 "+historyMoreNotes) || !note.isEmpty() {
+		state.Errorf("Test of capture.packetNote failed, notes: %q %q %q", empty, joined, counted)
 	}
 }
 

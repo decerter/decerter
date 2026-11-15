@@ -82,32 +82,50 @@ type sendStats struct {
 
 // one intercepted tcp flow: the two readers feed the record layer under mutex, the sender of each direction takes its queue in order, runs the rules, seals and writes
 // a slow peer or a held message stops only its own direction; wake is signalled on every change of the queues or the record layer
-// holdDeadline ends the wait for the secrets, graceDeadline lets held records go on raw before it
 type interception struct {
-	mutex          *sync.Mutex
-	wake           *sync.Cond
-	flow           intercept.Flow
-	pipeline       *intercept.Pipeline
-	secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map
-	mode           interceptMode
-	wasTLS         bool
-	prefix         []byte
-	conn           tlsrecord.Conn
-	queues         [2][]sendItem
-	queuedBytes    [2]int
-	ended          [2]bool
-	aborted        bool
-	finished       bool
-	isHolding      bool
-	holdDeadline   time.Time
-	graceDeadline  time.Time
-	pollPause      time.Duration
-	pollTimer      *time.Timer
-	isPollPending  bool
-	spinGroup      *sync.WaitGroup
-	stats          [2]sendStats
-	http           *httpFlow
-	logger         *slog.Logger
+	*secretsWait
+	flow        intercept.Flow
+	pipeline    *intercept.Pipeline
+	mode        interceptMode
+	wasTLS      bool
+	prefix      []byte
+	conn        tlsrecord.Conn
+	queues      [2][]sendItem
+	queuedBytes [2]int
+	ended       [2]bool
+	aborted     bool
+	finished    bool
+	spinGroup   *sync.WaitGroup
+	stats       [2]sendStats
+	http        *httpFlow
+	logger      *slog.Logger
+}
+
+// an interception of a tcp flow, undecided until its first bytes
+func newInterception(flow intercept.Flow, pipeline *intercept.Pipeline, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, httpFlow *httpFlow, logger *slog.Logger) (flowInterception *interception) {
+	flowInterception = &interception{
+		flow:      flow,
+		pipeline:  pipeline,
+		mode:      undecidedInterceptMode,
+		conn:      tlsrecord.New(maxHoldBytes, true),
+		spinGroup: &sync.WaitGroup{},
+		http:      httpFlow,
+		logger:    logger,
+	}
+	hooks := secretsHooks{
+		isDecrypting: func() (isDecrypting bool) {
+			isDecrypting = (flowInterception.mode == tlsInterceptMode)
+			return
+		},
+		isOver: func() (isOver bool) {
+			isOver = flowInterception.finished || flowInterception.aborted
+			return
+		},
+		goOn:   flowInterception.pushRecords,
+		giveUp: flowInterception.giveUp,
+	}
+	flowInterception.secretsWait = newSecretsWait(&flowInterception.conn, secretsBpfMaps, hooks, logger)
+	return
 }
 
 // relay an intercepted tcp flow until both directions are done, written is what went to each destination
@@ -118,22 +136,7 @@ type interception struct {
 func interceptTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn, opening []TLSChunk, flow intercept.Flow, pipeline *intercept.Pipeline, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, httpFlow *httpFlow, logger *slog.Logger) (upBytes int64, downBytes int64) {
 	flowCtx, cancelFlow := context.WithCancel(ctx)
 	defer cancelFlow()
-	mutex := &sync.Mutex{}
-	interception := &interception{
-		mutex:          mutex,
-		wake:           sync.NewCond(mutex),
-		flow:           flow,
-		pipeline:       pipeline,
-		secretsBpfMaps: secretsBpfMaps,
-		mode:           undecidedInterceptMode,
-		conn:           tlsrecord.New(maxHoldBytes, true),
-		pollPause:      interceptPollStart,
-		spinGroup:      &sync.WaitGroup{},
-		http:           httpFlow,
-		logger:         logger,
-	}
-	interception.pollTimer = time.AfterFunc(time.Hour, interception.poll)
-	interception.pollTimer.Stop()
+	interception := newInterception(flow, pipeline, secretsBpfMaps, httpFlow, logger)
 
 	if httpFlow != nil {
 		httpFlow.notify = interception.wakeHTTP
@@ -342,84 +345,6 @@ func (interception *interception) spin(clientRandom [32]byte) {
 		}
 
 		runtime.Gosched()
-	}
-}
-
-// keep the deadlines and the poll in step with the record layer
-func (interception *interception) watch() {
-	if (interception.mode != tlsInterceptMode) || !interception.conn.Waiting() {
-		interception.isHolding = false
-		return
-	}
-
-	now := time.Now()
-
-	if interception.holdDeadline.IsZero() {
-		interception.holdDeadline = now.Add(holdTimeout)
-	}
-
-	holding := interception.conn.Holding()
-
-	if holding && !interception.isHolding {
-		interception.graceDeadline = now.Add(interceptGrace)
-		interception.pollPause = interceptPollStart
-		interception.isPollPending = false
-	}
-
-	interception.isHolding = holding
-
-	if !interception.isPollPending {
-		interception.isPollPending = true
-		interception.pollTimer.Reset(interception.pollPause)
-	}
-}
-
-// secrets poll, runs on its own timer while a record waits for them
-func (interception *interception) poll() {
-	interception.mutex.Lock()
-	defer interception.mutex.Unlock()
-	interception.isPollPending = false
-
-	if interception.finished || interception.aborted || (interception.mode != tlsInterceptMode) {
-		return
-	}
-
-	now := time.Now()
-	interception.lookup(now.After(interception.holdDeadline))
-
-	// nothing was changed without the secrets, so the held records can go on as they came
-	if (interception.mode == tlsInterceptMode) && interception.conn.Holding() && now.After(interception.graceDeadline) {
-		interception.logger.Debug("Tls secrets are late, held records go on raw")
-		interception.pushRecords(interception.conn.Release())
-	}
-
-	interception.pollPause = min(2*interception.pollPause, interceptPollMax)
-	interception.watch()
-	interception.wake.Broadcast()
-}
-
-// ask secrets_map for the session and let the held records go on if they are there, isLast makes missing secrets the end of the interception
-func (interception *interception) lookup(isLast bool) {
-	sessionSecrets, found, lookupErr := secretsByRandom(interception.conn.Session().ClientRandom, interception.secretsBpfMaps)
-
-	if lookupErr != nil {
-		interception.giveUp(lookupErr)
-		return
-	}
-
-	if !found {
-		if isLast {
-			interception.giveUp(ErrNoSecrets)
-		}
-
-		return
-	}
-
-	records, secretsErr := interception.conn.SetSecrets(sessionSecrets)
-	interception.pushRecords(records)
-
-	if secretsErr != nil {
-		interception.giveUp(secretsErr)
 	}
 }
 

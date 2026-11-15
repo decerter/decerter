@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strconv"
@@ -24,6 +25,13 @@ const (
 	// how often the install directories and processes of the selected apps are looked at for a Flutter or Chromium library installed, updated or
 	// mapped while decerter runs
 	appRescan time.Duration = 2 * time.Second
+)
+
+var (
+	// where the processes, the apps and the list of installed packages are, variables so the tests can give their own
+	procDirectory = "/proc"
+	appDirectory  = platform.AndroidAppDirectory
+	packagesList  = platform.AndroidPackagesList
 )
 
 // only on Android: BoringSSL's ssl_log_secret in Conscrypt's libssl (or the --libssl given), in the libflutter.so of each selected Flutter app and in
@@ -116,10 +124,10 @@ func (app *App) selectedPackages() (selected []android.Package, packages []andro
 		return
 	}
 
-	packages, readErr := android.ReadPackages(platform.AndroidPackagesList)
+	packages, readErr := android.ReadPackages(packagesList)
 
 	if readErr != nil {
-		app.logger.Warn("Could not read the installed packages, no Flutter or Chromium app is hooked", "error", readErr, "fileName", platform.AndroidPackagesList)
+		app.logger.Warn("Could not read the installed packages, no Flutter or Chromium app is hooked", "error", readErr, "fileName", packagesList)
 		return
 	}
 
@@ -134,7 +142,7 @@ func (app *App) selectedPackages() (selected []android.Package, packages []andro
 
 // the owner of /proc/<pid>, the uid of the process
 func processUID(pid int) (uid uint32, found bool) {
-	info, statErr := os.Stat("/proc/" + strconv.Itoa(pid))
+	info, statErr := os.Stat(filepath.Join(procDirectory, strconv.Itoa(pid)))
 
 	if statErr != nil {
 		return
@@ -160,12 +168,12 @@ func (app *App) findAppHooks(seen map[string]bool) (hooks []boringsslHook) {
 	return
 }
 
-// the libflutter.so of every package with known offsets, from its install directory under /data/app; seen holds every library looked at by its
-// path and offset, a library in it is skipped, so the rescan only reads new ones; an app whose library can't be hooked is logged, its TLS is relayed
+// the libflutter.so of every package with known offsets, from its install directory under /data/app; seen holds every install directory looked at,
+// one in it is skipped, so the rescan only reads new ones (an update installs the app into a new directory); an app whose library can't be hooked is logged, its TLS is relayed
 func (app *App) findFlutterHooks(selected []android.Package, seen map[string]bool) (hooks []boringsslHook) {
 	for _, current := range selected {
 		name := current.Name
-		directories, findErr := android.FindInstallDirectories(platform.AndroidAppDirectory, name)
+		directories, findErr := android.FindInstallDirectories(appDirectory, name)
 
 		if findErr != nil {
 			app.logger.Warn("Could not look for the app's install directory", "error", findErr, "package", name)
@@ -173,18 +181,12 @@ func (app *App) findFlutterHooks(selected []android.Package, seen map[string]boo
 		}
 
 		for _, directory := range directories {
-			file, found, libraryErr := boringssl.FindFlutterLibrary(directory, runtime.GOARCH)
-			key := directory
-
-			if found {
-				key = file.Path + "@" + strconv.FormatUint(file.Offset, 10)
-			}
-
-			if seen[key] {
+			if seen["flutter:"+directory] {
 				continue
 			}
 
-			seen[key] = true
+			seen["flutter:"+directory] = true
+			file, found, libraryErr := boringssl.FindFlutterLibrary(directory, runtime.GOARCH)
 
 			if libraryErr != nil {
 				app.logger.Error("Could not hook the Flutter app, its TLS is relayed without secrets", "error", libraryErr, "package", name, "directory", directory)
@@ -225,7 +227,7 @@ func (app *App) findChromiumHooks(selected []android.Package, packages []android
 		owners := append([]string{current.Name}, android.TrichromeLibraries(current, packages)...)
 
 		for _, owner := range owners {
-			directories, findErr := android.FindInstallDirectories(platform.AndroidAppDirectory, owner)
+			directories, findErr := android.FindInstallDirectories(appDirectory, owner)
 
 			if findErr != nil {
 				app.logger.Warn("Could not look for the app's install directory", "error", findErr, "package", owner)
@@ -262,37 +264,17 @@ func (app *App) findChromiumHooks(selected []android.Package, packages []android
 // the Chromium libraries mapped executable by the processes of the selected uids and pids: a library file of its own, or a stored entry of an apk
 // (a mapping of an apk at a file offset inside the entry); a mapping looked at is kept in seen, so the rescan reads only new ones
 func (app *App) findMappedChromiumHooks(seen map[string]bool) (hooks []boringsslHook) {
-	uids := app.secretsUIDs()
-	tgids := app.secretsTgids()
-	entries, readErr := os.ReadDir("/proc")
+	processes, err := app.selectedMaps()
 
-	if readErr != nil {
-		app.logger.Warn("Could not list the processes, no Chromium library they map is hooked", "error", readErr)
+	if err != nil {
+		app.logger.Warn("Could not list the processes, no Chromium library they map is hooked", "error", err)
 		return
 	}
 
-	for _, entry := range entries {
-		pid, parseErr := strconv.Atoi(entry.Name())
+	for _, selected := range processes {
+		process := processName(selected.Pid)
 
-		if parseErr != nil {
-			continue
-		}
-
-		uid, found := processUID(pid)
-
-		if !found || (!slices.Contains(uids, uid) && !slices.Contains(tgids, uint32(pid))) {
-			continue
-		}
-
-		maps, mapsErr := os.ReadFile("/proc/" + entry.Name() + "/maps")
-
-		if mapsErr != nil {
-			continue
-		}
-
-		process := processName(pid)
-
-		for _, mapping := range boringssl.ExecutableMappings(string(maps)) {
+		for _, mapping := range platform.ExecutableMappings(selected.Maps) {
 			key := "mapped:" + mapping.Path + "@" + strconv.FormatUint(mapping.Offset, 10)
 
 			if seen[key] {
@@ -303,7 +285,7 @@ func (app *App) findMappedChromiumHooks(seen map[string]bool) (hooks []boringssl
 			file, isChromium, mappingErr := boringssl.ChromiumMapping(mapping)
 
 			if mappingErr != nil {
-				app.logger.Warn("Could not read a library the process maps", "error", mappingErr, "process", process, "pid", pid, "fileName", mapping.Path)
+				app.logger.Warn("Could not read a library the process maps", "error", mappingErr, "process", process, "pid", selected.Pid, "fileName", mapping.Path)
 				continue
 			}
 
@@ -322,9 +304,49 @@ func (app *App) findMappedChromiumHooks(seen map[string]bool) (hooks []boringssl
 	return
 }
 
+// the /proc/<pid>/maps text of every process of the selected uids and pids, none without a selection; a process gone meanwhile is left out
+func (app *App) selectedMaps() (processes []processMaps, err error) {
+	uids := app.secretsUIDs()
+	tgids := app.secretsTgids()
+
+	if (len(uids) == 0) && (len(tgids) == 0) {
+		return
+	}
+
+	entries, err := os.ReadDir(procDirectory)
+
+	if err != nil {
+		return
+	}
+
+	for _, entry := range entries {
+		pid, parseErr := strconv.Atoi(entry.Name())
+
+		if parseErr != nil {
+			continue
+		}
+
+		uid, found := processUID(pid)
+
+		if !found || (!slices.Contains(uids, uid) && !slices.Contains(tgids, uint32(pid))) {
+			continue
+		}
+
+		maps, mapsErr := os.ReadFile(filepath.Join(procDirectory, entry.Name(), "maps"))
+
+		if mapsErr != nil {
+			continue
+		}
+
+		processes = append(processes, processMaps{Pid: pid, Maps: string(maps)})
+	}
+
+	return
+}
+
 // the package name of a process: its cmdline up to the first NUL, without the :name of a service process
 func processName(pid int) (name string) {
-	cmdline, readErr := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+	cmdline, readErr := os.ReadFile(filepath.Join(procDirectory, strconv.Itoa(pid), "cmdline"))
 
 	if readErr != nil {
 		return

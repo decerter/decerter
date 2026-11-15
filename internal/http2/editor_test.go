@@ -479,6 +479,64 @@ func TestEditorWindowsPositive(state *testing.T) {
 	}
 }
 
+// Test if http2.Editor returns with the expected output for streams that wait to open behind a held one: their DATA does not give the sender its
+// connection window back, so what decerter buffers stays within the connection window, and it goes on with the held stream's release.
+func TestEditorGatedWindowPositive(state *testing.T) {
+	client, server := newTestPeer(true), newTestPeer(false)
+	run := newEditRun(keepStreams(decerterhttp2.RequestSide, 1))
+	client.settings()
+	server.settings()
+	server.ack()
+	client.ack()
+	client.headers(1, true, ":method", "GET", ":scheme", "https", ":authority", "edit.test", ":path", "/held")
+	run.feed(decerterhttp2.ServerPeer, server.take(decerterhttp2.ServerPeer).Data, 0, false)
+	run.feed(decerterhttp2.ClientPeer, client.take(decerterhttp2.ClientPeer).Data, 0, false)
+	mustRead(run, decerterhttp2.ClientPeer)
+	mustRead(run, decerterhttp2.ServerPeer)
+
+	// the client sends what its connection window allows on new streams, each round with the window decerter gave back
+	window := 65535
+	buffered := 0
+
+	for id := uint32(3); id < 43; id += 2 {
+		client.headers(id, false, ":method", "POST", ":scheme", "https", ":authority", "edit.test", ":path", fmt.Sprintf("/%d", id))
+
+		if size := min(window, 16384); size > 0 {
+			client.data(id, false, strings.Repeat("d", size))
+			window -= size
+			buffered += size
+		}
+
+		run.feed(decerterhttp2.ClientPeer, client.take(decerterhttp2.ClientPeer).Data, 0, false)
+		window += incrementOf(mustRead(run, decerterhttp2.ServerPeer), 0)
+
+		if upstream := mustRead(run, decerterhttp2.ClientPeer); len(upstream) != 0 {
+			state.Errorf("Test of http2.Editor failed, streams behind the held one should wait, frames: %+v", upstream)
+			return
+		}
+	}
+
+	if (buffered != 65535) || (window != 0) {
+		state.Errorf("Test of http2.Editor failed, decerter should buffer at most the connection window, buffered: %d, window: %d", buffered, window)
+		return
+	}
+
+	// the held stream goes on, the waiting ones behind it within the server's windows; the client gets its window from the server, not from decerter
+	run.editor.Release(decerterhttp2.ClientPeer, 1)
+	run.collect()
+	upstream, downstream := mustRead(run, decerterhttp2.ClientPeer), mustRead(run, decerterhttp2.ServerPeer)
+	sent := 0
+
+	for id := uint32(3); id < 43; id += 2 {
+		sent += len(dataOf(upstream, id))
+	}
+
+	if (len(blockStreams(upstream)) != 21) || (sent != buffered) || (incrementOf(downstream, 0) != 0) {
+		state.Errorf("Test of http2.Editor failed, the waiting streams should go on after the release, streams: %v, sent: %d, window to the client: %d", blockStreams(upstream), sent, incrementOf(downstream, 0))
+		return
+	}
+}
+
 // the payload lengths of the frames in the bytes
 func frameSizes(data []byte) (sizes []int) {
 	for len(data) >= 9 {

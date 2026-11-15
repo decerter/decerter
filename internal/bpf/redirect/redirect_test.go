@@ -94,6 +94,27 @@ func TestPrefixKeyMaskedPositive(state *testing.T) {
 	}
 }
 
+// Test if redirect.routeValues gives each prefix one key with 1 for a routable prefix and 0 for one that is not.
+func TestRouteValuesPositive(state *testing.T) {
+	routes := map[netip.Prefix]bool{
+		netip.MustParsePrefix("127.0.0.0/8"):        true,
+		netip.MustParsePrefix("127.255.255.255/32"): false,
+		netip.MustParsePrefix("::1/128"):            true,
+		netip.MustParsePrefix("2001:db8::/32"):      false,
+	}
+	expected := map[bpfPrefixKey]uint8{
+		prefixToKey(netip.MustParsePrefix("127.0.0.0/8")):        1,
+		prefixToKey(netip.MustParsePrefix("127.255.255.255/32")): 0,
+		prefixToKey(netip.MustParsePrefix("::1/128")):            1,
+		prefixToKey(netip.MustParsePrefix("2001:db8::/32")):      0,
+	}
+	values := routeValues(routes)
+
+	if !reflect.DeepEqual(values, expected) {
+		state.Errorf("Test of redirect.routeValues function failed, values should be %v, values: %v", expected, values)
+	}
+}
+
 // Test if redirect.addPrefixLengths sets the bit of each key's prefixlen like the programs read it, and keeps the bits it had.
 func TestAddPrefixLengthsPositive(state *testing.T) {
 	keys := []bpfPrefixKey{

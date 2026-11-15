@@ -19,3 +19,9 @@ type Platform struct {
 	DataDirectory string
 	APISocket     string
 }
+
+// an executable file mapping of a process, from /proc/<pid>/maps: the mapped file as the process sees it and the file offset the mapping starts at
+type Mapping struct {
+	Path   string
+	Offset uint64
+}

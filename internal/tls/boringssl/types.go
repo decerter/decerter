@@ -50,12 +50,6 @@ type ChromiumLibrary struct {
 	Labels    int
 }
 
-// an executable mapping of a process: the mapped file and the file offset the mapping starts at
-type Mapping struct {
-	Path   string
-	Offset uint64
-}
-
 // patch numbers First to Last of a Chromium branch (MAJOR.0.BUILD) whose DEPS pin the same BoringSSL revision
 type chromiumRange struct {
 	First    int

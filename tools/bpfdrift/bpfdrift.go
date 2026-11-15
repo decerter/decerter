@@ -12,6 +12,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"slices"
@@ -27,30 +28,33 @@ const typeDepth int = 4
 var errUsage = errors.New("usage: bpfdrift <committed.o> <generated.o> [<committed.o> <generated.o> …]")
 
 func main() {
-	arguments := os.Args[1:]
+	os.Exit(run(os.Args[1:], os.Stderr))
+}
 
+// compare each pair of objects, status 0 when all are the same, 1 when a pair differs, 2 for a usage or read error; what differs goes to output
+func run(arguments []string, output io.Writer) (status int) {
 	if (len(arguments) == 0) || (len(arguments)%2 != 0) {
-		fmt.Fprintln(os.Stderr, errUsage.Error())
-		os.Exit(2)
+		_, _ = fmt.Fprintln(output, errUsage.Error())
+		status = 2
+		return
 	}
-
-	status := 0
 
 	for index := 0; index < len(arguments); index += 2 {
 		difference, err := compare(arguments[index], arguments[index+1])
 
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Could not compare %s with %s: %s\n", arguments[index], arguments[index+1], err.Error())
-			os.Exit(2)
+			_, _ = fmt.Fprintf(output, "Could not compare %s with %s: %s\n", arguments[index], arguments[index+1], err.Error())
+			status = 2
+			return
 		}
 
 		if difference != "" {
-			fmt.Fprintf(os.Stderr, "%s differs from %s: %s\n", arguments[index+1], arguments[index], difference)
+			_, _ = fmt.Fprintf(output, "%s differs from %s: %s\n", arguments[index+1], arguments[index], difference)
 			status = 1
 		}
 	}
 
-	os.Exit(status)
+	return
 }
 
 // the first line where the descriptions of the two objects differ, empty when they are the same

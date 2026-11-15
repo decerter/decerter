@@ -206,7 +206,7 @@ type NoInput struct{}
 type ListFlowsInput struct {
 	Filter string `json:"filter,omitzero" jsonschema:"a filter in the language of decerter --filter (Wireshark-like), e.g. proc.comm == \"curl\" && tls.sni contains \"example\"; empty takes every flow"`
 	Limit  int    `json:"limit,omitzero" jsonschema:"flows per page"`
-	Cursor string `json:"cursor,omitzero" jsonschema:"the next_cursor of the page before, empty for the first page"`
+	Cursor string `json:"cursor,omitzero" jsonschema:"the next_cursor of the page before (the id of its oldest flow, the next page has lower ids), empty for the first page"`
 }
 
 type GetFlowInput struct {

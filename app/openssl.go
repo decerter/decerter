@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
 	"strconv"
 	"syscall"
 	"time"
@@ -110,41 +109,18 @@ func unknownOpensslError(unknown []unknownOpenssl) (err error) {
 // the libssl files the processes of the selected uids and pids map that are not in seen yet, opened through /proc/<pid>/root so a container's file is
 // found as its process sees it; a library is keyed by device and inode, uprobes are per inode
 func (app *App) findMappedOpenssl(seen map[string]bool) (hooks []opensslHook) {
-	uids := app.secretsUIDs()
-	tgids := app.secretsTgids()
+	processes, err := app.selectedMaps()
 
-	if (len(uids) == 0) && (len(tgids) == 0) {
+	if err != nil {
+		app.logger.Warn("Could not list the processes, no libssl they map is hooked", "error", err)
 		return
 	}
 
-	entries, readErr := os.ReadDir("/proc")
+	for _, selected := range processes {
+		pid := strconv.Itoa(selected.Pid)
 
-	if readErr != nil {
-		app.logger.Warn("Could not list the processes, no libssl they map is hooked", "error", readErr)
-		return
-	}
-
-	for _, entry := range entries {
-		pid, parseErr := strconv.Atoi(entry.Name())
-
-		if parseErr != nil {
-			continue
-		}
-
-		uid, found := processUID(pid)
-
-		if !found || (!slices.Contains(uids, uid) && !slices.Contains(tgids, uint32(pid))) {
-			continue
-		}
-
-		maps, mapsErr := os.ReadFile("/proc/" + entry.Name() + "/maps")
-
-		if mapsErr != nil {
-			continue
-		}
-
-		for _, mapped := range openssl.MappedLibssl(string(maps)) {
-			path := filepath.Join("/proc", entry.Name(), "root", mapped)
+		for _, mapped := range openssl.MappedLibssl(selected.Maps) {
+			path := filepath.Join(procDirectory, pid, "root", mapped)
 			key := libraryKey(path)
 
 			// gone with its process, or hooked already
@@ -153,17 +129,17 @@ func (app *App) findMappedOpenssl(seen map[string]bool) (hooks []opensslHook) {
 			}
 
 			seen[key] = true
-			process := processName(pid)
+			process := processName(selected.Pid)
 			library := openssl.Library{Libssl: path, Libcrypto: openssl.LibcryptoPath(path), Version: "", Offset: openssl.Offset{}}
 			inspected, inspectErr := openssl.Inspect(library, runtime.GOARCH)
 
 			if inspectErr != nil {
-				app.logger.Error("Could not hook the OpenSSL a selected process maps, its TLS is relayed without secrets", "error", inspectErr, "process", process, "pid", pid, "libssl", mapped, "version", inspected.Version)
+				app.logger.Error("Could not hook the OpenSSL a selected process maps, its TLS is relayed without secrets", "error", inspectErr, "process", process, "pid", selected.Pid, "libssl", mapped, "version", inspected.Version)
 				continue
 			}
 
-			app.logger.Info("Found OpenSSL library a selected process maps", "process", process, "pid", pid, "libssl", path, "version", inspected.Version)
-			hooks = append(hooks, opensslHook{Library: inspected, Pid: pid, Process: process})
+			app.logger.Info("Found OpenSSL library a selected process maps", "process", process, "pid", selected.Pid, "libssl", path, "version", inspected.Version)
+			hooks = append(hooks, opensslHook{Library: inspected, Pid: selected.Pid, Process: process})
 		}
 	}
 

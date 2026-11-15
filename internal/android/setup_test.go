@@ -100,14 +100,15 @@ func writeScript(path string, body string) (err error) {
 
 // the fake adb: log the arguments, drop -s serial, answer by the first rule that matches
 func writeFakeADB(path string, log string, rules []adbRule) (err error) {
-	body := "printf '%s\\n' \"$*\" >> " + shellQuote(log) + "\nif [ \"$1\" = -s ]; then shift 2; fi\ncase \"<$*>\" in\n"
+	var body strings.Builder
+	body.WriteString("printf '%s\\n' \"$*\" >> " + shellQuote(log) + "\nif [ \"$1\" = -s ]; then shift 2; fi\ncase \"<$*>\" in\n")
 
 	for _, rule := range rules {
-		body += "*" + shellQuote(rule.Match) + "*) printf '%s' " + shellQuote(rule.Output) + "; exit " + strconv.Itoa(rule.Status) + " ;;\n"
+		body.WriteString("*" + shellQuote(rule.Match) + "*) printf '%s' " + shellQuote(rule.Output) + "; exit " + strconv.Itoa(rule.Status) + " ;;\n")
 	}
 
-	body += "esac\necho \"fake adb: unexpected $*\" >&2\nexit 1\n"
-	err = writeScript(path, body)
+	body.WriteString("esac\necho \"fake adb: unexpected $*\" >&2\nexit 1\n")
+	err = writeScript(path, body.String())
 	return
 }
 

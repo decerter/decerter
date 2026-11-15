@@ -15,7 +15,7 @@ api -N http://decerter/api/v1/events                                          # 
 The host in the URL is `decerter`, `localhost` or a loopback address (with or without a port), and a request body needs `Content-Type: application/json`, which the `api` function above sends.
 
 ## Access
-`--api-socket` takes a socket path or `@name` for an abstract socket. The usual ones are `/run/decerter/api.sock` on Linux and `@decerter-api` on Android.
+`--api-socket` takes a socket path or `@name` for an abstract socket. The usual ones are `/run/decerter/api.sock` on Linux and `@decerter-api` on Android. decerter serves the API only on a unix socket, its access control is the socket's mode and the peer credentials: a loopback `ip:port` such as `127.0.0.1:8080` is refused with an error (`decerter ui` and `decerter mcp` take one to dial the host side of `adb forward`), and a socket file in the current directory is written `./name`.
 
 - **Socket file:** mode 0660 and the group `decerter` when that group exists (decerter doesn't create it: `sudo groupadd decerter`, `sudo usermod -aG decerter $USER`, log in again, restart decerter), mode 0600 for root alone otherwise, with a warning. decerter creates it under a temporary name and renames it, refuses a path that exists and is no socket or a socket another decerter serves, replaces a socket a killed decerter left, and removes it on exit.
 - **Abstract socket:** it has no mode, so decerter checks the peer with `SO_PEERCRED`: root; on Android also adb's shell user (uid 2000); on Linux peers whose primary group is `decerter`.

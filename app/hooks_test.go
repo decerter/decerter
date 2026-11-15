@@ -155,10 +155,9 @@ func TestFindHooksPositive(state *testing.T) {
 
 // Test if app.selectedPackages returns with the expected output: no selection reads nothing, a selected pid on a host without packages.list is a warning.
 func TestSelectedPackagesPositive(state *testing.T) {
-	if _, statErr := os.Stat(platform.AndroidPackagesList); statErr == nil {
-		state.Skip("this host has " + platform.AndroidPackagesList)
-	}
-
+	usePaths(state, state.TempDir())
+	// the selected pid is this test's process
+	procDirectory = "/proc"
 	logs := &bytes.Buffer{}
 	app := newOptionsApp(state.Context(), appOptions{Platform: androidPlatform(state.TempDir())}, logs)
 	selected, packages := app.selectedPackages()

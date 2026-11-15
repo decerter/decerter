@@ -29,7 +29,7 @@ const (
 	MaxGRPCMessages int = 1000
 	// the header fields of one block a frame event carries, the editor encodes them again
 	maxEditHeadBytes int = 1 << 20
-	// the media type of gRPC, application/grpc+proto and the other subtypes start with it
+	// the media type of gRPC, application/grpc+proto and the other subtypes start with it and a +
 	grpcContentType string = "application/grpc"
 )
 

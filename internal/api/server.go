@@ -175,7 +175,14 @@ func isLocalHost(hostField string) (isLocal bool) {
 // a socket file gets mode 0660 and the group decerter when the group exists, 0600 for root alone otherwise; a stale socket is replaced, a path that is no socket or a live socket is refused
 // an abstract socket (@name) has no mode, its peers are checked with SO_PEERCRED: root, on Android also the shell user adb forward connects as, on Linux the primary group decerter
 // dataDirectory is decerter's own directory, the socket's directory is given the group too when it is that one
+// a value without / that splits as host:port is what decerter ui and decerter mcp dial over TCP, decerter serves only unix sockets and refuses it rather than make a file of that name
 func Listen(socketPath string, currentPlatform platform.Platform, logger *slog.Logger) (server *Server, err error) {
+	if _, _, splitErr := net.SplitHostPort(socketPath); (splitErr == nil) && !strings.HasPrefix(socketPath, "@") && !strings.Contains(socketPath, "/") {
+		err = fmt.Errorf("%w: %q", ErrTCPSocket, socketPath)
+		logger.Error("Could not create api socket", "error", err)
+		return
+	}
+
 	groupID := lookupGroup(currentPlatform.Type, logger)
 	policy := accessPolicyOf(socketPath, currentPlatform.Type, groupID)
 	var listener *net.UnixListener

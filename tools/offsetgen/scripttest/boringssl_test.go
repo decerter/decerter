@@ -6,6 +6,7 @@ package scripttest
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -49,6 +50,8 @@ printf 'decerter_offset_version:\n\t%s\t16\ndecerter_offset_version_in_s3:\n\t%s
 	chromeTag1 string = "130.0.6723.1"
 	chromeTag2 string = "130.0.6723.2"
 	chromeTag3 string = "130.0.6723.3"
+	// a Dart SDK version file of a stable release
+	dartVersion string = "CHANNEL stable\nMAJOR 3\nMINOR %s\nPATCH 0\nPRERELEASE 0\nPRERELEASE_PATCH 0\n"
 )
 
 // the environment of one run: a fake NDK, a local Conscrypt branch, a local chromium/src with three tags of one branch and the caches
@@ -66,6 +69,8 @@ func newSetup(state *testing.T) (setup offsetgenSetup) {
 	conscrypt := filepath.Join(setup.directory, "conscrypt")
 	chromium := filepath.Join(setup.directory, "chromium")
 	boringsslCache := filepath.Join(setup.directory, "boringssl-cache")
+	flutter := filepath.Join(setup.directory, "flutter")
+	raw := filepath.Join(setup.directory, "raw")
 	setup.chromiumCache = filepath.Join(setup.directory, "chromium-cache")
 	setup.environment = append(os.Environ(),
 		"HOME="+setup.directory,
@@ -79,6 +84,9 @@ func newSetup(state *testing.T) (setup offsetgenSetup) {
 		"CHROMIUM_REPO=file://"+chromium,
 		"CHROMIUM_CACHE="+setup.chromiumCache,
 		"CHROME_MIN_MILESTONE=130",
+		"FLUTTER_REPO=file://"+flutter,
+		"GITHUB_RAW=file://"+raw,
+		"FLUTTER_MIN_VERSION=3.24.0",
 	)
 	writeFile(state, clang, fakeClang, 0o755)
 	writeFile(state, filepath.Join(conscrypt, "src", "ssl", "internal.h"), "", 0o644)
@@ -96,6 +104,40 @@ func newSetup(state *testing.T) (setup offsetgenSetup) {
 
 	for _, revision := range []string{revisionA, revisionB} {
 		writeFile(state, filepath.Join(boringsslCache, revision, "ssl", "internal.h"), "", 0o644)
+	}
+
+	// Flutter 3.23.0 is below the minimum, 3.24.0 and 3.24.1 have Dart 3.5.0 with BoringSSL A, 3.27.0 Dart 3.6.0 with B from the DEPS of its
+	// engine repository (before the monorepo)
+	writeFile(state, filepath.Join(flutter, "README"), "", 0o644)
+	run(state, setup.environment, flutter, "git", "init", "--quiet")
+	run(state, setup.environment, flutter, "git", "add", ".")
+	run(state, setup.environment, flutter, "git", "commit", "--quiet", "--message", "flutter")
+	releases := []struct {
+		version  string
+		engine   string
+		dart     string
+		minor    string
+		revision string
+		isEngine bool
+	}{
+		{version: "3.23.0", engine: "e0", dart: "d0", minor: "4", revision: revisionA, isEngine: false},
+		{version: "3.24.0", engine: "e1", dart: "d1", minor: "5", revision: revisionA, isEngine: false},
+		{version: "3.24.1", engine: "e2", dart: "d1", minor: "5", revision: revisionA, isEngine: false},
+		{version: "3.27.0", engine: "e3", dart: "d3", minor: "6", revision: revisionB, isEngine: true},
+	}
+
+	for _, release := range releases {
+		deps := "vars = {\n  'dart_revision': '" + release.dart + "',\n  'dart_boringssl_rev': '" + release.revision + "',\n}\n"
+		depsPath := filepath.Join(raw, "flutter", "flutter", release.version, "DEPS")
+
+		if release.isEngine {
+			depsPath = filepath.Join(raw, "flutter", "engine", release.engine, "DEPS")
+		}
+
+		run(state, setup.environment, flutter, "git", "tag", release.version)
+		writeFile(state, filepath.Join(raw, "flutter", "flutter", release.version, "bin", "internal", "engine.version"), release.engine+"\n", 0o644)
+		writeFile(state, depsPath, deps, 0o644)
+		writeFile(state, filepath.Join(raw, "dart-lang", "sdk", release.dart, "tools", "VERSION"), fmt.Sprintf(dartVersion, release.minor), 0o644)
 	}
 
 	return
@@ -145,6 +187,7 @@ func TestBoringsslScriptPositive(state *testing.T) {
 	setup := newSetup(state)
 	writeFile(state, filepath.Join(setup.chromiumCache, chromeTag1), revisionA+"\n", 0o644)
 	writeFile(state, filepath.Join(setup.chromiumCache, chromeTag3), revisionA+"\n", 0o644)
+	writeFile(state, filepath.Join(setup.chromiumCache, chromeTag2+"@"+strings.Repeat("c", 40)), revisionB+"\n", 0o644)
 	testCases := []struct {
 		name      string
 		arguments []string
@@ -159,6 +202,27 @@ func TestBoringsslScriptPositive(state *testing.T) {
 			name:      "chrome branch",
 			arguments: []string{"chrome", "branches"},
 			expected:  []string{`{First: 1, Last: 3, Revision: "` + revisionA + `"},`, `Revisions: []string{"` + revisionA + `"},`, "\t\t\t" + amd64Line + "\n\t\t\t" + arm64Line + "\n"},
+		},
+		{
+			name:      "chrome branch and builds",
+			arguments: []string{"chrome", "branches", chromeTag1, chromeTag2 + "@" + strings.Repeat("c", 40)},
+			expected: []string{
+				`{First: 1, Last: 3, Revision: "` + revisionA + `"},`,
+				"var chromiumBuilds = map[string]string{\n\t\"" + chromeTag1 + `": "` + revisionA + "\",\n\t\"" + chromeTag2 + `": "` + revisionB + "\",\n}",
+				"// 2 Chromium builds of no release branch, each with its BoringSSL revision; 2 BoringSSL revisions, 1 offset sets in all",
+				`Revisions: []string{"` + revisionA + `", "` + revisionB + `"},`,
+			},
+		},
+		{
+			name:      "flutter all",
+			arguments: []string{"flutter", "all"},
+			expected: []string{
+				"// 3 Flutter releases from 3.24.0 to 3.27.0, 2 Dart versions, 2 BoringSSL revisions, 1 offset sets",
+				"\t\"3.5.0\": {\n\t\tRevision: \"" + revisionA + "\",\n\t\tFlutter:  []string{\"3.24.0\", \"3.24.1\"},\n\t\tEngines:  []string{\"e1\", \"e2\"},\n\t},",
+				"\t\"3.6.0\": {\n\t\tRevision: \"" + revisionB + "\",\n\t\tFlutter:  []string{\"3.27.0\"},\n\t\tEngines:  []string{\"e3\"},\n\t},",
+				`Revisions: []string{"` + revisionA + `", "` + revisionB + `"},`,
+				"\t\t\t" + amd64Line + "\n\t\t\t" + arm64Line + "\n",
+			},
 		},
 	}
 
@@ -214,6 +278,12 @@ func TestBoringsslScriptNegative(state *testing.T) {
 			arguments: []string{"chrome", chromeTag1},
 			extra:     []string{"FAKE_CLANG_FAIL=aarch64"},
 			expected:  "boringssl.sh: " + revisionA + ": the arm64 probe does not compile",
+		},
+		{
+			name:      "flutter probe fails",
+			arguments: []string{"flutter", "all"},
+			extra:     []string{"FAKE_CLANG_FAIL=x86_64"},
+			expected:  "boringssl.sh: " + revisionA + ": the amd64 probe does not compile",
 		},
 		{
 			name:      "chrome tag without deps",

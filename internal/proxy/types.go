@@ -80,10 +80,8 @@ type TLSChunk struct {
 // reads the TLS session of one tcp flow next to its relay: the relay hands over copies and goes on, it never waits for the observer
 // active is true while copies are wanted, it goes false for good when the flow is not TLS or can't be decrypted, the relay then stops copying
 // queuedBytes are the copies the observer has not taken yet
-// interceptFlow is the flow the history records the decrypted records under, recorder nil records nothing; http reads their exchanges, nil none
+// interceptFlow is the flow the lines and the history show the decrypted records under, recorder nil records nothing; http reads their exchanges, nil none
 type TLSObserver struct {
-	flow           redirect.Flow
-	client         netip.AddrPort
 	interceptFlow  intercept.Flow
 	recorder       *history.History
 	http           *httpFlow
@@ -94,10 +92,8 @@ type TLSObserver struct {
 	stopOnce       *sync.Once
 }
 
-func NewTLSObserver(flow redirect.Flow, client netip.AddrPort, interceptFlow intercept.Flow, recorder *history.History, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map) (observer *TLSObserver) {
+func NewTLSObserver(interceptFlow intercept.Flow, recorder *history.History, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map) (observer *TLSObserver) {
 	observer = &TLSObserver{
-		flow:           flow,
-		client:         client,
 		interceptFlow:  interceptFlow,
 		recorder:       recorder,
 		http:           nil,

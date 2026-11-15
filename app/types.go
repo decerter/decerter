@@ -32,3 +32,9 @@ type unknownOpenssl struct {
 	Library openssl.Library
 	Err     error
 }
+
+// the /proc/<pid>/maps text of a selected process
+type processMaps struct {
+	Pid  int
+	Maps string
+}

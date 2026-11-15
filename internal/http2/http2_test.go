@@ -392,6 +392,30 @@ func TestConnPositive(state *testing.T) {
 		`close 1 response=true note=""`,
 	}})
 
+	// grpc-web frames its messages its own way (base64 in grpc-web-text) and is not split, a gRPC content-type with parameters is
+	client, server = newTestPeer(true), newTestPeer(false)
+	steps = handshake(client, server, nil, nil)
+	client.headers(1, false, ":method", "POST", ":scheme", "https", ":authority", "a", ":path", "/x.Y/Z", "content-type", "application/grpc-web-text")
+	client.data(1, true, "AAAAAANhYmM=")
+	client.headers(3, false, ":method", "POST", ":scheme", "https", ":authority", "a", ":path", "/x.Y/Z", "content-type", "Application/gRPC; charset=utf-8")
+	client.data(3, true, "\x00\x00\x00\x00\x01x")
+	steps = append(steps, client.take(decerterhttp2.ClientPeer))
+	server.headers(1, false, ":status", "200", "content-type", "application/grpc-web+proto")
+	server.data(1, true, "\x00\x00\x00\x00\x09hi")
+	steps = append(steps, server.take(decerterhttp2.ServerPeer))
+	testCases = append(testCases, connCase{Name: "grpc-web", Steps: steps, MaxStreams: 0, Expected: []string{
+		`head request 1 POST https a /x.Y/Z [content-type=application/grpc-web-text] ends=false cut=false`,
+		`body request 1 "AAAAAANhYmM=" grpc=[]`,
+		`end request 1 complete=true trailers=[] note=""`,
+		`head request 3 POST https a /x.Y/Z [content-type=Application/gRPC; charset=utf-8] ends=false cut=false`,
+		`body request 3 "\x00\x00\x00\x00\x01x" grpc=[0+1/false]`,
+		`end request 3 complete=true trailers=[] note=""`,
+		`head response 1 200 [content-type=application/grpc-web+proto] ends=false cut=false`,
+		`body response 1 "\x00\x00\x00\x00\thi" grpc=[]`,
+		`end response 1 complete=true trailers=[] note=""`,
+		`close 1 response=true note=""`,
+	}})
+
 	// a reset in the middle of a response body, a stream reset before any response, GOAWAY that leaves stream 5 unprocessed, the end of the connection
 	client, server = newTestPeer(true), newTestPeer(false)
 	steps = handshake(client, server, nil, nil)

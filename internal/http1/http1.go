@@ -170,7 +170,8 @@ func (parser *parser) end(end int64) (event Event) {
 func (conn *Conn) readHead(parser *parser, data []byte, events []Event) (consumed int, result []Event) {
 	result = events
 	before := len(parser.head)
-	parser.head = append(parser.head, data...)
+	// one byte past the limit tells a head that is too long, what comes after the head (a body, the next message) is read again by the caller
+	parser.head = append(parser.head, data[:min(len(data), max(MaxHeadBytes+1-before, 0))]...)
 	scan := headScan{scanned: parser.scanned, lineStart: parser.lineStart, hasStartLine: parser.hasStartLine}
 	end, isFound, startLine := scan.next(parser.head)
 	parser.scanned, parser.lineStart = scan.scanned, scan.lineStart
@@ -498,24 +499,11 @@ func (parser *parser) readChunkEnd(data []byte, events []Event) (consumed int, r
 func (parser *parser) readTrailer(data []byte, events []Event) (consumed int, result []Event) {
 	result = events
 	before := len(parser.trailer)
-	parser.trailer = append(parser.trailer, data...)
-	end, isFound := 0, false
-
-	for index := parser.scanned; index < len(parser.trailer); index++ {
-		if parser.trailer[index] != '\n' {
-			continue
-		}
-
-		line := bytes.TrimSuffix(parser.trailer[parser.lineStart:index], []byte("\r"))
-		parser.lineStart = index + 1
-
-		if len(line) == 0 {
-			end, isFound = index+1, true
-			break
-		}
-	}
-
-	parser.scanned = len(parser.trailer)
+	parser.trailer = append(parser.trailer, data[:min(len(data), max(maxTrailerBytes+1-before, 0))]...)
+	// the trailer section has no start line, its first empty line ends it
+	scan := headScan{scanned: parser.scanned, lineStart: parser.lineStart, hasStartLine: true}
+	end, isFound, _ := scan.next(parser.trailer)
+	parser.scanned, parser.lineStart = scan.scanned, scan.lineStart
 
 	if !isFound {
 		consumed = len(data)

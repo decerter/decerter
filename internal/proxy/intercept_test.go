@@ -13,7 +13,6 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -299,22 +298,7 @@ func TestInterceptTLSNegative(state *testing.T) {
 
 // an interception of flow 1 as interceptTCP makes it, without its sockets
 func newTestInterception(secretsMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, flowHTTP *httpFlow, logger *slog.Logger) (flowInterception *interception) {
-	mutex := &sync.Mutex{}
-	flowInterception = &interception{
-		mutex:          mutex,
-		wake:           sync.NewCond(mutex),
-		flow:           intercept.FlowOf(1, 1, testFlow, testClient, filter.Values{}),
-		pipeline:       pipeline,
-		secretsBpfMaps: secretsMaps,
-		mode:           undecidedInterceptMode,
-		conn:           tlsrecord.New(maxHoldBytes, true),
-		pollPause:      interceptPollStart,
-		spinGroup:      &sync.WaitGroup{},
-		http:           flowHTTP,
-		logger:         logger,
-	}
-	flowInterception.pollTimer = time.AfterFunc(time.Hour, flowInterception.poll)
-	flowInterception.pollTimer.Stop()
+	flowInterception = newInterception(intercept.FlowOf(1, 1, testFlow, testClient, filter.Values{}), pipeline, secretsMaps, flowHTTP, logger)
 	return
 }
 

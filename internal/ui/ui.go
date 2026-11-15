@@ -20,6 +20,14 @@ import (
 //go:embed web
 var webFiles embed.FS
 
+var (
+	// runs the opener with the URL until it is done, a variable so the tests start no browser
+	runOpener = func(opener string, address string) (err error) {
+		err = exec.Command(opener, address).Run()
+		return
+	}
+)
+
 // 127.0.0.1 with a port the kernel picks; host is 127.0.0.1:<port>, the only Host the guard lets in
 // [::1] is not offered: a second address would be a second origin with its own cookie, and IPv4 loopback is always there
 func Listen() (listener net.Listener, host string, err error) {
@@ -107,7 +115,7 @@ func Open(address string, logger *slog.Logger) {
 
 	// browser opener
 	go func() {
-		err := exec.Command(opener, address).Run()
+		err := runOpener(opener, address)
 
 		if err != nil {
 			logger.Warn("Could not open the browser, open the printed URL yourself", "error", err)

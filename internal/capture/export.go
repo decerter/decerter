@@ -29,9 +29,10 @@ const (
 	historyServerSequence uint32 = 1 << 31
 	// the most payload one synthesized datagram of the history export carries
 	maxHistoryDatagram int = 65535 - 48
-	// the notes one packet of the history export carries, the notes past it are counted: a flow with many dropped or cut messages would need more than
-	// the 65535 bytes of a pcapng comment
-	maxHistoryNote int = 4096
+	// what the count of the notes a packet of the history export leaves out says
+	historyMoreNotes string = "more notes, the API has every message"
+	// the note of the bytes of a message the history did not keep
+	historyMissingFormat string = "the history did not keep %d bytes of message %d"
 )
 
 // the latest packets the capture hub handed out, at most limit bytes of them; packets[start:] are kept, the slice is compacted when half of it is gone
@@ -158,7 +159,7 @@ func WriteHistory(output io.Writer, flows []history.ExportFlow) (err error) {
 
 		// a comment that does not fit its option is cut, one packet does not end the export
 		if errors.Is(err, pcapng.ErrCommentSize) {
-			packet.Comment = strings.ToValidUTF8(packet.Comment[:maxHistoryNote], "")
+			packet.Comment = strings.ToValidUTF8(packet.Comment[:maxNoteBytes], "")
 			err = writer.WritePacket(packet)
 		}
 
@@ -171,13 +172,12 @@ func WriteHistory(output io.Writer, flows []history.ExportFlow) (err error) {
 	return
 }
 
-// the synthesized connection of one flow of the history, the arrays are by tlsrecord.Direction; omitted counts the notes that did not fit maxHistoryNote
+// the synthesized connection of one flow of the history, the arrays are by tlsrecord.Direction; note waits for the next packet
 type historyConnection struct {
 	endpoints [2]Endpoint
 	sequence  [2]uint32
 	isTCP     bool
-	note      string
-	omitted   int
+	note      packetNote
 	packets   []pcapng.Packet
 }
 
@@ -187,8 +187,7 @@ func appendHistoryFlow(packets []pcapng.Packet, flow history.ExportFlow) (result
 		endpoints: [2]Endpoint{client, server},
 		sequence:  [2]uint32{historyClientSequence, historyServerSequence},
 		isTCP:     flow.Values.IPProtocol == syscall.IPPROTO_TCP,
-		note:      describeHistoryFlow(flow),
-		omitted:   0,
+		note:      packetNote{text: describeHistoryFlow(flow), omitted: 0, more: historyMoreNotes},
 		packets:   packets,
 	}
 	opened := timestampOf(flow.Flow.Opened)
@@ -225,108 +224,55 @@ func (connection *historyConnection) message(message history.ExportMessage) {
 	}
 
 	if view.Verdict == api.DropVerdict {
-		connection.addNote(fmt.Sprintf("message %d was dropped, %d bytes the %s sent are not on the wire", view.ID, view.OriginalLength, directionName(direction)))
+		connection.note.add(fmt.Sprintf("message %d was dropped, %d bytes the %s sent are not on the wire", view.ID, view.OriginalLength, directionName(direction)))
 		return
 	}
 
 	if view.Edited {
-		connection.addNote(fmt.Sprintf("message %d was changed, the %s sent %d bytes: GET /api/v1/messages/%d has them", view.ID, directionName(direction), view.OriginalLength, view.ID))
+		connection.note.add(fmt.Sprintf("message %d was changed, the %s sent %d bytes: GET /api/v1/messages/%d has them", view.ID, directionName(direction), view.OriginalLength, view.ID))
 	}
 
 	timestamp := timestampOf(view.Time)
 	payload := message.Payload
+	missing := view.Length - len(payload)
 
+	// a datagram is as long as the history kept it and one datagram holds, its own comment says what is not in it
 	if !connection.isTCP {
-		connection.datagram(direction, payload[:min(len(payload), maxHistoryDatagram)], timestamp)
+		if missing > 0 {
+			connection.note.add(fmt.Sprintf(historyMissingFormat, missing, view.ID))
+		}
+
+		if cut := len(payload) - maxHistoryDatagram; cut > 0 {
+			connection.note.add(fmt.Sprintf("%d bytes of message %d do not fit the datagram", cut, view.ID))
+			payload = payload[:maxHistoryDatagram]
+		}
+
+		connection.datagram(direction, payload, timestamp)
 		return
 	}
 
-	maxLength := segmentLength(connection.endpoints[direction].Address)
-
-	for len(payload) > 0 {
-		length := min(len(payload), maxLength)
-		flags := ACKFlag
-
-		if length == len(payload) {
-			flags |= PSHFlag
-		}
-
-		connection.segment(direction, flags, payload[:length], timestamp)
-		payload = payload[length:]
+	for flags, segment := range segments(connection.endpoints[direction].Address, payload) {
+		connection.segment(direction, flags, segment, timestamp)
 	}
 
 	// the bytes the history did not keep went on too, they are a hole in front of the next segment
-	if missing := view.Length - len(message.Payload); missing > 0 {
+	if missing > 0 {
 		connection.sequence[direction] += uint32(missing)
-		connection.addNote(fmt.Sprintf("the history did not keep %d bytes of message %d", missing, view.ID))
+		connection.note.add(fmt.Sprintf(historyMissingFormat, missing, view.ID))
 	}
 }
 
-// one synthesized TCP packet, it acknowledges everything the other side sent so far
+// one synthesized TCP packet, it acknowledges everything the other side sent so far and carries the note that waits
 func (connection *historyConnection) segment(direction tlsrecord.Direction, flags uint8, payload []byte, timestamp uint64) {
-	other := otherDirection(direction)
-	acknowledgment := uint32(0)
-
-	if flags&ACKFlag != 0 {
-		acknowledgment = connection.sequence[other]
-	}
-
-	data := TCPPacket(nil, connection.endpoints[direction], connection.endpoints[other], connection.sequence[direction], acknowledgment, flags, payload)
-	connection.sequence[direction] += uint32(len(payload))
-
-	// SYN and FIN take a sequence number each
-	if flags&(SYNFlag|FINFlag) != 0 {
-		connection.sequence[direction]++
-	}
-
-	connection.add(direction, data, timestamp)
-}
-
-func (connection *historyConnection) datagram(direction tlsrecord.Direction, payload []byte, timestamp uint64) {
-	data := UDPPacket(nil, connection.endpoints[direction], connection.endpoints[otherDirection(direction)], payload)
-	connection.add(direction, data, timestamp)
-}
-
-// the packet carries the note that waits
-func (connection *historyConnection) add(direction tlsrecord.Direction, data []byte, timestamp uint64) {
-	packet := pcapng.Packet{
-		Timestamp:      timestamp,
-		Direction:      pcapng.OutboundDirection,
-		OriginalLength: uint32(len(data)),
-		Data:           data,
-		Comment:        "",
-	}
-
-	if direction == tlsrecord.ServerDirection {
-		packet.Direction = pcapng.InboundDirection
-	}
-
-	// a note is only counted while one waits, the count goes behind it
-	if connection.omitted > 0 {
-		connection.note += fmt.Sprintf("; %d more notes, the API has every message", connection.omitted)
-		connection.omitted = 0
-	}
-
-	if connection.note != "" {
-		packet.Comment = notePrefix + connection.note
-		connection.note = ""
-	}
-
+	packet := synthesizeSegment(nil, connection.endpoints, &connection.sequence, direction, flags, payload, timestamp)
+	packet.Comment = connection.note.take()
 	connection.packets = append(connection.packets, packet)
 }
 
-// the notes wait for the next packet, those past maxHistoryNote are only counted
-func (connection *historyConnection) addNote(text string) {
-	if (connection.note != "") && (len(connection.note)+len(text) > maxHistoryNote) {
-		connection.omitted++
-		return
-	}
-
-	if connection.note != "" {
-		connection.note += "; "
-	}
-
-	connection.note += text
+func (connection *historyConnection) datagram(direction tlsrecord.Direction, payload []byte, timestamp uint64) {
+	packet := synthesizedPacket(direction, UDPPacket(nil, connection.endpoints[direction], connection.endpoints[otherDirection(direction)], payload), timestamp)
+	packet.Comment = connection.note.take()
+	connection.packets = append(connection.packets, packet)
 }
 
 // the client is IPv4-mapped in run mode, a synthesized packet needs one family: IPv4 when both are, IPv6 otherwise

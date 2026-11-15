@@ -3,7 +3,6 @@
 package proxy
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -673,8 +672,27 @@ func sideOf(direction tlsrecord.Direction) (side api.Side) {
 	return
 }
 
-// a TLS 1.3 handshake record that holds only NewSessionTicket messages: it changes no keys, held HTTP bytes may go on after it
+// a TLS 1.3 handshake record that holds only whole NewSessionTicket messages (type, 3 byte length, body each): it changes no keys, held HTTP bytes may
+// go on after it; a KeyUpdate coalesced with a ticket, or a message cut at the end of the record, makes it no ticket record
 func isTicketRecord(record tlsrecord.Record) (isTicket bool) {
-	isTicket = (record.ContentType == tlsrecord.HandshakeContentType) && (len(record.Payload) > 0) && bytes.Equal(record.Payload[:1], []byte{newSessionTicketType})
+	if (record.ContentType != tlsrecord.HandshakeContentType) || (len(record.Payload) == 0) {
+		return
+	}
+
+	for rest := record.Payload; len(rest) > 0; {
+		if (len(rest) < 4) || (rest[0] != newSessionTicketType) {
+			return
+		}
+
+		length := int(rest[1])<<16 | int(rest[2])<<8 | int(rest[3])
+
+		if len(rest) < 4+length {
+			return
+		}
+
+		rest = rest[4+length:]
+	}
+
+	isTicket = true
 	return
 }

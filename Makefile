@@ -57,6 +57,8 @@ ALLOWED_LICENSES ?= Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MIT,MPL-2.0
 COVERAGE_DIR ?= coverage
 COVERAGE_E2E ?= 0
 COVERAGE_ANDROID ?= 0
+# the lowest total coverage in percent make coverage passes with, empty is no floor
+COVERAGE_MIN ?=
 
 # Tools Default Version
 GOLANGCI_LINT_VERSION ?= v2.12.2
@@ -193,8 +195,8 @@ test-e2e-android: ## Run the Android e2e tests on the emulator with sudo, needs 
 # the unit tests alone, with the e2e tests when COVERAGE_E2E=1 (sudo, as make test-e2e) and with the Android e2e tests when COVERAGE_ANDROID=1 (sudo and the emulator, as make test-e2e-android);
 # every test counts for every package it runs (-coverpkg), see tools/coverage/coverage.sh
 .PHONY: coverage
-coverage: ## Write the test coverage of the hand-written Go code into COVERAGE_DIR (default is coverage): per package, per function and as HTML; unit tests, with COVERAGE_E2E=1 the e2e tests too, with COVERAGE_ANDROID=1 the Android e2e tests too
-	COVERAGE_DIR="$(COVERAGE_DIR)" DECERTER_E2E_FLUTTER="$(DECERTER_E2E_FLUTTER)" DECERTER_E2E_CHROMIUM="$(DECERTER_E2E_CHROMIUM)" ./tools/coverage/coverage.sh unit $(if $(filter 1,$(COVERAGE_E2E)),e2e) $(if $(filter 1,$(COVERAGE_ANDROID)),android)
+coverage: ## Write the test coverage of the hand-written Go code into COVERAGE_DIR (default is coverage): per package, per function and as HTML; unit tests, with COVERAGE_E2E=1 the e2e tests too, with COVERAGE_ANDROID=1 the Android e2e tests too, COVERAGE_MIN=<percent> fails below that total
+	COVERAGE_DIR="$(COVERAGE_DIR)" COVERAGE_MIN="$(COVERAGE_MIN)" DECERTER_E2E_FLUTTER="$(DECERTER_E2E_FLUTTER)" DECERTER_E2E_CHROMIUM="$(DECERTER_E2E_CHROMIUM)" ./tools/coverage/coverage.sh unit $(if $(filter 1,$(COVERAGE_E2E)),e2e) $(if $(filter 1,$(COVERAGE_ANDROID)),android)
 
 ### Build ###
 .PHONY: build

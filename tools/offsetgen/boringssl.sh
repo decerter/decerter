@@ -182,8 +182,59 @@ fetch_revision() {
 	git -C "${directory}" checkout --quiet FETCH_HEAD
 }
 
+# the offsets of a BoringSSL revision, probed once: the caller's offsets (by revision), revisions (in order) and groups (the revisions of each set of
+# offsets) get it
+probe_revision() {
+	local revision="$1" key
+
+	if [[ -n "${offsets[${revision}]:-}" ]]
+	then
+		return
+	fi
+
+	fetch_revision "${revision}" || return 1
+	key="$(probe_offsets "${cache}/${revision}" "${revision}" | tr '\n' ';')" || return 1
+	offsets["${revision}"]="${key}"
+	revisions+=("${revision}")
+	groups["${key}"]="${groups[${key}]:-}${groups[${key}]:+ }${revision}"
+}
+
+# the revisionOffset table named name of the caller's revisions, offsets and groups: one entry per set of offsets, at its first revision
+print_revision_offsets() {
+	local name="$1" revision key group line
+
+	printf 'var %s = []revisionOffset{\n' "${name}"
+
+	for revision in "${revisions[@]}"
+	do
+		key="${offsets[${revision}]}"
+		group="${groups[${key}]:-}"
+
+		# a group is printed at its first revision
+		if [[ -z "${group}" ]]
+		then
+			continue
+		fi
+
+		unset "groups[${key}]"
+		printf '\t{\n'
+		printf '\t\tRevisions: []string{"%s"},\n' "$(sed 's/ /", "/g' <<< "${group}")"
+		printf '\t\tOffsets: map[string]Offset{\n'
+
+		while read -r -d ';' line
+		do
+			printf '\t\t\t"%s": %s,\n' "${line%% *}" "$(offset_literal "${line}")"
+		done <<< "${key}"
+
+		printf '\t\t},\n'
+		printf '\t},\n'
+	done
+
+	printf '}\n'
+}
+
 flutter() {
-	local versions=("$@") version engine deps dart_revision boringssl dart revision line releases=() revisions=() group key listed
+	local versions=("$@") version engine deps dart_revision boringssl dart releases=() revisions=() listed
 
 	if [[ "${versions[*]}" == "all" ]]
 	then
@@ -233,17 +284,7 @@ flutter() {
 
 	for dart in "${releases[@]}"
 	do
-		revision="${dart_boringssl[${dart}]}"
-
-		if [[ -n "${offsets[${revision}]:-}" ]]
-		then
-			continue
-		fi
-
-		fetch_revision "${revision}"
-		offsets["${revision}"]="$(probe_offsets "${cache}/${revision}" "${revision}" | tr '\n' ';')" || return 1
-		revisions+=("${revision}")
-		groups["${offsets[${revision}]}"]="${groups[${offsets[${revision}]}]:-}${groups[${offsets[${revision}]}]:+ }${revision}"
+		probe_revision "${dart_boringssl[${dart}]}" || return 1
 	done
 
 	printf '// SPDX-License-Identifier: AGPL-3.0-only\n\n'
@@ -263,34 +304,7 @@ flutter() {
 
 	printf '}\n\n'
 	printf '// the BoringSSL revisions with equal offsets, in the order of their first Dart version\n'
-	printf 'var revisionOffsets = []revisionOffset{\n'
-
-	for revision in "${revisions[@]}"
-	do
-		key="${offsets[${revision}]}"
-		group="${groups[${key}]:-}"
-
-		# a group is printed at its first revision
-		if [[ -z "${group}" ]]
-		then
-			continue
-		fi
-
-		unset "groups[${key}]"
-		printf '\t{\n'
-		printf '\t\tRevisions: []string{"%s"},\n' "$(sed 's/ /", "/g' <<< "${group}")"
-		printf '\t\tOffsets: map[string]Offset{\n'
-
-		while read -r -d ';' line
-		do
-			printf '\t\t\t"%s": %s,\n' "${line%% *}" "$(offset_literal "${line}")"
-		done <<< "${key}"
-
-		printf '\t\t},\n'
-		printf '\t},\n'
-	done
-
-	printf '}\n'
+	print_revision_offsets revisionOffsets
 }
 
 # the boringssl_revision of a chromium/src tag, or of a commit for version@commit, from its DEPS through gitiles (base64 with format=TEXT),
@@ -358,7 +372,7 @@ merge_ranges() {
 }
 
 chrome() {
-	local arguments=("$@") tags argument branch major version line revisions=() revision key group first last count=0 branches=() builds=() ranges
+	local arguments=("$@") tags argument branch major version revisions=() revision first last count=0 branches=() builds=() ranges
 	local -a patches
 
 	declare -A branch_ranges=() offsets=() groups=() covered=() build_revisions=()
@@ -421,16 +435,7 @@ chrome() {
 			branch_ranges["${branch}"]="${branch_ranges[${branch}]:-}${first} ${last} ${revision};"
 			count=$((count + 1))
 			echo "boringssl.sh: Chromium ${branch}.${first} to ${branch}.${last}: BoringSSL ${revision}" >&2
-
-			if [[ -n "${offsets[${revision}]:-}" ]]
-			then
-				continue
-			fi
-
-			fetch_revision "${revision}"
-			offsets["${revision}"]="$(probe_offsets "${cache}/${revision}" "${revision}" | tr '\n' ';')" || return 1
-			revisions+=("${revision}")
-			groups["${offsets[${revision}]}"]="${groups[${offsets[${revision}]}]:-}${groups[${offsets[${revision}]}]:+ }${revision}"
+			probe_revision "${revision}" || return 1
 		done <<< "${ranges}"
 	done
 
@@ -445,16 +450,7 @@ chrome() {
 		revision="$(chromium_boringssl "${version}")" || return 1
 		build_revisions["${version}"]="${revision}"
 		echo "boringssl.sh: Chromium build ${version}: BoringSSL ${revision}" >&2
-
-		if [[ -n "${offsets[${revision}]:-}" ]]
-		then
-			continue
-		fi
-
-		fetch_revision "${revision}"
-		offsets["${revision}"]="$(probe_offsets "${cache}/${revision}" "${revision}" | tr '\n' ';')" || return 1
-		revisions+=("${revision}")
-		groups["${offsets[${revision}]}"]="${groups[${offsets[${revision}]}]:-}${groups[${offsets[${revision}]}]:+ }${revision}"
+		probe_revision "${revision}" || return 1
 	done
 
 	printf '// SPDX-License-Identifier: AGPL-3.0-only\n\n'
@@ -486,34 +482,7 @@ chrome() {
 
 	printf '}\n\n'
 	printf '// the BoringSSL revisions with equal offsets, in the order of their first branch, then of the builds\n'
-	printf 'var chromiumRevisionOffsets = []revisionOffset{\n'
-
-	for revision in "${revisions[@]}"
-	do
-		key="${offsets[${revision}]}"
-		group="${groups[${key}]:-}"
-
-		# a group is printed at its first revision
-		if [[ -z "${group}" ]]
-		then
-			continue
-		fi
-
-		unset "groups[${key}]"
-		printf '\t{\n'
-		printf '\t\tRevisions: []string{"%s"},\n' "$(sed 's/ /", "/g' <<< "${group}")"
-		printf '\t\tOffsets: map[string]Offset{\n'
-
-		while read -r -d ';' line
-		do
-			printf '\t\t\t"%s": %s,\n' "${line%% *}" "$(offset_literal "${line}")"
-		done <<< "${key}"
-
-		printf '\t\t},\n'
-		printf '\t},\n'
-	done
-
-	printf '}\n'
+	print_revision_offsets chromiumRevisionOffsets
 }
 
 mode="${1:?usage: boringssl.sh conscrypt <release>... | flutter all|<version>... | chrome [branches] [<version>|<version>@<commit>...]}"

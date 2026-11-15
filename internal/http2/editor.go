@@ -794,12 +794,14 @@ func (editor *Editor) build(write func(framer *http2.Framer) error) (data []byte
 }
 
 // the sender of a side gets back the window of what it sent and the receiver did not count: on the connection, and on each stream it still sends on that does not only wait to open
+// the DATA held on streams that wait to open keeps its connection window until it goes on or its stream is reset, so the sender can't have more than
+// the connection window waiting in decerter behind a held stream
 func (editor *Editor) topUp(side *editSide) {
 	other := editor.sides[otherPeer(side.peer)]
 
-	if side.excess > 0 {
-		other.write(editor.windowUpdate(0, side.excess))
-		side.excess = 0
+	if returned := side.excess - editor.gatedData(side); returned > 0 {
+		other.write(editor.windowUpdate(0, returned))
+		side.excess -= returned
 	}
 
 	for _, id := range slices.Sorted(maps.Keys(editor.streams)) {
@@ -816,6 +818,23 @@ func (editor *Editor) topUp(side *editSide) {
 
 		current.excess = 0
 	}
+}
+
+// the DATA bytes held on the streams of a side that wait to open
+func (editor *Editor) gatedData(side *editSide) (gated int64) {
+	for _, stream := range editor.streams {
+		if !editor.isGated(side, stream) {
+			continue
+		}
+
+		for _, held := range stream.sides[side.peer].held {
+			if held.kind == dataUnit {
+				gated += held.need
+			}
+		}
+	}
+
+	return
 }
 
 // the DATA that waits for the windows goes on as far as they allow now, with what waits behind it on its stream

@@ -70,7 +70,7 @@ func init() {
 	captureCmd.Flags().StringVarP(&capturePath, "write", "w", "", "write the capture to this pcapng `file`, - is a live stream to stdout (required without --api-socket)")
 	addProcessFlags(captureCmd.Flags())
 	addScopeFlags(captureCmd.Flags())
-	captureCmd.Flags().StringVar(&apiSocket, "api-socket", "", "serve the control API with captures and the live stream on the unix socket at this `path`, @name is an abstract socket; the usual one is /run/decerter/api.sock on Linux and @decerter-api on Android (default is none)")
+	captureCmd.Flags().StringVar(&apiSocket, "api-socket", "", "serve the control API with captures and the live stream on the unix socket at this `path`, @name is an abstract socket, an ip:port is refused (it is for decerter ui and decerter mcp, ./name is a socket file here); the usual one is /run/decerter/api.sock on Linux and @decerter-api on Android (default is none)")
 	captureCmd.Flags().BoolVar(&plaintext, "plaintext", false, "write synthesized packets with the decrypted payload to the -w file instead of the captured packets and their secrets (default is false)")
 	captureCmd.Flags().Func("snaplen", "copy at most this many `bytes` of a packet, counted from the IP header; a packet cut short can't be decrypted and is a gap in its TCP stream with --plaintext (default is 262144, the largest value)", parseSnaplen)
 	addBlockQuicFlag(captureCmd.Flags())

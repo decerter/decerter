@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -220,16 +219,16 @@ func TestTailEventsStopPositive(state *testing.T) {
 			events = []v1.Event{{Seq: 1, Type: v1.RuleDeletedEventType}}
 		}
 
-		body := ""
+		var body strings.Builder
 
 		for _, event := range events {
 			data, _ := json.Marshal(event)
-			body += fmt.Sprintf("data: %s\n\n", data)
+			body.WriteString("data: " + string(data) + "\n\n")
 		}
 
 		writer.Header().Set("Content-Type", eventMediaType)
 
-		if _, writeErr := io.WriteString(writer, body); writeErr != nil {
+		if _, writeErr := io.WriteString(writer, body.String()); writeErr != nil {
 			state.Errorf("Could not write the fake api answer, error: %s", writeErr.Error())
 		}
 	})

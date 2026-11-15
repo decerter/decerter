@@ -294,7 +294,7 @@ type Flow struct {
 	Truncated    bool      `json:"truncated"`
 }
 
-// GET /api/v1/flows, newest first; NextCursor is empty on the last page
+// GET /api/v1/flows, newest first; NextCursor is the id of the oldest flow of the page, the next page has lower ids, empty on the last page
 type FlowList struct {
 	Flows      []Flow `json:"flows"`
 	NextCursor string `json:"next_cursor,omitzero"`
@@ -433,7 +433,7 @@ type HTTPHead struct {
 // URL is the scheme of the flow, the Host field and the target of a request; BodyLength is the body that went on without its chunk framing, StoredLength what the history kept of it
 // Edited is true when a rule or an edit of layer http changed the message, Original is then its head as it came and OriginalBodyLength its body; Verdict drop is a message that did not go on
 // Note says why the HTTP layer did not take the message as a whole: too large, too slow, or the stream stopped being HTTP/1; an edit that is no HTTP/2 message; for HTTP/2 also a reset, a GOAWAY or a drop
-// GRPCMessages are the length-prefixed messages of a gRPC body (HTTP/2 with content-type application/grpc…), at most 1000
+// GRPCMessages are the length-prefixed messages of a gRPC body (HTTP/2 with content-type application/grpc or application/grpc+…, not grpc-web), at most 1000
 type HTTPMessage struct {
 	HTTPHead
 	URL                string        `json:"url,omitzero"`

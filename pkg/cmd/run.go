@@ -98,7 +98,7 @@ func init() {
 	runCmd.Flags().BoolVar(&interceptFlows, "intercept", false, "run every message of the redirected flows through the identity rule and print it, TLS and DTLS 1.2 records are decrypted and encrypted again (default is false)")
 	runCmd.Flags().Func("port", "`port` of the TCP proxy listener and the UDP proxy socket on lo (default is 15001)", parsePort)
 	runCmd.Flags().Func("udp-idle-timeout", "a UDP session ends after this `duration` without a datagram in either direction (default is 30s)", parseIdleTimeout)
-	runCmd.Flags().StringVar(&apiSocket, "api-socket", "", "serve the control API on the unix socket at this `path`, @name is an abstract socket; the usual one is /run/decerter/api.sock on Linux and @decerter-api on Android (default is none)")
+	runCmd.Flags().StringVar(&apiSocket, "api-socket", "", "serve the control API on the unix socket at this `path`, @name is an abstract socket, an ip:port is refused (it is for decerter ui and decerter mcp, ./name is a socket file here); the usual one is /run/decerter/api.sock on Linux and @decerter-api on Android (default is none)")
 	runCmd.Flags().Func("hold-timeout", "a message held over the control API goes on unchanged when nobody forwards or drops it within this `duration`, at most 1h (default is 60s)", parseHoldTimeout)
 	runCmd.Flags().Func("assembly-timeout", "an HTTP message kept back for the rules and holds of layer http goes on as it came when it is not whole within this `duration`, at most 1h (default is 5s)", parseAssemblyTimeout)
 	addBlockQuicFlag(runCmd.Flags())

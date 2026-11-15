@@ -96,6 +96,40 @@ func TestCompareNegative(state *testing.T) {
 	}
 }
 
+// Test if bpfdrift.run returns with the expected output: status 0 for pairs that are the same, 1 and a line per pair that differs, 2 for a usage error
+// or an object that can't be read.
+func TestRunPositive(state *testing.T) {
+	positiveCases := []struct {
+		Name      string
+		Arguments []string
+		Status    int
+		Output    []string
+	}{
+		{Name: "the same", Arguments: []string{captureLittle, copyObject(state, captureLittle), redirectLittle, copyObject(state, redirectLittle)}, Status: 0, Output: nil},
+		{Name: "one pair differs", Arguments: []string{captureLittle, copyObject(state, captureLittle), captureLittle, captureBig}, Status: 1, Output: []string{captureBig + " differs from " + captureLittle + ": line 1: "}},
+		{Name: "no arguments", Arguments: nil, Status: 2, Output: []string{errUsage.Error()}},
+		{Name: "odd arguments", Arguments: []string{captureLittle}, Status: 2, Output: []string{errUsage.Error()}},
+		{Name: "missing object", Arguments: []string{captureLittle, "missing.o"}, Status: 2, Output: []string{"Could not compare " + captureLittle + " with missing.o: "}},
+	}
+
+	for _, positive := range positiveCases {
+		output := &strings.Builder{}
+		status := run(positive.Arguments, output)
+
+		if (status != positive.Status) || ((positive.Output == nil) != (output.Len() == 0)) {
+			state.Errorf("Test of bpfdrift.run function failed, %s, status should be %d, status: %d, output: %q", positive.Name, positive.Status, status, output.String())
+			return
+		}
+
+		for _, expected := range positive.Output {
+			if !strings.Contains(output.String(), expected) {
+				state.Errorf("Test of bpfdrift.run function failed, %s, output should contain %q, output: %q", positive.Name, expected, output.String())
+				return
+			}
+		}
+	}
+}
+
 // Test if bpfdrift.lineAt returns with the expected output: the line at an index, a marker past the end.
 func TestLineAtPositive(state *testing.T) {
 	lines := []string{"first", "second"}

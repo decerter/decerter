@@ -603,7 +603,7 @@ func TestPipeTCPNegative(state *testing.T) {
 		}
 
 		logger, logs := bufferLogger()
-		observer := NewTLSObserver(testFlow, testClient, intercept.Flow{}, nil, testSecretsMaps)
+		observer := NewTLSObserver(intercept.FlowOf(1, 1, testFlow, testClient, filter.Values{}), nil, testSecretsMaps)
 
 		// a reset end is closed with linger 0, its peer sees ECONNRESET
 		if negative.ResetServer {

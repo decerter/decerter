@@ -473,7 +473,8 @@ paths:
         Every occurrence of `find` in a message of `direction`, `layer` and `filter` becomes `replace`. A message is one
         TLS or DTLS record, one read of a plain TCP stream or one UDP datagram, so a value that spans two messages is
         not found. A `regex` find is RE2 over the bytes (use `(?s)` for `.` to match a newline) and must not match the
-        empty string; its `replace` is a template where `$1`, `${1}` and `${name}` are groups and `$$` is a `$`.
+        empty string; an empty match inside a message (such as `\b` at a word boundary) is not replaced. Its `replace`
+        is a template where `$1`, `${1}` and `${name}` are groups and `$$` is a `$`.
       requestBody:
         required: true
         content:
@@ -558,7 +559,8 @@ paths:
         message as it went on the wire (an edit included), seq/ack moving with the payload, and a FIN from both sides
         when it closed; the first packet of a flow has a comment with its id, process and TLS session, a dropped or
         changed message is named in a comment (the original is at getMessage), and bytes the history did not keep are a
-        gap in the sequence numbers. `format=dsb` on `decerter run` is the packets decerter still keeps of the proxy's upstream
+        gap in the sequence numbers with a comment; a UDP message is one datagram of what the history kept (at most
+        65487 bytes), its comment counts the bytes not in it. `format=dsb` on `decerter run` is the packets decerter still keeps of the proxy's upstream
         sockets of the flows (the latest 64 MiB), the wire side with the edits, with a DSB in front of each TLS and DTLS
         session whose secrets are still there. On `decerter capture` the packets decerter still keeps of the flows (the latest
         64 MiB): `format=dsb` as they were captured with a DSB in front of each TLS and DTLS session whose secrets are
@@ -748,7 +750,7 @@ components:
     Cursor:
       name: cursor
       in: query
-      description: The next_cursor of the page before, empty for the first page.
+      description: The next_cursor of the page before, empty for the first page. For flows it is the id of the oldest flow of that page, for messages and exchanges the id of the last one.
       schema:
         type: string
   responses:
@@ -894,7 +896,7 @@ components:
             grpc_messages:
               type: array
               description: |
-                The length-prefixed messages of a gRPC body (HTTP/2 with a content-type starting with application/grpc),
+                The length-prefixed messages of a gRPC body (HTTP/2 with the content-type application/grpc or application/grpc+…, not grpc-web),
                 in body order, at most 1000; the body itself (GET /exchanges/{id}/body) keeps the prefixes
               items:
                 $ref: "#/components/schemas/GRPCMessage"
@@ -1295,7 +1297,9 @@ components:
             $ref: "#/components/schemas/Flow"
         next_cursor:
           type: string
-          description: Absent on the last page
+          description: |
+            The id of the oldest flow of this page, absent on the last page. The next page has the flows with a lower id, so
+            a client that got a page capped by limit continues with cursor=next_cursor, also after that flow left the history
     Message:
       type: object
       required: [id, flow_id, direction, layer, time, origin, verdict, edited, length, original_length, stored_length]
