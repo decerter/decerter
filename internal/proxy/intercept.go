@@ -10,13 +10,13 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"os"
 	"runtime"
 	"sync"
 	"time"
 
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/intercept"
+	"github.com/decerter/decerter/internal/output"
 	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
 )
@@ -823,8 +823,8 @@ func (interception *interception) finish() {
 	flow := interception.flow
 	flow.Session = interception.conn.Session()
 	text := fmt.Sprintf("%s sni=%q alpn=%q records up=%s down=%s\n", intercept.LinePrefix(flow, intercept.TLSLayer), flow.Session.ServerName, flow.Session.Protocol, statsText(interception.stats[tlsrecord.ClientDirection]), statsText(interception.stats[tlsrecord.ServerDirection]))
-	// stdout is the output of the tool as in printFlow, a failed write has nowhere to go
-	_, _ = os.Stdout.WriteString(text)
+	// stdout is the output of the tool as in printFlow
+	_, _ = output.Stdout.WriteString(text)
 }
 
 // sealed records in, records written for them, identical to what came, changed by the rules, dropped, split, forwarded raw, passed before the secrets

@@ -19,6 +19,11 @@ import (
 	"github.com/decerter/decerter/internal/tls/openssl"
 )
 
+var (
+	// the libssl search, a variable so the tests can take away the host's OpenSSL
+	findLibssl = openssl.FindLibssl
+)
+
 // the libssl files decerter hooks: the --libssl given, nothing else then; otherwise libssl.so.3 and libssl.so.4 of the linker cache, both when the host has
 // both, and the libssl.so.N (N 3 or newer) the selected processes map, so a process gets the library it actually loads, also a container's own
 // --libssl with an unknown version fails before anything is attached; a library of the linker cache with an unknown version is a warning naming the
@@ -26,7 +31,7 @@ import (
 // that process is relayed without secrets; seen holds the device and inode of every library looked at, for the rescan
 func (app *App) findOpensslHooks() (hooks []opensslHook, seen map[string]bool, err error) {
 	seen = map[string]bool{}
-	libraries, findErr := openssl.FindLibssl(app.libssl)
+	libraries, findErr := findLibssl(app.libssl)
 
 	// without --libssl a host without OpenSSL can still have selected processes that map one (a container)
 	if (findErr != nil) && ((app.libssl != "") || !errors.Is(findErr, openssl.ErrLibraryNotFound)) {
@@ -63,10 +68,9 @@ func (app *App) findOpensslHooks() (hooks []opensslHook, seen map[string]bool, e
 
 	hooks = append(hooks, app.findMappedOpenssl(seen)...)
 
-	// no OpenSSL on the host and no selected process that maps one
+	// no OpenSSL on the host and no selected process that maps one, the caller decides whether decerter goes on without secrets
 	if (len(hooks) == 0) && (len(unknown) == 0) {
 		err = findErr
-		app.logger.Error("Could not find libssl", "error", err)
 		return
 	}
 

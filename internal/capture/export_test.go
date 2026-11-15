@@ -23,7 +23,7 @@ import (
 	"github.com/decerter/decerter/internal/tlsrecord"
 )
 
-// Test if capture.packetRing keeps the latest packets up to its limit, oldest first, and finds the packets of a socket or of a flow.
+// Test if capture.packetRing keeps the latest packets up to its limit, oldest first, and finds the packets of a socket, never by the flow its socket carries.
 func TestPacketRingPositive(state *testing.T) {
 	ring := newPacketRing(100)
 
@@ -38,11 +38,11 @@ func TestPacketRingPositive(state *testing.T) {
 
 		return
 	}
-	all := ring.packetsOf(map[uint64][32]byte{0: {}, 1: {}}, false)
-	bySocket := ring.packetsOf(map[uint64][32]byte{1: {}}, false)
-	byFlow := ring.packetsOf(map[uint64][32]byte{10: {}}, true)
+	all := ring.packetsOf(map[uint64][32]byte{0: {}, 1: {}})
+	bySocket := ring.packetsOf(map[uint64][32]byte{1: {}})
+	byFlow := ring.packetsOf(map[uint64][32]byte{10: {}})
 
-	if !slices.Equal(timestamps(all), []uint64{7, 8, 9}) || !slices.Equal(timestamps(bySocket), []uint64{7, 9}) || !slices.Equal(timestamps(byFlow), []uint64{8}) || (ring.bytes != 90) || (len(ring.packets)-ring.start != 3) {
+	if !slices.Equal(timestamps(all), []uint64{7, 8, 9}) || !slices.Equal(timestamps(bySocket), []uint64{7, 9}) || (len(byFlow) != 0) || (ring.bytes != 90) || (len(ring.packets)-ring.start != 3) {
 		state.Errorf("Test of capture.packetRing failed, the ring should keep the last 3 packets, all: %v, socket 1: %v, flow 10: %v, bytes: %d", timestamps(all), timestamps(bySocket), timestamps(byFlow), ring.bytes)
 		return
 	}
@@ -50,7 +50,7 @@ func TestPacketRingPositive(state *testing.T) {
 	// a packet larger than the ring pushes everything out, itself too
 	ring.add(capturebpf.Packet{Cookie: 0, FlowCookie: 10, TimestampNs: 100, Length: 200, IsIngress: false, Data: make([]byte, 200)})
 
-	if (len(ring.packetsOf(map[uint64][32]byte{0: {}, 1: {}}, false)) != 0) || (ring.bytes != 0) {
+	if (len(ring.packetsOf(map[uint64][32]byte{0: {}, 1: {}})) != 0) || (ring.bytes != 0) {
 		state.Errorf("Test of capture.packetRing failed, a packet over the limit should leave the ring empty, bytes: %d", ring.bytes)
 		return
 	}
@@ -132,6 +132,44 @@ func TestHubExportPositive(state *testing.T) {
 				return
 			}
 		}
+	}
+}
+
+// Test if capture.Hub.Export returns with the expected output for the udp sessions of one unconnected app socket in run mode: each session has its own
+// upstream socket, all of them carry the app's flow cookie; the export of one session has only the packets of its upstream socket.
+func TestHubExportSessionsPositive(state *testing.T) {
+	hub, err := NewHub(capturebpf.MaxSnaplen, nil, nil, nil, nil, true, slog.New(slog.DiscardHandler))
+
+	if err != nil {
+		state.Fatalf("Test of capture.NewHub failed, error: %s", err.Error())
+	}
+
+	hub.ring = newPacketRing(1 << 20)
+	sessions := map[uint64]Endpoint{21: tlsServer, 22: {Address: netip.MustParseAddr("127.0.0.2"), Port: 53}}
+
+	for socket, server := range sessions {
+		data := UDPPacket(nil, tlsClient, server, []byte("query"))
+		hub.ring.add(capturebpf.Packet{Cookie: socket, FlowCookie: 1, TimestampNs: socket, Length: uint32(len(data)), IsIngress: false, Data: data})
+	}
+
+	output := bytes.Buffer{}
+	err = hub.Export(&output, map[uint64][32]byte{22: {}}, false, slog.New(slog.DiscardHandler))
+
+	if err != nil {
+		state.Fatalf("Test of capture.Hub.Export failed, error: %s", err.Error())
+	}
+
+	blocks, err := readBlocks(output.Bytes())
+
+	if err != nil {
+		state.Fatalf("Test of capture.Hub.Export failed, cannot read output, error: %s", err.Error())
+	}
+
+	written, _, _ := capturedOf(blocks)
+
+	if (len(written) != 1) || !bytes.Contains(written[0], []byte{127, 0, 0, 2}) {
+		state.Errorf("Test of capture.Hub.Export failed, only the packet of the session's upstream socket should be exported, packets: %x", written)
+		return
 	}
 }
 
@@ -241,6 +279,47 @@ func TestWriteHistoryUDPPositive(state *testing.T) {
 
 	if (blocks[0].header.protocol != syscall.IPPROTO_UDP) || (blocks[0].header.source.Address != netip.MustParseAddr("::ffff:192.0.2.10")) || (blocks[6].header.sequence != historyClientSequence+1+10) {
 		state.Errorf("Test of capture.WriteHistory failed, the datagrams should be IPv6 from the mapped client and the last segment behind the hole, first: %+v, last: %+v", blocks[0].header, blocks[6].header)
+		return
+	}
+}
+
+// Test if capture.WriteHistory returns with the expected output for a flow with more notes than a pcapng comment holds: 20000 dropped messages give
+// a FIN comment within maxHistoryNote that counts the notes it leaves out, and the export is written.
+func TestWriteHistoryNotesPositive(state *testing.T) {
+	opened := time.Date(2026, 11, 13, 10, 0, 0, 0, time.UTC)
+	flow := history.ExportFlow{
+		Flow:   api.Flow{ID: 1, State: api.ClosedFlowState, Opened: opened, Closed: opened.Add(time.Second), Process: api.Process{PID: 8, UID: 0, Comm: "nc"}},
+		Values: filter.Values{IPProtocol: syscall.IPPROTO_TCP, Source: netip.MustParseAddrPort("192.0.2.10:40000"), Destination: netip.MustParseAddrPort("192.0.2.20:7")},
+	}
+
+	for id := range uint64(20000) {
+		flow.Messages = append(flow.Messages, history.ExportMessage{Message: api.Message{ID: id + 1, Direction: api.UpDirection, Time: opened, Verdict: api.DropVerdict, Length: 0, OriginalLength: 5}, Payload: nil})
+	}
+
+	output := bytes.Buffer{}
+	err := WriteHistory(&output, []history.ExportFlow{flow})
+
+	if err != nil {
+		state.Fatalf("Test of capture.WriteHistory failed, the export should be written, error: %s", err.Error())
+	}
+
+	blocks, err := readBlocks(output.Bytes())
+
+	if err != nil {
+		state.Fatalf("Test of capture.WriteHistory failed, cannot read output, error: %s", err.Error())
+	}
+
+	comments := []string{}
+
+	for _, block := range blocks {
+		if block.comment != "" {
+			comments = append(comments, block.comment)
+		}
+	}
+
+	// the SYN has the flow, the FIN the notes of the dropped messages
+	if (len(blocks) != 6) || (len(comments) != 2) || (len(comments[1]) > len(notePrefix)+maxHistoryNote+64) || !strings.Contains(comments[1], " more notes, the API has every message") {
+		state.Errorf("Test of capture.WriteHistory failed, the FIN should carry one comment that counts the notes left out, packets: %d, comments: %d, length of the comments: %d", len(blocks), len(comments), len(strings.Join(comments, "")))
 		return
 	}
 }

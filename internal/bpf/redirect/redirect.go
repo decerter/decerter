@@ -3,7 +3,6 @@
 package redirect
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"encoding/binary"
@@ -14,10 +13,12 @@ import (
 	"net/netip"
 	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/decerter/decerter/internal/bpf"
+	"github.com/decerter/decerter/internal/output"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
 	"golang.org/x/sys/unix"
@@ -465,8 +466,8 @@ func forgetUDPFlow(cookie uint64, client bpfEndpoint, bpfMaps map[bpf.BpfMapName
 	return
 }
 
-// For debugging, the table goes to output every 5 seconds until the context is cancelled or output can't be written
-func Read(ctx context.Context, flowMap *ebpf.Map, output io.Writer) {
+// For debugging, the table goes to writer every 5 seconds until the context is cancelled or writer can't be written
+func Read(ctx context.Context, flowMap *ebpf.Map, writer io.Writer) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -478,7 +479,6 @@ func Read(ctx context.Context, flowMap *ebpf.Map, output io.Writer) {
 			var (
 				cookie  uint64
 				bpfFlow bpfFlow
-				table   bytes.Buffer
 			)
 
 			flows := map[uint64]Flow{}
@@ -488,31 +488,41 @@ func Read(ctx context.Context, flowMap *ebpf.Map, output io.Writer) {
 				flows[cookie] = flowFromBpf(bpfFlow)
 			}
 
-			if err := iterator.Err(); err != nil {
-				fmt.Fprintf(&table, "%s iterate error: %s\n", bpfMapFlowMap, err)
-			} else {
-				fmt.Fprintf(&table, "\n%-20s %-5s %-47s %-10s %-8s %-8s %-16s %-10s %-47s\n", "Cookie", "Proto", "Destination", "Redirected", "PID", "UID", "Comm", "Cgroup ID", "UDP Client")
-
-				for _, sortedCookie := range slices.SortedFunc(maps.Keys(flows), cmp.Compare) {
-					flow := flows[sortedCookie]
-					client := "-"
-
-					// only UDP flows carry the client endpoint
-					if flow.Client.IsValid() {
-						client = flow.Client.String()
-					}
-
-					fmt.Fprintf(&table, "%-20d %-5s %-47s %-10t %-8d %-8d %-16s %-10d %#-10x %-47s\n", sortedCookie, ProtocolName(flow.IPProtocol), flow.OriginalDestination, flow.Redirected, flow.Tgid, flow.UID, flow.Comm, flow.CgroupID, flow.Mark, client)
-				}
-			}
-
-			_, writeErr := output.Write(table.Bytes())
+			_, writeErr := io.WriteString(writer, flowTable(flows, iterator.Err()))
 
 			if writeErr != nil {
 				return
 			}
 		}
 	}
+}
+
+// the debug table of Read, one row per flow by cookie; comm is the process's own choice and is escaped like in every other line
+func flowTable(flows map[uint64]Flow, iterateErr error) (table string) {
+	builder := strings.Builder{}
+
+	if iterateErr != nil {
+		fmt.Fprintf(&builder, "%s iterate error: %s\n", bpfMapFlowMap, iterateErr)
+		table = builder.String()
+		return
+	}
+
+	fmt.Fprintf(&builder, "\n%-20s %-5s %-47s %-10s %-8s %-8s %-16s %-10s %-10s %-47s\n", "Cookie", "Proto", "Destination", "Redirected", "PID", "UID", "Comm", "Cgroup ID", "Mark", "UDP Client")
+
+	for _, sortedCookie := range slices.SortedFunc(maps.Keys(flows), cmp.Compare) {
+		flow := flows[sortedCookie]
+		client := "-"
+
+		// only UDP flows carry the client endpoint
+		if flow.Client.IsValid() {
+			client = flow.Client.String()
+		}
+
+		fmt.Fprintf(&builder, "%-20d %-5s %-47s %-10t %-8d %-8d %-16s %-10d %#-10x %-47s\n", sortedCookie, ProtocolName(flow.IPProtocol), flow.OriginalDestination, flow.Redirected, flow.Tgid, flow.UID, output.EscapeField(flow.Comm), flow.CgroupID, flow.Mark, client)
+	}
+
+	table = builder.String()
+	return
 }
 
 func flowFromBpf(bpfFlow bpfFlow) (flow Flow) {

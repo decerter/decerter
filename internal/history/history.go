@@ -52,6 +52,21 @@ func (history *History) OpenFlow(cookie uint64, values filter.Values, clientRand
 	return
 }
 
+// run mode: the proxy's upstream socket of the flow, the capture keeps its packets under that cookie and the pcap export of the flow picks them by it
+func (history *History) SetUpstream(id uint64, upstreamCookie uint64) {
+	if history == nil {
+		return
+	}
+
+	history.mutex.Lock()
+	defer history.mutex.Unlock()
+	record := history.flows[id]
+
+	if record != nil {
+		record.upstreamCookie = upstreamCookie
+	}
+}
+
 func (history *History) openFlow(cookie uint64, values filter.Values, clientRandom [32]byte) (flow api.Flow) {
 	history.mutex.Lock()
 	defer history.mutex.Unlock()
@@ -64,22 +79,23 @@ func (history *History) openFlow(cookie uint64, values filter.Values, clientRand
 
 	history.nextFlowID++
 	record := &flowRecord{
-		id:            history.nextFlowID,
-		cookie:        cookie,
-		values:        values,
-		clientRandom:  clientRandom,
-		session:       tlsrecord.Session{},
-		layer:         "",
-		opened:        time.Now(),
-		closed:        time.Time{},
-		isOpen:        true,
-		traffic:       [2]api.Traffic{},
-		messageIDs:    nil,
-		payloadBytes:  0,
-		isTruncated:   false,
-		exchangeIDs:   nil,
-		exchangeBytes: 0,
-		http:          nil,
+		id:             history.nextFlowID,
+		cookie:         cookie,
+		upstreamCookie: 0,
+		values:         values,
+		clientRandom:   clientRandom,
+		session:        tlsrecord.Session{},
+		layer:          "",
+		opened:         time.Now(),
+		closed:         time.Time{},
+		isOpen:         true,
+		traffic:        [2]api.Traffic{},
+		messageIDs:     nil,
+		payloadBytes:   0,
+		isTruncated:    false,
+		exchangeIDs:    nil,
+		exchangeBytes:  0,
+		http:           nil,
 	}
 	history.flows[record.id] = record
 	history.order = append(history.order, record.id)
@@ -433,7 +449,12 @@ func (history *History) Export(scope *filter.Filter) (flows []ExportFlow) {
 			Flow:         flowView(record),
 			Values:       values,
 			ClientRandom: record.clientRandom,
+			SocketCookie: record.cookie,
 			Messages:     make([]ExportMessage, 0, len(record.messageIDs)),
+		}
+
+		if record.upstreamCookie != 0 {
+			exported.SocketCookie = record.upstreamCookie
 		}
 
 		if exported.ClientRandom == [32]byte{} {

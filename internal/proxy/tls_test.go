@@ -33,6 +33,7 @@ import (
 	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/intercept"
+	"github.com/decerter/decerter/internal/output"
 	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
 )
@@ -237,7 +238,7 @@ func fixedFlow(flow redirect.Flow) (lookup func(client netip.AddrPort, ipProtoco
 }
 
 // what run printed on stdout, the flow and record lines of the proxy
-func captureStdout(state *testing.T, run func()) (output string) {
+func captureStdout(state *testing.T, run func()) (printed string) {
 	reader, writer, err := os.Pipe()
 
 	if err != nil {
@@ -258,16 +259,19 @@ func captureStdout(state *testing.T, run func()) (output string) {
 	}()
 
 	previous := os.Stdout
+	previousOutput := output.Stdout
 	os.Stdout = writer
+	output.Stdout = output.NewWriter(writer)
 
 	defer func() {
 		os.Stdout = previous
+		output.Stdout = previousOutput
 
 		if closeErr := writer.Close(); closeErr != nil {
 			state.Errorf("Test of the proxy output failed, cannot close pipe, error: %s", closeErr.Error())
 		}
 
-		output = string(<-outputChannel)
+		printed = string(<-outputChannel)
 
 		if closeErr := reader.Close(); closeErr != nil {
 			state.Errorf("Test of the proxy output failed, cannot close pipe, error: %s", closeErr.Error())

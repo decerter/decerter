@@ -7,11 +7,11 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
-	"os"
 	"time"
 
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/intercept"
+	"github.com/decerter/decerter/internal/output"
 	"github.com/decerter/decerter/internal/tlsrecord"
 )
 
@@ -45,6 +45,11 @@ func watchTLS(ctx context.Context, observer *TLSObserver, logger *slog.Logger) {
 	for {
 		var records []tlsrecord.Record
 		var err error
+
+		// a cancelled context wins over chunks that are still queued, select would pick between them at random
+		if ctx.Err() != nil {
+			return
+		}
 
 		select {
 		case <-ctx.Done():
@@ -189,19 +194,20 @@ func tlsLinePrefix(flow redirect.Flow, client netip.AddrPort, session tlsrecord.
 		layer = intercept.DTLSLayer
 	}
 
-	prefix = fmt.Sprintf("%s pid=%d uid=%d comm=%s %s client=%s version=%s suite=%s", layer, flow.Tgid, flow.UID, intercept.EscapeField(flow.Comm), flow.OriginalDestination, client, tlsrecord.VersionName(session.Version), tlsrecord.CipherSuiteName(session.CipherSuite))
+	prefix = fmt.Sprintf("%s pid=%d uid=%d comm=%s %s client=%s version=%s suite=%s", layer, flow.Tgid, flow.UID, output.EscapeField(flow.Comm), flow.OriginalDestination, client, tlsrecord.VersionName(session.Version), tlsrecord.CipherSuiteName(session.CipherSuite))
 	return
 }
 
 // one line per decrypted session in front of its first record, sni and alpn come from the peers and are quoted
 func printSession(flow redirect.Flow, client netip.AddrPort, session tlsrecord.Session) {
-	fmt.Printf("%s sni=%q alpn=%q\n", tlsLinePrefix(flow, client, session), session.ServerName, session.Protocol)
+	// stdout is the output of the tool as in printFlow
+	_, _ = fmt.Fprintf(output.Stdout, "%s sni=%q alpn=%q\n", tlsLinePrefix(flow, client, session), session.ServerName, session.Protocol)
 }
 
 // one header line per decrypted application data record and its plaintext below, in one write so the records of other flows don't get in between
 func printRecord(flow redirect.Flow, client netip.AddrPort, session tlsrecord.Session, record tlsrecord.Record) {
 	shown := min(len(record.Payload), intercept.MaxPrintBytes)
 	text := fmt.Sprintf("%s direction=%s sequence=%d length=%d shown=%d\n", tlsLinePrefix(flow, client, session), intercept.DirectionName(record.Direction), record.Sequence, len(record.Payload), shown) + intercept.Escape(record.Payload[:shown])
-	// stdout is the output of the tool as in printFlow, a failed write has nowhere to go
-	_, _ = os.Stdout.WriteString(text)
+	// stdout is the output of the tool as in printFlow
+	_, _ = output.Stdout.WriteString(text)
 }

@@ -6,6 +6,7 @@ package tlsrecord
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -106,30 +107,150 @@ func TestDTLSFeedNegative(state *testing.T) {
 	wrongKey.MasterKey[0] ^= 1
 	wrongVersion := session.secrets
 	wrongVersion.Version = VersionTLS12
+	// the line of the client again with other numbers, so wrong keys fail on more records than maxBadRecords
+	clientLine := session.datagrams[slices.IndexFunc(session.datagrams, func(datagram dtlsDatagram) bool {
+		return (datagram.direction == ClientDirection) && (ContentType(datagram.data[0]) == ApplicationDataContentType)
+	})]
+	moreLines := slices.Clone(session.datagrams)
+
+	for sequence := range uint64(maxBadRecords) {
+		moreLines = append(moreLines, dtlsDatagram{direction: ClientDirection, data: resequenceDTLS(clientLine.data, 100+sequence)})
+	}
+
 	negativeCases := []struct {
 		Name      string
 		Datagrams []dtlsDatagram
 		Secrets   Secrets
 		Expected  error
 	}{
-		{Name: "wrong master key", Datagrams: session.datagrams, Secrets: wrongKey, Expected: ErrBadRecordMAC},
+		{Name: "wrong master key", Datagrams: moreLines, Secrets: wrongKey, Expected: ErrBadRecordMAC},
 		{Name: "secrets of TLS 1.2", Datagrams: session.datagrams, Secrets: wrongVersion, Expected: ErrSecrets},
-		{Name: "truncated record", Datagrams: changeDTLS(session.datagrams, ClientDirection, handshakeClientHello, func(data []byte) []byte { return data[:len(data)-1] }), Secrets: session.secrets, Expected: ErrUnexpectedRecord},
 		{Name: "dtls 1.0 server hello", Datagrams: changeDTLS(session.datagrams, ServerDirection, handshakeServerHello, func(data []byte) []byte {
 			data[dtlsRecordHeaderLength+dtlsHandshakeHeaderLength+1] = 0xff
 			return data
 		}), Secrets: session.secrets, Expected: ErrUnsupportedVersion},
-		{Name: "epoch 2", Datagrams: changeDTLS(session.datagrams, ClientDirection, 0, func(data []byte) []byte {
-			data[dtlsEpochOffset+1] = 2
-			return data
-		}), Secrets: session.secrets, Expected: ErrRenegotiation},
 	}
 
 	for _, negative := range negativeCases {
-		_, _, feedErr := feedDTLS(negative.Datagrams, negative.Secrets, true)
+		for _, isSecretsFirst := range []bool{true, false} {
+			_, _, feedErr := feedDTLS(negative.Datagrams, negative.Secrets, isSecretsFirst)
 
-		if !errors.Is(feedErr, negative.Expected) {
-			state.Errorf("Test of tlsrecord.DTLSConn.Feed failed, case: %s, return value was not %v instead: %v", negative.Name, negative.Expected, feedErr)
+			if !errors.Is(feedErr, negative.Expected) {
+				state.Errorf("Test of tlsrecord.DTLSConn.Feed failed, case: %s, secrets first: %v, return value was not %v instead: %v", negative.Name, isSecretsFirst, negative.Expected, feedErr)
+				return
+			}
+		}
+	}
+}
+
+// Test if tlsrecord.DTLSConn.Feed returns with the expected output for records an endpoint drops (RFC 6347 section 4.1.2.7): a protected record before
+// the ServerHello, a datagram that does not frame, a record of epoch 2, an injected record with a high sequence number that fails its MAC (it must not
+// move the replay window, with the secrets first or held until they come), a copy of a record that passed and the bytes behind it; the session is
+// read to its end, the dropped records are counted, intercept lets them go on raw.
+func TestDTLSDropPositive(state *testing.T) {
+	session, err := readDTLSFixture(dtlsFixtures[0])
+
+	if err != nil {
+		state.Fatalf("Test of tlsrecord.DTLSConn.Feed failed, cannot read fixture, error: %s", err.Error())
+	}
+
+	serverHello := slices.IndexFunc(session.datagrams, func(datagram dtlsDatagram) bool {
+		return (datagram.direction == ServerDirection) && (datagram.data[dtlsRecordHeaderLength] == handshakeServerHello)
+	})
+	clientLine := session.datagrams[slices.IndexFunc(session.datagrams, func(datagram dtlsDatagram) bool {
+		return (datagram.direction == ClientDirection) && (ContentType(datagram.data[0]) == ApplicationDataContentType)
+	})]
+	injected := []dtlsDatagram{
+		{direction: ClientDirection, data: dtlsRecord(ApplicationDataContentType, dtlsProtectedEpoch, 5, make([]byte, 40))},
+		{direction: ClientDirection, data: []byte{byte(ApplicationDataContentType), dtlsVersionMajor}},
+	}
+	afterHello := []dtlsDatagram{
+		{direction: ClientDirection, data: dtlsRecord(ApplicationDataContentType, 2, 0, make([]byte, 40))},
+		{direction: ClientDirection, data: dtlsRecord(ApplicationDataContentType, dtlsProtectedEpoch, 1000, make([]byte, 40))},
+	}
+	datagrams := slices.Concat(session.datagrams[:1], injected, session.datagrams[1:serverHello+1], afterHello, session.datagrams[serverHello+1:])
+	datagrams = append(datagrams, dtlsDatagram{direction: ClientDirection, data: append(bytes.Clone(clientLine.data), 0x17, 0xfe, 0xfd)})
+
+	for _, intercept := range []bool{false, true} {
+		for _, isSecretsFirst := range []bool{true, false} {
+			conn := NewDTLS(holdLimit(), intercept)
+			var records []Record
+
+			if isSecretsFirst {
+				records, err = conn.SetSecrets(session.secrets)
+			}
+
+			forwarded := 0
+
+			for _, datagram := range datagrams {
+				if err != nil {
+					break
+				}
+
+				fed, feedErr := conn.Feed(datagram.direction, datagram.data)
+				err = feedErr
+				records = append(records, fed...)
+
+				for _, record := range fed {
+					if record.Action == ForwardAction {
+						forwarded++
+					}
+				}
+			}
+
+			if (err == nil) && !isSecretsFirst {
+				released, secretsErr := conn.SetSecrets(session.secrets)
+				err = secretsErr
+				records = append(records, released...)
+			}
+
+			plain := applicationData(records)
+
+			if (err != nil) || (string(plain[ClientDirection]) != session.lines[ClientDirection]) || (string(plain[ServerDirection]) != session.lines[ServerDirection]) || (conn.Dropped() != [2]uint64{5, 0}) {
+				state.Errorf("Test of tlsrecord.DTLSConn.Feed failed, intercept: %v, secrets first: %v, the session should be read with 5 dropped records, plaintext: %q, dropped: %v, error: %v", intercept, isSecretsFirst, plain, conn.Dropped(), err)
+				return
+			}
+
+			if intercept && (forwarded < 4) {
+				state.Errorf("Test of tlsrecord.DTLSConn.Feed failed, secrets first: %v, the dropped records should go on raw, forwarded: %d", isSecretsFirst, forwarded)
+				return
+			}
+		}
+	}
+}
+
+// Test if an intercepting tlsrecord.DTLSConn.Feed returns with the expected output for the bytes behind a record it can't read: a tail that does not
+// frame and the records behind a final error go on as they came, so the records of the datagram add up to the whole datagram.
+func TestDTLSTailPositive(state *testing.T) {
+	session, err := readDTLSFixture(dtlsFixtures[0])
+
+	if err != nil {
+		state.Fatalf("Test of tlsrecord.DTLSConn.Feed failed, cannot read fixture, error: %s", err.Error())
+	}
+
+	clientHello := session.datagrams[0].data
+	positiveCases := []struct {
+		Name     string
+		Datagram []byte
+		Err      error
+	}{
+		{Name: "a tail that does not frame", Datagram: append(bytes.Clone(clientHello), 0x17, 0xfe, 0xfd), Err: nil},
+		{Name: "records behind a final error", Datagram: slices.Concat(dtlsRecord(ApplicationDataContentType, 0, 9, []byte("GET /")), clientHello), Err: ErrUnexpectedRecord},
+	}
+
+	for _, positive := range positiveCases {
+		conn := NewDTLS(holdLimit(), true)
+		records, feedErr := conn.Feed(ClientDirection, positive.Datagram)
+		var sent []byte
+
+		for _, record := range records {
+			if record.Action == ForwardAction {
+				sent = append(sent, record.Raw...)
+			}
+		}
+
+		if !errors.Is(feedErr, positive.Err) || ((positive.Err == nil) != (feedErr == nil)) || !bytes.Equal(sent, positive.Datagram) {
+			state.Errorf("Test of tlsrecord.DTLSConn.Feed failed, case: %s, the whole datagram should go on, sent: %x, datagram: %x, error: %v", positive.Name, sent, positive.Datagram, feedErr)
 			return
 		}
 	}
@@ -359,7 +480,11 @@ func TestReplayWindowPositive(state *testing.T) {
 	}
 
 	for _, step := range steps {
-		isNew := window.accept(step.Sequence)
+		isNew := window.isNew(step.Sequence)
+
+		if isNew {
+			window.mark(step.Sequence)
+		}
 
 		if isNew != step.IsNew {
 			state.Errorf("Test of the replay window failed, sequence: %d, result should be %v, result: %v", step.Sequence, step.IsNew, isNew)
@@ -463,6 +588,14 @@ func testDTLSRelay(fixture dtlsFixture, session dtlsSession, isGrown bool) (err 
 		err = fmt.Errorf("receiver plaintext should be %q, result: %q", expected, received)
 	}
 
+	return
+}
+
+// the datagram with the sequence number of its first record set to sequence, the record fails its MAC then
+func resequenceDTLS(datagram []byte, sequence uint64) (changed []byte) {
+	changed = bytes.Clone(datagram)
+	epoch := binary.BigEndian.Uint16(changed[dtlsEpochOffset:])
+	binary.BigEndian.PutUint64(changed[dtlsEpochOffset:], uint64(epoch)<<dtlsSequenceBits|sequence)
 	return
 }
 

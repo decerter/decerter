@@ -352,11 +352,12 @@ func tailEvents(client Client) (handle sdk.ToolHandlerFor[TailEventsInput, Event
 	return
 }
 
-// the api gives whole payloads, the window and the per-call budget of length bytes are cut here
+// the api gives a window of length bytes of each payload, the per-call budget of length bytes is spread over them here
 func listHeld(client Client) (handle sdk.ToolHandlerFor[ListHeldInput, HeldResult]) {
 	handle = func(ctx context.Context, request *sdk.CallToolRequest, input ListHeldInput) (result *sdk.CallToolResult, held HeldResult, err error) {
 		holds := v1.HoldList{}
-		err = client.getJSON(ctx, "/holds", nil, &holds)
+		query := url.Values{"offset": {strconv.Itoa(input.Offset)}, "length": {strconv.Itoa(input.Length)}}
+		err = client.getJSON(ctx, "/holds", query, &holds)
 
 		if err != nil {
 			return
@@ -401,7 +402,7 @@ func listHeld(client Client) (handle sdk.ToolHandlerFor[ListHeldInput, HeldResul
 					return
 				}
 
-				payload := window(data, input.Offset, budget)
+				payload := newWindow(data[:min(budget, len(data))], hold.Payload.Offset, hold.Payload.Total)
 				budget -= payload.Length
 				message.Payload = &payload
 				stripped.Payload = new(payload.withoutData())

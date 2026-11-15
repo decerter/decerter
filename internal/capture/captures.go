@@ -45,6 +45,7 @@ type Captures struct {
 	nextID          uint64
 	totalBytes      int64
 	waitGroup       *sync.WaitGroup
+	isClosed        bool
 	logger          *slog.Logger
 }
 
@@ -79,6 +80,7 @@ func NewCaptures(hub *Hub, dataDirectory string, logger *slog.Logger) (captures 
 		nextID:          0,
 		totalBytes:      0,
 		waitGroup:       &sync.WaitGroup{},
+		isClosed:        false,
 		logger:          logger,
 	}
 	entries, readErr := os.ReadDir(captures.directory)
@@ -230,13 +232,14 @@ func (captures *Captures) prepareDirectory() (err error) {
 	return
 }
 
-// a capture that could not start is forgotten
+// a capture that could not start is forgotten, a Stop that waits for it finds it gone
 func (captures *Captures) discard(stored *storedCapture) {
 	captures.mutex.Lock()
 	defer captures.mutex.Unlock()
 	captures.captures = slices.DeleteFunc(captures.captures, func(current *storedCapture) bool {
 		return current == stored
 	})
+	close(stored.doneChannel)
 }
 
 // the writer of the capture is done, why it stopped is kept when nobody asked for it
@@ -252,7 +255,7 @@ func (captures *Captures) finished(stored *storedCapture, err error, logger *slo
 		stored.view.Reason = sizeLimitReason
 	case err != nil:
 		stored.view.Reason = err.Error()
-	case !stored.isStopping:
+	case !stored.isStopping || captures.isClosed:
 		stored.view.Reason = shutdownReason
 	default:
 	}
@@ -286,6 +289,13 @@ func (captures *Captures) Stop(id uint64) (view api.Capture, err error) {
 	<-stored.doneChannel
 	captures.mutex.Lock()
 	defer captures.mutex.Unlock()
+
+	// the capture could not start
+	if captures.find(id) == nil {
+		err = fmt.Errorf("%w: %d", ErrCaptureNotFound, id)
+		return
+	}
+
 	view = captures.viewOf(stored)
 	return
 }
@@ -358,8 +368,20 @@ func (captures *Captures) Export(output io.Writer, flows map[uint64][32]byte, pl
 	return
 }
 
-// wait for the writers, which finish when the hub is done, then remove the files: they hold secrets and nobody can download them after decerter
+// stop the running captures and wait for their writers, then remove the files: they hold secrets and nobody can download them after decerter
 func (captures *Captures) Close() (err error) {
+	captures.mutex.Lock()
+	captures.isClosed = true
+
+	// a writer also ends when the hub is done, but the hub never ran when decerter failed to start
+	for _, stored := range captures.captures {
+		if !stored.isStopping && (stored.view.State == api.RunningCaptureState) {
+			stored.isStopping = true
+			close(stored.stopChannel)
+		}
+	}
+
+	captures.mutex.Unlock()
 	captures.waitGroup.Wait()
 	err = os.RemoveAll(captures.directory)
 

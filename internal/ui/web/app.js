@@ -23,10 +23,14 @@ const state = {
   holds: [],
   editing: null,
   exchanges: [],
+  exchangesCursor: '',
   exchangeId: null,
   exchangeSide: 'request',
   exchangeOffset: 0,
 };
+
+// the rows live events may grow a list to: the newest flows, the first messages and exchanges of the shown flow; More reads on past them
+const maxListRows = 1000;
 
 const byId = (id) => document.getElementById(id);
 
@@ -270,6 +274,16 @@ async function loadStatus(withIntercept) {
 
 const refreshStatus = debounce(() => loadStatus(false), 1000);
 
+// what each layer of the intercept settings holds, the select offers every layer the api takes
+const interceptLayers = {
+  '': 'every record layer',
+  tcp: 'tcp reads only',
+  tls: 'tls records only',
+  udp: 'udp datagrams only',
+  dtls: 'dtls records only',
+  http: 'whole HTTP messages',
+};
+
 function showIntercept(intercept) {
   const form = byId('intercept-form');
 
@@ -286,7 +300,7 @@ function showIntercept(intercept) {
   byId('intercept-filter').value = intercept.filter;
   byId('intercept-direction').value = intercept.direction;
   byId('intercept-layer').value = intercept.layer || '';
-  byId('intercept-state').textContent = `${intercept.enabled ? 'On' : 'Off'}${intercept.layer === 'http' ? ', whole HTTP messages' : ''}; a held message goes on unchanged after ${intercept.hold_timeout_seconds} s.`;
+  byId('intercept-state').textContent = `${intercept.enabled ? 'On' : 'Off'}, ${interceptLayers[intercept.layer || ''] || `layer ${intercept.layer}`}; a held message goes on unchanged after ${intercept.hold_timeout_seconds} s.`;
 }
 
 async function applyIntercept() {
@@ -329,7 +343,23 @@ async function loadFlows(isReset) {
     state.flows.set(flow.id, flow);
   }
 
+  trimFlows();
   renderFlows();
+}
+
+// the newest flows up to the cap: a cursor of the flow list is the id of the oldest flow of a page, so More reads on from the oldest one kept
+function trimFlows() {
+  if (state.flows.size <= maxListRows) {
+    return;
+  }
+
+  const ids = [...state.flows.keys()].sort((a, b) => b - a);
+
+  for (const id of ids.slice(maxListRows)) {
+    state.flows.delete(id);
+  }
+
+  state.flowsCursor = `${ids[maxListRows - 1]}`;
 }
 
 async function moreFlows() {
@@ -351,6 +381,7 @@ function onFlow(flow) {
 
   if (state.flows.has(flow.id) || !state.filter) {
     state.flows.set(flow.id, flow);
+    trimFlows();
     renderFlowsSoon();
   } else {
     refreshFlows();
@@ -387,6 +418,8 @@ async function selectFlow(id) {
   state.flowId = id;
   state.messageId = null;
   state.exchangeId = null;
+  state.exchanges = [];
+  state.exchangesCursor = '';
   byId('message-view').hidden = true;
   byId('exchange-view').hidden = true;
   const flow = await call('GET', `/flows/${id}`);
@@ -430,12 +463,19 @@ async function moreMessages() {
   renderMessages();
 }
 
-// a message event of the shown flow goes at the end once every page is read
+// a message event of the shown flow goes at the end once every page is read; a full list stops there, More reads on after its last message
 function onMessage(message) {
-  if (message.flow_id === state.flowId && !state.messagesCursor && !state.messages.some((known) => known.id === message.id)) {
-    state.messages.push(message);
-    renderMessagesSoon();
+  if (message.flow_id !== state.flowId || state.messagesCursor || state.messages.some((known) => known.id === message.id)) {
+    return;
   }
+
+  if (state.messages.length >= maxListRows) {
+    state.messagesCursor = `${state.messages[state.messages.length - 1].id}`;
+  } else {
+    state.messages.push(message);
+  }
+
+  renderMessagesSoon();
 }
 
 const renderMessagesSoon = debounce(async () => renderMessages(), 50);
@@ -484,20 +524,46 @@ async function loadExchanges() {
     return;
   }
 
-  const list = await call('GET', `/flows/${state.flowId}/exchanges?limit=1000`);
+  const list = await call('GET', `/flows/${state.flowId}/exchanges`);
   state.exchanges = list.exchanges;
+  state.exchangesCursor = list.next_cursor || '';
   renderExchanges();
+}
 
+async function moreExchanges() {
+  const list = await call('GET', `/flows/${state.flowId}/exchanges?cursor=${encodeURIComponent(state.exchangesCursor)}`);
+  state.exchanges.push(...list.exchanges);
+  state.exchangesCursor = list.next_cursor || '';
+  renderExchanges();
+}
+
+const renderExchangesSoon = debounce(async () => renderExchanges(), 50);
+const refreshExchange = debounce(async () => {
   if (state.exchangeId !== null) {
     await selectExchange(state.exchangeId, state.exchangeOffset);
   }
-}
+}, 300);
 
-const refreshExchanges = debounce(loadExchanges, 300);
-
+// an exchange event of the shown flow updates its row, a new one goes at the end once every page is read; a full list stops there like the messages
 function onExchange(exchange) {
-  if (exchange.flow_id === state.flowId) {
-    refreshExchanges();
+  if (exchange.flow_id !== state.flowId) {
+    return;
+  }
+
+  const index = state.exchanges.findIndex((known) => known.id === exchange.id);
+
+  if (index >= 0) {
+    state.exchanges[index] = exchange;
+  } else if (!state.exchangesCursor && state.exchanges.length >= maxListRows) {
+    state.exchangesCursor = `${state.exchanges[state.exchanges.length - 1].id}`;
+  } else if (!state.exchangesCursor) {
+    state.exchanges.push(exchange);
+  }
+
+  renderExchangesSoon();
+
+  if (exchange.id === state.exchangeId) {
+    refreshExchange();
   }
 }
 
@@ -527,6 +593,7 @@ function renderExchanges() {
   });
   byId('exchanges').replaceChildren(...rows);
   byId('exchanges-table').hidden = rows.length === 0;
+  byId('more-exchanges').hidden = !state.exchangesCursor;
 }
 
 // the HTTP/2 stream of an exchange, a server push with the stream whose PUSH_PROMISE made it
@@ -777,6 +844,7 @@ function start() {
   }));
   byId('more-flows').addEventListener('click', action(moreFlows));
   byId('more-messages').addEventListener('click', action(moreMessages));
+  byId('more-exchanges').addEventListener('click', action(moreExchanges));
   byId('intercept-form').addEventListener('submit', action(applyIntercept));
 
   for (const radio of document.querySelectorAll('input[name="view"]')) {

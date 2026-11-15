@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/decerter/decerter/internal/output"
 	"github.com/decerter/decerter/internal/tlsrecord"
 )
 
@@ -52,7 +53,7 @@ func Print(output io.Writer, message Message, result Result, isPassed bool) {
 
 // the start of every line of a flow: process, destination, client and for TLS and DTLS the session
 func LinePrefix(flow Flow, layer Layer) (prefix string) {
-	prefix = fmt.Sprintf("%s pid=%d uid=%d comm=%s %s client=%s", layer, flow.Tgid, flow.UID, EscapeField(flow.Comm), flow.Destination, flow.Client)
+	prefix = fmt.Sprintf("%s pid=%d uid=%d comm=%s %s client=%s", layer, flow.Tgid, flow.UID, output.EscapeField(flow.Comm), flow.Destination, flow.Client)
 
 	if (layer == TLSLayer) || (layer == DTLSLayer) {
 		prefix += fmt.Sprintf(" version=%s suite=%s", tlsrecord.VersionName(flow.Session.Version), tlsrecord.CipherSuiteName(flow.Session.CipherSuite))
@@ -96,31 +97,6 @@ func Escape(payload []byte) (text string) {
 	}
 
 	builder.WriteByte('\n')
-	text = builder.String()
-	return
-}
-
-// one field of a line that a process or a peer chose, such as comm (prctl PR_SET_NAME takes any byte but NUL): printable ASCII stays, a backslash is
-// \\, every other byte \xNN, so no control sequence reaches the terminal and the field can't end its line
-func EscapeField(field string) (text string) {
-	builder := strings.Builder{}
-	builder.Grow(len(field))
-
-	for index := range len(field) {
-		value := field[index]
-
-		switch {
-		case value == '\\':
-			builder.WriteString(`\\`)
-		case (value >= ' ') && (value <= '~'):
-			builder.WriteByte(value)
-		default:
-			builder.WriteString(`\x`)
-			builder.WriteByte(hexDigits[value>>4])
-			builder.WriteByte(hexDigits[value&0x0f])
-		}
-	}
-
 	text = builder.String()
 	return
 }

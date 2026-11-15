@@ -63,8 +63,9 @@ BoringSSL in libflutter.so of the selected Flutter apps (Flutter 3.24.0 to 3.50.
 Chrome, Cronet and WebView (Chrome 124 to 160, by the Chrome version; Trichrome's library and the Chromium libraries the app's processes
 map are found too). A process with another own TLS library, such as Go programs, or a Flutter or Chromium app of an unknown version, is
 relayed without decryption, and so is a process that loads an OpenSSL of the linker cache decerter has no offsets for, which is a warning naming
-the nearest known version while another OpenSSL is hooked (decerter stops when none is, and always for --libssl). QUIC is relayed without
-decryption too; --block-quic makes it fail so the apps use TLS over TCP.`,
+the nearest known version while another OpenSSL is hooked (decerter stops when none is, and always for --libssl). A host without any libssl.so.3
+or .4 runs without TLS secrets, with a warning. QUIC is relayed without decryption too; --block-quic makes it fail so the apps use TLS
+over TCP.`,
 		Example: `  # the flows of the local user test (uid 1001), TLS decrypted
   sudo decerter run --uid 1001 --decrypt
   sudo -u test curl -s https://example.com/

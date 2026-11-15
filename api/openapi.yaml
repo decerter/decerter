@@ -355,7 +355,27 @@ paths:
   /holds:
     get:
       operationId: listHolds
-      summary: Held messages waiting for a decision, oldest first, with their whole payloads
+      summary: Held messages waiting for a decision, oldest first, with their whole payloads or a window of each
+      description: |
+        Without `offset` and `length` every payload is whole, up to the largest HTTP message a hold can have; with
+        either of them each payload is the window from `offset` of at most `length` bytes, so the answer stays small
+        however large the held messages are.
+      parameters:
+        - name: offset
+          in: query
+          description: First byte of the window of each payload.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: length
+          in: query
+          description: Bytes in the window of each payload.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 65536
+            default: 4096
       responses:
         "200":
           description: The held messages, empty without --intercept
@@ -363,6 +383,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HoldList"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "403":
           $ref: "#/components/responses/Forbidden"
   /holds/{id}:
@@ -540,7 +562,9 @@ paths:
         sockets of the flows (the latest 64 MiB), the wire side with the edits, with a DSB in front of each TLS and DTLS
         session whose secrets are still there. On `decerter capture` the packets decerter still keeps of the flows (the latest
         64 MiB): `format=dsb` as they were captured with a DSB in front of each TLS and DTLS session whose secrets are
-        still there, `format=plaintext` synthesized and decrypted like a plaintext capture.
+        still there, `format=plaintext` synthesized and decrypted like a plaintext capture. The file is written after
+        the 200: when writing it fails, the connection is cut before the end of the body, so the download fails instead
+        of giving a short file.
       parameters:
         - $ref: "#/components/parameters/Filter"
         - name: format
@@ -677,7 +701,7 @@ paths:
         packet of each TLS and DTLS session, so Wireshark decrypts them; `plaintext=true` writes synthesized decrypted
         packets. The stream ends when the client goes away or decerter stops; a client that reads so slowly that 32 MiB or
         16384 packets wait for it is cut off (the stream ends after a whole block), it never slows the capture or other
-        clients down.
+        clients down. The filter is a capture filter, one with the `http` fields is answered with 400.
 
             curl -N --unix-socket /run/decerter/api.sock http://decerter/api/v1/captures/stream | tshark -l -i - -Y http
 

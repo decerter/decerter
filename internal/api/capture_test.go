@@ -16,6 +16,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -95,6 +97,7 @@ func TestCaptureHandlerPositive(state *testing.T) {
 		{Method: http.MethodGet, Path: "/flows/pcap?format=dsb", Status: http.StatusOK},
 		{Method: http.MethodGet, Path: "/flows/pcap?format=plaintext&filter=tls", Status: http.StatusOK},
 		{Method: http.MethodGet, Path: "/captures/stream?plaintext=maybe", Status: http.StatusBadRequest, IsInvalid: true},
+		{Method: http.MethodGet, Path: "/captures/stream?filter=http.host+%3D%3D+%22a%22", Status: http.StatusBadRequest},
 		{Method: http.MethodGet, Path: "/keylog", Status: http.StatusConflict},
 		{Method: http.MethodPost, Path: "/rules", Body: `{"find": {"type": "text", "value": "a"}, "replace": {"type": "text", "value": "b"}}`, Status: http.StatusConflict},
 	}
@@ -275,6 +278,59 @@ func TestStreamCapturePositive(state *testing.T) {
 		}
 
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// a log the server's handlers write while the test reads it
+type lockedLog struct {
+	mutex  *sync.Mutex
+	buffer *bytes.Buffer
+}
+
+func (log lockedLog) Write(data []byte) (count int, err error) {
+	log.mutex.Lock()
+	defer log.mutex.Unlock()
+	count, err = log.buffer.Write(data)
+	return
+}
+
+func (log lockedLog) String() (text string) {
+	log.mutex.Lock()
+	defer log.mutex.Unlock()
+	text = log.buffer.String()
+	return
+}
+
+// Test if the pcap export of api.Handler cuts the connection when writing the file fails after the status is sent, so the client never takes a short file for a whole one.
+func TestExportPcapNegative(state *testing.T) {
+	logs := lockedLog{mutex: &sync.Mutex{}, buffer: &bytes.Buffer{}}
+	logger := slog.New(slog.NewJSONHandler(logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	info := Info{Mode: v1.CaptureMode, Processing: v1.RecordProcessing, Platform: "linux", Scope: "", Started: time.Now(), HoldTimeout: 0, HasTLSSecrets: false, IsInterceptCapable: false}
+	backend := NewBackend(info, history.DefaultLimits(), nil)
+	// a hub without the history keeps no packets and fails every export
+	hub, err := capture.NewHub(capturebpf.MaxSnaplen, nil, nil, nil, nil, false, logger)
+
+	if err != nil {
+		state.Fatalf("Test of api.exportPcap failed, cannot make the hub, error: %s", err.Error())
+	}
+
+	backend.Captures, err = capture.NewCaptures(hub, state.TempDir(), logger)
+
+	if err != nil {
+		state.Fatalf("Test of api.exportPcap failed, cannot make the captures, error: %s", err.Error())
+	}
+
+	server := httptest.NewServer(Handler(backend, logger))
+	defer server.Close()
+	status, _, body, sendErr := send(state.Context(), server, http.MethodGet, v1.BasePath+"/flows/pcap?format=dsb", "")
+
+	if sendErr == nil {
+		state.Errorf("Test of api.exportPcap failed, the download should fail, status: %d, body: %x", status, body)
+		return
+	}
+
+	if !strings.Contains(logs.String(), `"level":"WARN","msg":"Could not write pcap export"`) {
+		state.Errorf("Test of api.exportPcap failed, the failure should be logged as a warning, log: %s", logs.String())
 	}
 }
 

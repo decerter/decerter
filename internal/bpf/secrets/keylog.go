@@ -19,6 +19,7 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/tlsrecord"
@@ -68,12 +69,19 @@ const (
 	sha384Length              int    = 48
 )
 
+const (
+	// a failed read of the secrets ringbuf is retried after this pause, ReadKeyLog gives up after readFailures failures in a row
+	readBackoff  time.Duration = time.Second
+	readFailures int           = 5
+)
+
 // read the secrets ringbuf and print one NSS key log block per new session on writer, logs failures on logger, returns when the context is cancelled
-func ReadKeyLog(ctx context.Context, eventMap *ebpf.Map, writer io.Writer, logger *slog.Logger) {
+// err is set when the ring could not be read readFailures times in a row or writer failed, nothing is printed any more then
+func ReadKeyLog(ctx context.Context, eventMap *ebpf.Map, writer io.Writer, logger *slog.Logger) (err error) {
 	reader, readerErr := ringbuf.NewReader(eventMap)
 
-	if readerErr != nil {
-		logger.Error("Could not open secrets ringbuf reader", "error", readerErr)
+	if err = readerErr; err != nil {
+		logger.Error("Could not open secrets ringbuf reader", "error", err)
 		return
 	}
 
@@ -94,8 +102,17 @@ func ReadKeyLog(ctx context.Context, eventMap *ebpf.Map, writer io.Writer, logge
 		}
 	}()
 
+	err = readKeyLog(ctx, reader.Read, readBackoff, writer, logger)
+	return
+}
+
+// the loop of ReadKeyLog behind read: a failed read is retried after backoff, readFailures failures in a row end it, so a ring that keeps failing
+// does not spin a core and flood the log
+func readKeyLog(ctx context.Context, read func() (ringbuf.Record, error), backoff time.Duration, writer io.Writer, logger *slog.Logger) (err error) {
+	failures := 0
+
 	for {
-		record, readErr := reader.Read()
+		record, readErr := read()
 
 		if readErr != nil {
 			if errors.Is(readErr, ringbuf.ErrClosed) {
@@ -103,10 +120,24 @@ func ReadKeyLog(ctx context.Context, eventMap *ebpf.Map, writer io.Writer, logge
 				return
 			}
 
-			logger.Error("Could not read secrets ringbuf", "error", readErr)
+			failures++
+			logger.Error("Could not read secrets ringbuf", "error", readErr, "failures", failures)
+
+			if failures >= readFailures {
+				err = fmt.Errorf("%w: %w", ErrRingbufRead, readErr)
+				return
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+
 			continue
 		}
 
+		failures = 0
 		var secrets bpfTlsSecrets
 		decodeErr := binary.Read(bytes.NewReader(record.RawSample), binary.NativeEndian, &secrets)
 
@@ -125,8 +156,8 @@ func ReadKeyLog(ctx context.Context, eventMap *ebpf.Map, writer io.Writer, logge
 		// one write per session, so its lines stay together
 		_, writeErr := io.WriteString(writer, strings.Join(lines, "\n")+"\n")
 
-		if writeErr != nil {
-			logger.Error("Could not write key log lines", "error", writeErr)
+		if err = writeErr; err != nil {
+			logger.Error("Could not write key log lines", "error", err)
 			return
 		}
 	}

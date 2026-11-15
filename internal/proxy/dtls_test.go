@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -315,6 +316,32 @@ func TestDTLSInterceptNegative(state *testing.T) {
 
 	if !strings.Contains(logs.String(), "Could not send dtls datagram") || !strings.Contains(output, "records up=") {
 		state.Errorf("Test of proxy.dtlsInterception function failed, the lost datagram should be logged, logs: %s, output: %q", logs.String(), output)
+		return
+	}
+}
+
+// Test if proxy.dtlsInterception returns with the expected output when the record layer gives up in the middle of a datagram: the record that ended
+// it and the records behind it in the same datagram go on raw too, the relay forwards the whole datagram.
+func TestDTLSInterceptTailPositive(state *testing.T) {
+	fixture := readDTLSFixture(state)
+	useSecrets(state, newKeyLogLookup(fixture.keyLog, tlsrecord.VersionDTLS12, true).lookup)
+	logger, logs := bufferLogger()
+	pipeline := intercept.New([]intercept.Rule{intercept.IdentityRule{}}, nil, nil)
+	writes := &dtlsWrites{mutex: &sync.Mutex{}, chunks: nil, err: nil}
+	// application data in epoch 0 ends the record layer, the ClientHello behind it can't be read any more
+	datagram := slices.Concat([]byte{byte(tlsrecord.ApplicationDataContentType), 0xfe, 0xfd, 0, 0, 0, 0, 0, 0, 0, 9, 0, 5}, []byte("GET /"), fixture.datagrams[0].data)
+	var isDrained bool
+	_ = captureStdout(state, func() {
+		dtls := newTestDTLS(pipeline, nil, logger)
+		dtls.start(state.Context(), writes.writers())
+		dtls.take(tlsrecord.ClientDirection, datagram)
+		isDrained = waitFor(dtls.isDrained)
+		dtls.close()
+	})
+	written := dtlsBytes(writes.taken())
+
+	if !isDrained || !bytes.Equal(written[tlsrecord.ClientDirection], datagram) || !strings.Contains(logs.String(), "relaying raw") {
+		state.Errorf("Test of proxy.dtlsInterception.take function failed, the whole datagram should go on, written: %x, datagram: %x, logs: %s", written[tlsrecord.ClientDirection], datagram, logs.String())
 		return
 	}
 }

@@ -589,7 +589,8 @@ func TestExportKeylogNegative(state *testing.T) {
 	}
 }
 
-// Test if the handlers of the API cope with a client that went away and with a value JSON can't encode: nothing panics, the encode error is a 500.
+// Test if the handlers of the API cope with a client that went away and with a value JSON can't encode: the encode error is a 500, and only the pcap export
+// panics, with http.ErrAbortHandler, so the server cuts the connection.
 func TestWriteNegative(state *testing.T) {
 	test, err := newTestBackend(state.Context())
 
@@ -613,7 +614,14 @@ func TestWriteNegative(state *testing.T) {
 		writer := &failingWriter{header: http.Header{}, status: 0}
 		request := httptest.NewRequestWithContext(state.Context(), http.MethodGet, v1.BasePath+path, nil)
 		request.Host = v1.HostName
-		handler.ServeHTTP(writer, request)
+		recovered := serveRecovered(handler, writer, request)
+		recoveredErr, isError := recovered.(error)
+		isAbort := isError && errors.Is(recoveredErr, http.ErrAbortHandler)
+
+		if ((path == "/flows/pcap") != isAbort) || ((path != "/flows/pcap") && (recovered != nil)) {
+			state.Errorf("Test of api.Handler failed, GET %s should panic only with http.ErrAbortHandler and only for the pcap export, recovered: %v", path, recovered)
+			return
+		}
 
 		if writer.status != http.StatusOK {
 			state.Errorf("Test of api.Handler failed, GET %s should answer 200 before its write fails, status: %d", path, writer.status)
@@ -626,6 +634,16 @@ func TestWriteNegative(state *testing.T) {
 		state.Errorf("Test of api.writeEvent function failed, an event should not be written without a write deadline")
 		return
 	}
+}
+
+// the value a handler panicked with, nil when it returned
+func serveRecovered(handler http.Handler, writer http.ResponseWriter, request *http.Request) (recovered any) {
+	defer func() {
+		recovered = recover()
+	}()
+
+	handler.ServeHTTP(writer, request)
+	return
 }
 
 // Test if the capture handlers answer a capture whose file can't be opened or made with a JSON 500.

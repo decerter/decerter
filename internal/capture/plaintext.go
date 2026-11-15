@@ -877,7 +877,13 @@ func (recorder *recorder) holdDatagram(cookie uint64, heldFlow *flow, packet cap
 
 	if !heldFlow.hasClientRandom && !packet.IsIngress {
 		payload, _ := transportPayload(packet.Data)
+		dropped := droppedRecords(heldFlow.conn, tlsrecord.ClientDirection)
 		_, feedErr := heldFlow.conn.Feed(tlsrecord.ClientDirection, payload)
+
+		// the record layer drops what it can't read, the client's datagrams before its ClientHello is whole have to be read
+		if (feedErr == nil) && (droppedRecords(heldFlow.conn, tlsrecord.ClientDirection) != dropped) {
+			feedErr = ErrUnreadableDatagram
+		}
 
 		if feedErr != nil {
 			err = recorder.abandonDatagrams(cookie, heldFlow, clientHelloReason+": "+feedErr.Error())
@@ -996,6 +1002,7 @@ func (recorder *recorder) decryptDatagram(cookie uint64, currentFlow *flow, pcap
 		direction = tlsrecord.ServerDirection
 	}
 
+	dropped := droppedRecords(currentFlow.conn, direction)
 	records, feedErr := currentFlow.conn.Feed(direction, pcapPacket.Data[header.payloadOffset:])
 
 	for _, record := range records {
@@ -1020,7 +1027,8 @@ func (recorder *recorder) decryptDatagram(cookie uint64, currentFlow *flow, pcap
 		}
 	}
 
-	if feedErr != nil {
+	switch {
+	case feedErr != nil:
 		err = recorder.abandonDatagrams(cookie, currentFlow, feedErr.Error())
 
 		if err != nil {
@@ -1028,6 +1036,20 @@ func (recorder *recorder) decryptDatagram(cookie uint64, currentFlow *flow, pcap
 		}
 
 		err = recorder.writeDatagram(pcapPacket, pcapPacket.Data, takeFlowNote(currentFlow))
+	// a record an endpoint drops too (a datagram that does not frame, another epoch, a failed MAC): the datagram is written as it came
+	case droppedRecords(currentFlow.conn, direction) != dropped:
+		addFlowNote(currentFlow, droppedRecordNote)
+		err = recorder.writeDatagram(pcapPacket, pcapPacket.Data, takeFlowNote(currentFlow))
+	default:
+	}
+
+	return
+}
+
+// the records a DTLS record layer dropped in a direction (tlsrecord.DTLSConn.Feed), a TLS one drops none
+func droppedRecords(conn recordLayer, direction tlsrecord.Direction) (dropped uint64) {
+	if dtlsConn, ok := conn.(*tlsrecord.DTLSConn); ok {
+		dropped = dtlsConn.Dropped()[direction]
 	}
 
 	return

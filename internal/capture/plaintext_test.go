@@ -454,8 +454,8 @@ func streamsOf(blocks []pcapBlock) (streams [2][]byte, comments []string) {
 // the TLS 1.2 and TLS 1.3 sessions of the tests, each one a request and its response
 func testSessions(state *testing.T) (sessions []tlsSession) {
 	for _, version := range []uint16{tls.VersionTLS12, tls.VersionTLS13} {
-		request := []byte(fmt.Sprintf("GET /%s HTTP/1.1\r\nHost: example.com\r\n\r\n", tlsrecord.VersionName(version)))
-		response := []byte(fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n%04x!", version))
+		request := fmt.Appendf(nil, "GET /%s HTTP/1.1\r\nHost: example.com\r\n\r\n", tlsrecord.VersionName(version))
+		response := fmt.Appendf(nil, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n%04x!", version)
 		session, err := runTLSSession(version, request, response)
 
 		if err != nil {
@@ -1110,7 +1110,7 @@ func TestPlaintextDTLSNegative(state *testing.T) {
 			Name:        "datagram that is no dtls in a decrypted session",
 			Packets:     udpPackets(3, dtlsClient, dtlsServer, append(slices.Clone(session.chunks), sessionChunk{direction: tlsrecord.ClientDirection, data: []byte("no dtls")}, sessionChunk{direction: tlsrecord.ServerDirection, data: []byte("after")})),
 			FoundAt:     0,
-			Note:        "dtls decryption stopped, the rest of the flow is written encrypted: ",
+			Note:        droppedRecordNote,
 			Streams:     &[2][]byte{slices.Concat(session.request, []byte("no dtls")), slices.Concat(session.response, []byte("after"))},
 			IsDecrypted: true,
 		},

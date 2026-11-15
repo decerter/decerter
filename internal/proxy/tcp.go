@@ -187,6 +187,7 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 	}
 
 	flowID := recorder.OpenFlow(cookie, values, clientRandom)
+	recorder.SetUpstream(flowID, upstreamCookie)
 	interceptFlow := intercept.FlowOf(flowID, cookie, flow, clientAddressPort, values)
 	var flowHTTP *httpFlow
 

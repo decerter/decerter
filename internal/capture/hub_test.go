@@ -278,7 +278,7 @@ func TestHubProxiedPositive(state *testing.T) {
 	}
 
 	output := bytes.Buffer{}
-	err = hub.Export(&output, map[uint64][32]byte{7: clientRandom}, false, logger)
+	err = hub.Export(&output, map[uint64][32]byte{20: clientRandom}, false, logger)
 
 	if err != nil {
 		state.Fatalf("Test of capture.Hub.Export failed, error: %s", err.Error())
@@ -303,7 +303,8 @@ func TestHubProxiedPositive(state *testing.T) {
 	}
 }
 
-// Test if capture.Hub in run mode returns with the expected output for packets it must not take: an export by the cookie of the upstream socket has none, and an upstream socket whose app's flow is out of scope is not handed out.
+// Test if capture.Hub in run mode returns with the expected output for packets it must not take: an export by the cookie of the app's flow has none
+// (the udp sessions of one app socket share it), and an upstream socket whose app's flow is out of scope is not handed out.
 func TestHubProxiedNegative(state *testing.T) {
 	logger := slog.New(slog.DiscardHandler)
 	flows := history.New(history.DefaultLimits(), nil)
@@ -350,7 +351,7 @@ func TestHubProxiedNegative(state *testing.T) {
 	}
 
 	output := bytes.Buffer{}
-	err = hub.Export(&output, map[uint64][32]byte{21: [32]byte(hello[11:43])}, false, logger)
+	err = hub.Export(&output, map[uint64][32]byte{7: [32]byte(hello[11:43])}, false, logger)
 
 	if err != nil {
 		state.Fatalf("Test of capture.Hub.Export failed, error: %s", err.Error())
@@ -359,7 +360,7 @@ func TestHubProxiedNegative(state *testing.T) {
 	exported, err := readPackets(output.Bytes())
 
 	if (err != nil) || (len(exported) != 0) {
-		state.Errorf("Test of capture.Hub.Export failed, an export by the cookie of the upstream socket should have no packet, packets: %d, error: %v", len(exported), err)
+		state.Errorf("Test of capture.Hub.Export failed, an export by the cookie of the app's flow should have no packet, packets: %d, error: %v", len(exported), err)
 		return
 	}
 }

@@ -35,7 +35,7 @@ The host in the URL is `decerter`, `localhost` or a loopback address (with or wi
 | `GET /exchanges/{id}/body` | getExchangeBody | a window of the request or response body |
 | `GET /events` | streamEvents | server-sent events: flows opened and closed, messages, exchanges, holds, rules, intercept changes; no payloads |
 | `PUT /intercept` | setIntercept | turn holding on or off, with a filter, a direction and a layer |
-| `GET /holds` | listHolds | held messages with their payloads |
+| `GET /holds` | listHolds | held messages with their payloads, or with `offset` and `length` a window of each |
 | `PUT /holds/{id}` | editHold | replace a held message's payload |
 | `POST /holds/{id}/forward` | forwardHold | let it go on |
 | `POST /holds/{id}/drop` | dropHold | drop it |

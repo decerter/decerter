@@ -104,6 +104,17 @@ func TestGatePositive(state *testing.T) {
 		return
 	}
 	notOther := "!(tls.sni == \"other.com\")"
+	// a TCP fast open SYN with the start of the ClientHello, the rest behind the SYN's own sequence number
+	fastOpen := []capturebpf.Packet{}
+
+	for index, data := range [][]byte{
+		TCPPacket(nil, client, server, testClientISN, 0, SYNFlag, hello[:100]),
+		TCPPacket(nil, server, client, testServerISN, testClientISN+101, SYNFlag|ACKFlag, nil),
+		TCPPacket(nil, client, server, testClientISN+101, testServerISN+1, ACKFlag|PSHFlag, hello[100:]),
+	} {
+		fastOpen = append(fastOpen, capturebpf.Packet{Cookie: 1, FlowCookie: 1, TimestampNs: uint64(index+1) * 1000, Length: uint32(len(data)), IsIngress: index == 1, Data: data})
+	}
+
 	positiveCases := []struct {
 		Name              string
 		Scope             string
@@ -124,6 +135,7 @@ func TestGatePositive(state *testing.T) {
 		{Name: "in scope by the client hello", Scope: "tls.sni == \"example.com\"", Packets: helloFlow, Emitted: len(helloFlow), Decided: inScopeState, IsTLS: true, ServerName: "example.com", HasValues: true},
 		{Name: "out of scope by the client hello", Scope: "tls.sni == \"other.com\"", Packets: helloFlow, Emitted: 0, Decided: outScopeState, IsTLS: true, ServerName: "example.com", HasValues: true},
 		{Name: "client hello in two segments, one sent again", Scope: "tls.sni == \"example.com\"", Packets: splitFlow, Emitted: len(splitFlow), Decided: inScopeState, IsTLS: true, ServerName: "example.com", HasValues: true},
+		{Name: "client hello in a tcp fast open syn", Scope: "tls.sni == \"example.com\"", Packets: fastOpen, Emitted: len(fastOpen), Decided: inScopeState, IsTLS: true, ServerName: "example.com", HasValues: true},
 		{Name: "no tls", Scope: "tls.sni == \"example.com\"", Packets: tcpPackets(1, client, server, []sessionChunk{{direction: tlsrecord.ClientDirection, data: []byte("GET / HTTP/1.1\r\n\r\n")}}, true), Emitted: 0, Decided: outScopeState, HasValues: true},
 		{Name: "server speaks first", Scope: notOther, Packets: tcpPackets(1, client, server, []sessionChunk{{direction: tlsrecord.ServerDirection, data: []byte("220 smtp\r\n")}, {direction: tlsrecord.ClientDirection, data: hello}}, true), Emitted: 8, Decided: inScopeState, HasValues: true},
 		{Name: "fin before the first bytes", Scope: notOther, Packets: tcpPackets(1, client, server, nil, true), Emitted: 6, Decided: inScopeState, HasValues: true},

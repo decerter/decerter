@@ -12,6 +12,8 @@ var (
 	ErrTerminal   = errors.New("stdout is a terminal, the capture stream is binary and holds secrets: pipe it into a reader or redirect it to a file")
 	ErrPollStream = errors.New("could not poll capture stream")
 	ErrNoFlowMap  = errors.New("no flow_map to look the flow up in")
+	// a datagram of the client before its DTLS ClientHello is whole that is no DTLS record
+	ErrUnreadableDatagram = errors.New("a datagram that is no dtls 1.2 record")
 	// the hub and its writers
 	ErrStopped         = errors.New("the capture stopped, decerter is shutting down")
 	ErrSlowReader      = errors.New("the reader of the capture stream is too slow, packets would be lost")

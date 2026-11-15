@@ -108,7 +108,7 @@ func (hub *Hub) Add(output io.Writer, options ConsumerOptions, logger *slog.Logg
 			open[cookie] = [32]byte{}
 		}
 
-		current.replay = hub.ring.packetsOf(open, false)
+		current.replay = hub.ring.packetsOf(open)
 	}
 
 	hub.consumers[current] = true

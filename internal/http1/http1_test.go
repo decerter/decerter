@@ -195,12 +195,30 @@ var (
 			},
 		},
 		{
-			Name:   "connect stops the request side after its head and the response side after a 2xx",
-			Feeds:  []feed{{http1.RequestSide, "CONNECT a:443 HTTP/1.1\r\nHost: a:443\r\n\r\n\x16\x03\x01"}, {http1.ResponseSide, "HTTP/1.1 200 Connection Established\r\n\r\n\x16\x03\x03"}},
+			Name:   "connect stops the response side after a 2xx and the request side at its next bytes after its head",
+			Feeds:  []feed{{http1.RequestSide, "CONNECT a:443 HTTP/1.1\r\nHost: a:443\r\n\r\n"}, {http1.ResponseSide, "HTTP/1.1 200 Connection Established\r\n\r\n\x16\x03\x03"}, {http1.RequestSide, "\x16\x03\x01"}},
 			Closed: nil,
 			Expected: [2][]string{
 				{"begin 0", `head 0 CONNECT a:443 HTTP/1.1 0 "" [{Host a:443}] none 0 interim=false [0,39)`, `end 0 complete=true trailers=[] "" at 39`, "stop tunnel of a connect request at 39"},
 				{"begin 0", `head 0   HTTP/1.1 200 "Connection Established" [] none 0 interim=false [0,39)`, `end 0 complete=true trailers=[] "" at 39`, "stop tunnel of a connect request at 39"},
+			},
+		},
+		{
+			Name:   "a refused connect (407) is followed by its retry on the same connection, which is read up to its tunnel",
+			Feeds:  []feed{{http1.RequestSide, "CONNECT a:443 HTTP/1.1\r\n\r\n"}, {http1.ResponseSide, "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 2\r\n\r\nno"}, {http1.RequestSide, "CONNECT a:443 HTTP/1.1\r\nProxy-Authorization: Basic eA==\r\n\r\n"}, {http1.ResponseSide, "HTTP/1.1 200 OK\r\n\r\n\x16\x03\x03"}, {http1.RequestSide, "\x16\x03\x01"}},
+			Closed: nil,
+			Expected: [2][]string{
+				{"begin 0", `head 0 CONNECT a:443 HTTP/1.1 0 "" [] none 0 interim=false [0,26)`, `end 0 complete=true trailers=[] "" at 26`, "begin 26", `head 1 CONNECT a:443 HTTP/1.1 0 "" [{Proxy-Authorization Basic eA==}] none 0 interim=false [26,85)`, `end 1 complete=true trailers=[] "" at 85`, "stop tunnel of a connect request at 85"},
+				{"begin 0", `head 0   HTTP/1.1 407 "Proxy Authentication Required" [{Content-Length 2}] length 2 interim=false [0,65)`, `body "no"`, `end 0 complete=true trailers=[] "" at 67`, "begin 67", `head 1   HTTP/1.1 200 "OK" [] none 0 interim=false [67,86)`, `end 1 complete=true trailers=[] "" at 86`, "stop tunnel of a connect request at 86"},
+			},
+		},
+		{
+			Name:   "bytes sent while a connect waits stop the request side even when it is refused",
+			Feeds:  []feed{{http1.RequestSide, "CONNECT a:443 HTTP/1.1\r\n\r\n\x16\x03\x01"}, {http1.ResponseSide, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n"}, {http1.RequestSide, "\x16"}},
+			Closed: nil,
+			Expected: [2][]string{
+				{"begin 0", `head 0 CONNECT a:443 HTTP/1.1 0 "" [] none 0 interim=false [0,26)`, `end 0 complete=true trailers=[] "" at 26`, "stop tunnel of a connect request at 26"},
+				{"begin 0", `head 0   HTTP/1.1 403 "Forbidden" [{Content-Length 0}] length 0 interim=false [0,45)`, `end 0 complete=true trailers=[] "" at 45`},
 			},
 		},
 		{
@@ -415,6 +433,42 @@ func TestRebuildPositive(state *testing.T) {
 
 		if !bytes.Equal(check.Body, rebuilt.Body) || (check.Head.Method != rebuilt.Head.Method) || (check.Head.Status != rebuilt.Head.Status) {
 			state.Errorf("Test of http1.Rebuild function failed, %s, the wire should read back as the edit, body: %q, read: %q", positive.Name, rebuilt.Body, check.Body)
+			return
+		}
+	}
+}
+
+// Test if http1.Rebuild returns with the expected output for a response without a body by its status or its request: an edited head goes on as
+// written, its Content-Length keeps the size of the representation and a chunked one gets no last chunk.
+func TestRebuildBodilessPositive(state *testing.T) {
+	positiveCases := []struct {
+		Name     string
+		Request  string
+		Response string
+	}{
+		{Name: "a response to HEAD with its length", Request: "HEAD /file HTTP/1.1\r\nHost: a\r\n\r\n", Response: "HTTP/1.1 200 OK\r\nContent-Length: 104857600\r\nX: old\r\n\r\n"},
+		{Name: "a chunked response to HEAD", Request: "HEAD / HTTP/1.1\r\nHost: a\r\n\r\n", Response: "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nX: old\r\n\r\n"},
+		{Name: "a 304 with its length", Request: "GET / HTTP/1.1\r\nHost: a\r\n\r\n", Response: "HTTP/1.1 304 Not Modified\r\nContent-Length: 512\r\nX: old\r\n\r\n"},
+		{Name: "a 204", Request: "DELETE / HTTP/1.1\r\nHost: a\r\n\r\n", Response: "HTTP/1.1 204 No Content\r\nX: old\r\n\r\n"},
+	}
+
+	for _, positive := range positiveCases {
+		conn := http1.New()
+		conn.Feed(http1.RequestSide, []byte(positive.Request))
+		message := http1.Message{Raw: []byte(positive.Response)}
+
+		for _, event := range conn.Feed(http1.ResponseSide, []byte(positive.Response)) {
+			if event.Type == http1.HeadEventType {
+				message.Head = event.Head
+				message.Framing = event.Framing
+			}
+		}
+
+		expected := strings.Replace(positive.Response, "X: old", "X: new", 1)
+		rebuilt := http1.Rebuild(message, []byte(strings.Replace(string(message.Form()), "X: old", "X: new", 1)))
+
+		if (message.Framing != http1.NoneFraming) || (rebuilt.Err != nil) || (string(rebuilt.Wire) != expected) || (len(rebuilt.Body) != 0) {
+			state.Errorf("Test of http1.Rebuild function failed, %s, the head should go on as written, framing: %s, wire: %q, error: %v", positive.Name, message.Framing, rebuilt.Wire, rebuilt.Err)
 			return
 		}
 	}

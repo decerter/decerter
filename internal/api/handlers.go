@@ -324,12 +324,35 @@ func setIntercept(backend *Backend, writer http.ResponseWriter, request *http.Re
 	writeJSON(writer, http.StatusOK, state, logger)
 }
 
+// whole payloads, or with offset or length a window of each, so a client that only shows them reads an answer of a bounded size
 func listHolds(backend *Backend, writer http.ResponseWriter, request *http.Request, logger *slog.Logger) {
 	holds := []v1.Hold{}
+	query := request.URL.Query()
+	isWindow := query.Has("offset") || query.Has("length")
+	offset, err := queryNumber(request, "offset", 0, 0, maxPayloadOffset)
+
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err, logger)
+		return
+	}
+
+	length, err := queryNumber(request, "length", defaultPayloadLength, 0, maxPayloadLength)
+
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err, logger)
+		return
+	}
 
 	if backend.Holds != nil {
 		for _, held := range backend.Holds.List() {
-			holds = append(holds, holdView(held, true))
+			hold := holdView(held, !isWindow)
+
+			if isWindow {
+				payload := payloadWindow(held.Plain, offset, length)
+				hold.Payload = &payload
+			}
+
+			holds = append(holds, hold)
 		}
 	}
 

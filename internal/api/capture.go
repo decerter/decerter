@@ -171,23 +171,44 @@ func exportPcap(backend *Backend, writer http.ResponseWriter, request *http.Requ
 	writer.Header().Set("Content-Type", pcapngMediaType)
 	writer.Header().Set("Content-Disposition", `attachment; filename="decerter-flows.pcapng"`)
 	writer.WriteHeader(http.StatusOK)
+	output := &exportWriter{writer: writer, writeErr: nil}
 
 	if isHistory {
-		err = capture.WriteHistory(writer, flows)
+		err = capture.WriteHistory(output, flows)
 	} else {
 		cookies := map[uint64][32]byte{}
 
+		// in run mode the packets of each flow's own upstream socket, the udp sessions of one app socket share its cookie
 		for _, flow := range flows {
-			cookies[flow.Flow.Cookie] = flow.ClientRandom
+			cookies[flow.SocketCookie] = flow.ClientRandom
 		}
 
-		err = backend.Captures.Export(writer, cookies, format == v1.PlaintextCaptureFormat, logger.With("export", true))
+		err = backend.Captures.Export(output, cookies, format == v1.PlaintextCaptureFormat, logger.With("export", true))
 	}
 
-	// the status is sent, the client sees a short file
-	if err != nil {
-		logger.Debug("Could not write pcap export", "error", err)
+	if err == nil {
+		return
 	}
+
+	// a client that went away is no failure of decerter
+	if (output.writeErr != nil) || (request.Context().Err() != nil) {
+		logger.Debug("Could not write pcap export, the client went away", "error", err)
+	} else {
+		logger.Warn("Could not write pcap export", "error", err)
+	}
+
+	// the status is sent: the connection is cut without the end of the body, so the client sees a failed download and not a short file
+	panic(http.ErrAbortHandler)
+}
+
+func (output *exportWriter) Write(data []byte) (count int, err error) {
+	count, err = output.writer.Write(data)
+
+	if err != nil {
+		output.writeErr = err
+	}
+
+	return
 }
 
 // the id of a capture request, ok is false when the answer is written already

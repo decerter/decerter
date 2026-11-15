@@ -196,12 +196,6 @@ func addPinPaths(hooks []SharedHook) {
 // the state file is written before the first hook changes, so a decerter killed with SIGKILL can be undone by RestoreHooks with the state from ReadNetdState
 // a hook that fails is put back with its old flags, and every hook shared before it is restored; the state file is removed when that worked and kept when not
 func ShareHooks(cgroupPath string, hooks []SharedHook, statePath string) (shared []SharedHook, err error) {
-	err = WriteNetdState(statePath, NetdState{Pid: os.Getpid(), Cgroup: cgroupPath, Hooks: hooks})
-
-	if err != nil {
-		return
-	}
-
 	cgroup, openErr := os.Open(cgroupPath)
 
 	if err = openErr; err != nil {
@@ -212,6 +206,13 @@ func ShareHooks(cgroupPath string, hooks []SharedHook, statePath string) (shared
 	defer func() {
 		err = errors.Join(err, cgroup.Close())
 	}()
+
+	// the state goes down before the first hook changes, a cgroup that can't be opened leaves none behind
+	err = WriteNetdState(statePath, NetdState{Pid: os.Getpid(), Cgroup: cgroupPath, Hooks: hooks})
+
+	if err != nil {
+		return
+	}
 
 	for index, hook := range hooks {
 		gap, shareErr := shareHook(int(cgroup.Fd()), hook)

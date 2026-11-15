@@ -236,7 +236,14 @@ func (gate *gate) wait(cookie uint64, pendingFlow *gateFlow, packet capturebpf.P
 		hello, _, _ = tlsrecord.ReadDTLSClientHello(payload)
 		isDecided = true
 	default:
-		hello, isDecided = pendingFlow.readHello(header.sequence, payload)
+		sequence := header.sequence
+
+		// the SYN takes one sequence number, data in a SYN (TCP fast open) is behind it
+		if header.flags&SYNFlag != 0 {
+			sequence++
+		}
+
+		hello, isDecided = pendingFlow.readHello(sequence, payload)
 	}
 
 	// the end of the flow, a cut segment or too much waiting: decided with what is there

@@ -234,7 +234,8 @@ func messageIDs(messages []api.Message) (ids []uint64) {
 	return
 }
 
-// Test if history.History.Export returns with the expected output: the flows a filter takes, oldest first, with what went on of each message and the client random of the session.
+// Test if history.History.Export returns with the expected output: the flows a filter takes, oldest first, with what went on of each message, the client
+// random of the session and the socket whose packets are the flow's.
 func TestExportPositive(state *testing.T) {
 	flows := history.New(history.DefaultLimits(), nil)
 	plainID := flows.OpenFlow(1, testValues(8000, filter.AbsentTLSState), [32]byte{})
@@ -266,7 +267,25 @@ func TestExportPositive(state *testing.T) {
 		return
 	}
 
+	// run mode: two udp sessions of one unconnected socket share its cookie, each has an upstream socket of its own
+	firstSession := flows.OpenFlow(5, testValues(53, filter.AbsentTLSState), [32]byte{})
+	secondSession := flows.OpenFlow(5, testValues(5353, filter.AbsentTLSState), [32]byte{})
+	flows.SetUpstream(firstSession, 21)
+	flows.SetUpstream(secondSession, 22)
+	flows.SetUpstream(1000, 23)
+	sockets := []uint64{}
+
+	for _, flow := range flows.Export(nil) {
+		sockets = append(sockets, flow.SocketCookie)
+	}
+
+	if !slices.Equal(sockets, []uint64{1, 2, 21, 22}) {
+		state.Errorf("Test of history.History.Export function failed, each flow should have the socket of its packets, its upstream socket in run mode, sockets: %v", sockets)
+		return
+	}
+
 	var nothing *history.History
+	nothing.SetUpstream(firstSession, 21)
 
 	if exported := nothing.Export(nil); exported != nil {
 		state.Errorf("Test of history.History.Export function failed, a nil history should export nothing, flows: %+v", exported)

@@ -22,7 +22,7 @@ import (
 
 const (
 	// the body a message of layer http may have, a larger one goes on as its records with a note
-	maxHTTPBodyBytes int = 1 << 20
+	maxHTTPBodyBytes int = intercept.MaxHTTPBodyBytes
 	// the protocol of the exchanges of this layer
 	http1Protocol string = "HTTP/1.1"
 	// the ALPN protocol of HTTP/1.1, a TLS flow that agreed on another one (h2) is no HTTP/1

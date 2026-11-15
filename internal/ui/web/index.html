@@ -41,6 +41,7 @@
       <thead><tr><th>#</th><th>stream</th><th>method</th><th>url</th><th>status</th><th class="number">request</th><th class="number">response</th><th>notes</th></tr></thead>
       <tbody id="exchanges"></tbody>
     </table>
+    <button id="more-exchanges" type="button" hidden>More exchanges</button>
     <div id="exchange-view" hidden>
       <div class="row toolbar">
         <h3 id="exchange-title"></h3>
@@ -81,6 +82,10 @@
         </select>
         <select id="intercept-layer" aria-label="layer">
           <option value="">records (tcp, tls, udp, dtls)</option>
+          <option value="tcp">tcp reads only</option>
+          <option value="tls">tls records only</option>
+          <option value="udp">udp datagrams only</option>
+          <option value="dtls">dtls records only</option>
           <option value="http">whole http messages</option>
         </select>
         <button type="submit">Apply</button>

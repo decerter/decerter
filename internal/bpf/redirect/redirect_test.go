@@ -7,8 +7,10 @@ package redirect
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"net/netip"
 	"reflect"
+	"strings"
 	"syscall"
 	"testing"
 )
@@ -194,6 +196,35 @@ func TestProtocolNamePositive(state *testing.T) {
 			state.Errorf("Test of redirect.DestinationPort.String function failed, text should be %s, text: %s", positive.Expected, text)
 			return
 		}
+	}
+}
+
+// Test if redirect.flowTable returns with the expected output: every column has its header, Mark included, and a comm with a terminal escape
+// sequence or a line break is escaped.
+func TestFlowTablePositive(state *testing.T) {
+	flows := map[uint64]Flow{
+		7: {OriginalDestination: netip.MustParseAddrPort("127.0.0.1:443"), IPProtocol: syscall.IPPROTO_TCP, Redirected: true, Tgid: 10, UID: 1001, GID: 1001, CgroupID: 5, Comm: "\x1b[2Jx\nudp", Mark: 0x2a, Client: netip.AddrPort{}},
+		3: {OriginalDestination: netip.MustParseAddrPort("[::1]:53"), IPProtocol: syscall.IPPROTO_UDP, Redirected: true, Tgid: 11, UID: 0, GID: 0, CgroupID: 5, Comm: "dig", Mark: 0, Client: netip.MustParseAddrPort("[::1]:5000")},
+	}
+	lines := strings.Split(strings.TrimPrefix(flowTable(flows, nil), "\n"), "\n")
+
+	if (len(lines) != 4) || (lines[3] != "") {
+		state.Fatalf("Test of redirect.flowTable function failed, the table should have a header and two rows, table: %q", lines)
+	}
+
+	header := strings.Fields(strings.ReplaceAll(strings.ReplaceAll(lines[0], "Cgroup ID", "Cgroup_ID"), "UDP Client", "UDP_Client"))
+	tcpRow := strings.Fields(lines[2])
+
+	if (len(header) != 10) || (header[8] != "Mark") || (len(tcpRow) != len(header)) || (tcpRow[6] != "\\x1b[2Jx\\x0audp") || (tcpRow[8] != "0x2a") || !strings.HasPrefix(lines[1], "3 ") || !strings.HasSuffix(strings.TrimSpace(lines[1]), "[::1]:5000") {
+		state.Errorf("Test of redirect.flowTable function failed, every column should have its header and comm be escaped, table: %q", lines)
+		return
+	}
+
+	failed := flowTable(flows, errors.New("iterate failed"))
+
+	if failed != "flow_map iterate error: iterate failed\n" {
+		state.Errorf("Test of redirect.flowTable function failed, an iterate error should be the only line, table: %q", failed)
+		return
 	}
 }
 

@@ -85,6 +85,7 @@ func (history *History) AddHead(id uint64, side api.Side, message api.HTTPMessag
 	}
 }
 
+// an interim head that is not kept publishes nothing
 func (history *History) addHead(id uint64, side api.Side, message api.HTTPMessage, isInterim bool) (view api.Exchange, found bool) {
 	history.mutex.Lock()
 	defer history.mutex.Unlock()
@@ -94,26 +95,69 @@ func (history *History) addHead(id uint64, side api.Side, message api.HTTPMessag
 		return
 	}
 
-	history.setHead(flow, record, side, message, isInterim)
-	view = exchangeView(record)
+	found = history.setHead(flow, record, side, message, isInterim)
+
+	if found {
+		view = exchangeView(record)
+	}
+
 	return
 }
 
-// a head is always kept, the bodies make room for it; the flow's http fields get its values
-func (history *History) setHead(flow *flowRecord, record *exchangeRecord, side api.Side, message api.HTTPMessage, isInterim bool) {
-	size := headBytes(message.HTTPHead)
-	history.makeRoom(flow, size)
-	record.bytes += size
-	flow.exchangeBytes += size
-	history.exchangeBytes += size
-
+// a final head is always kept, cut to its start line when the limits have no room for it, so its exchange keeps its status and its body; the flow's
+// http fields get its values; an interim head is kept while the exchange has fewer than maxInterimHeads and the limits have room, isKept is false otherwise
+func (history *History) setHead(flow *flowRecord, record *exchangeRecord, side api.Side, message api.HTTPMessage, isInterim bool) (isKept bool) {
 	if isInterim {
+		size := headBytes(message.HTTPHead)
+		history.makeRoom(flow, size)
+
+		if (len(record.interim) >= maxInterimHeads) || !history.hasRoom(flow, size) {
+			flow.isTruncated = true
+			return
+		}
+
+		history.countExchange(flow, record, size)
 		record.interim = append(record.interim, message)
+		isKept = true
 		return
 	}
 
+	message.HTTPHead = history.keepHead(flow, record, message.HTTPHead)
 	record.messages[side] = &httpRecord{view: message, body: nil, original: nil}
 	addHTTPValues(flow, message, record.stream.ID)
+	isKept = true
+	return
+}
+
+// the head as the exchange keeps it: whole while the flow and the history have room for it, its start line otherwise (no fields, no reason, the target
+// cut to maxCutTarget bytes), which leaves the flow truncated
+func (history *History) keepHead(flow *flowRecord, record *exchangeRecord, head api.HTTPHead) (kept api.HTTPHead) {
+	kept = head
+	size := headBytes(head)
+	history.makeRoom(flow, size)
+
+	if !history.hasRoom(flow, size) {
+		kept.Headers = nil
+		kept.Reason = ""
+		kept.Target = strings.ToValidUTF8(kept.Target[:min(len(kept.Target), maxCutTarget)], "")
+		size = headBytes(kept)
+		flow.isTruncated = true
+	}
+
+	history.countExchange(flow, record, size)
+	return
+}
+
+// the flow and the history have room for size more exchange bytes
+func (history *History) hasRoom(flow *flowRecord, size int64) (hasRoom bool) {
+	hasRoom = (flow.exchangeBytes+size <= history.limits.FlowExchangeBytes) && (history.exchangeBytes+size <= history.limits.ExchangeBytes)
+	return
+}
+
+func (history *History) countExchange(flow *flowRecord, record *exchangeRecord, size int64) {
+	record.bytes += size
+	flow.exchangeBytes += size
+	history.exchangeBytes += size
 }
 
 // body bytes of a message as they went on, without chunk framing; what does not fit is counted but not kept
@@ -150,13 +194,18 @@ func (history *History) AppendGRPC(id uint64, side api.Side, messages []api.GRPC
 		return
 	}
 
-	size := grpcMessageBytes * int64(len(messages))
-	history.makeRoom(flow, size)
-	record.bytes += size
-	flow.exchangeBytes += size
-	history.exchangeBytes += size
+	// the boundaries that fit the limits are kept
+	history.makeRoom(flow, grpcMessageBytes*int64(len(messages)))
+	room := max(0, min(history.limits.FlowExchangeBytes-flow.exchangeBytes, history.limits.ExchangeBytes-history.exchangeBytes))
+	count := min(len(messages), int(room/grpcMessageBytes))
+
+	if count < len(messages) {
+		flow.isTruncated = true
+	}
+
+	history.countExchange(flow, record, grpcMessageBytes*int64(count))
 	message := record.messages[side]
-	message.view.GRPCMessages = append(message.view.GRPCMessages, messages...)
+	message.view.GRPCMessages = append(message.view.GRPCMessages, messages[:count]...)
 }
 
 // the message ended, or the HTTP layer stopped reading it; an edit replaces its head and body, what came before is kept as the original
@@ -197,15 +246,10 @@ func (history *History) endMessage(id uint64, side api.Side, end HTTPEnd) (view 
 		message.view.BodyLength = 0
 
 		if end.Edit.Verdict != api.DropVerdict {
-			message.view.HTTPHead = end.Edit.Head
+			message.view.HTTPHead = history.keepHead(flow, record, end.Edit.Head)
 			message.view.URL = end.Edit.URL
 			message.view.BodyLength = len(end.Edit.Body)
 			message.body = history.keepExchange(flow, record, end.Edit.Body)
-			size := headBytes(end.Edit.Head)
-			history.makeRoom(flow, size)
-			record.bytes += size
-			flow.exchangeBytes += size
-			history.exchangeBytes += size
 			addHTTPValues(flow, message.view, record.stream.ID)
 		}
 	}
@@ -306,10 +350,7 @@ func (history *History) keepExchange(flow *flowRecord, record *exchangeRecord, d
 	history.makeRoom(flow, int64(len(data)))
 	room := max(0, min(history.limits.FlowExchangeBytes-flow.exchangeBytes, history.limits.ExchangeBytes-history.exchangeBytes))
 	kept, _ = keep(data, room)
-	size := int64(len(kept))
-	record.bytes += size
-	flow.exchangeBytes += size
-	history.exchangeBytes += size
+	history.countExchange(flow, record, int64(len(kept)))
 
 	if len(kept) < len(data) {
 		flow.isTruncated = true

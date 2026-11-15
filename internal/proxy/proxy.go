@@ -17,7 +17,7 @@ import (
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/bpf/secrets"
 	"github.com/decerter/decerter/internal/filter"
-	"github.com/decerter/decerter/internal/intercept"
+	"github.com/decerter/decerter/internal/output"
 	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
 )
@@ -85,7 +85,8 @@ func printFlow(flow redirect.Flow, cmdline string, client netip.AddrPort, up str
 		mark = fmt.Sprintf(" mark=%#x", flow.Mark)
 	}
 
-	fmt.Printf("%s pid=%d uid=%d comm=%s %s client=%s%s up=%s down=%s duration=%s cmdline=%q\n", redirect.ProtocolName(flow.IPProtocol), flow.Tgid, flow.UID, intercept.EscapeField(flow.Comm), flow.OriginalDestination, client, mark, up, down, duration.Round(time.Millisecond), cmdline)
+	// stdout is the output of the tool, a write after its reader went away stops decerter through output.Stdout, a failed write has nowhere else to go
+	_, _ = fmt.Fprintf(output.Stdout, "%s pid=%d uid=%d comm=%s %s client=%s%s up=%s down=%s duration=%s cmdline=%q\n", redirect.ProtocolName(flow.IPProtocol), flow.Tgid, flow.UID, output.EscapeField(flow.Comm), flow.OriginalDestination, client, mark, up, down, duration.Round(time.Millisecond), cmdline)
 }
 
 // a redirected connection or datagram to the proxy port itself would make the proxy send to itself

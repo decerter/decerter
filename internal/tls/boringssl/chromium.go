@@ -51,7 +51,9 @@ var (
 )
 
 // the Chromium libraries of an install directory (/data/app/~~…/<package>-…/): extracted lib/<isa>/ files when the package manager extracted them, and
-// the stored lib/<abi>/ entries of base.apk and the split apks; a compressed or unaligned library is an error, none without an error is no Chromium app
+// the stored lib/<abi>/ entries of base.apk and the split apks; none without an error is no Chromium app
+// with extractNativeLibs=true the apk keeps a compressed copy of each extracted library, the app maps the extracted file: such an entry is skipped; a
+// compressed or unaligned entry is an error only when the directory has no usable library at all
 func FindChromiumLibraries(installDirectory string, architecture string) (libraries []LibraryFile, err error) {
 	apkABI, extractedISA, err := abiDirectories(architecture)
 
@@ -60,6 +62,8 @@ func FindChromiumLibraries(installDirectory string, architecture string) (librar
 	}
 
 	entries, readErr := os.ReadDir(filepath.Join(installDirectory, "lib", extractedISA))
+	extracted := map[string]bool{}
+	var unusableErr error
 
 	if (readErr != nil) && !errors.Is(readErr, fs.ErrNotExist) {
 		err = fmt.Errorf("%w: %w", ErrLibraryNotFound, readErr)
@@ -79,6 +83,7 @@ func FindChromiumLibraries(installDirectory string, architecture string) (librar
 		}
 
 		libraries = append(libraries, LibraryFile{Path: filepath.Join(installDirectory, "lib", extractedISA, entry.Name()), Entry: "", Offset: 0, Size: uint64(info.Size())})
+		extracted[entry.Name()] = true
 	}
 
 	apks, globErr := filepath.Glob(filepath.Join(installDirectory, "*.apk"))
@@ -102,7 +107,16 @@ func FindChromiumLibraries(installDirectory string, architecture string) (librar
 		for _, name := range names {
 			library, found, findErr := FindAPKEntry(apk, name)
 
-			if err = findErr; err != nil {
+			switch {
+			case findErr == nil:
+			// the package manager extracted it, the app maps that file
+			case (errors.Is(findErr, ErrCompressedLibrary) || errors.Is(findErr, ErrUnalignedLibrary)) && extracted[path.Base(name)]:
+				continue
+			case errors.Is(findErr, ErrCompressedLibrary) || errors.Is(findErr, ErrUnalignedLibrary):
+				unusableErr = errors.Join(unusableErr, findErr)
+				continue
+			default:
+				err = findErr
 				return
 			}
 
@@ -110,6 +124,10 @@ func FindChromiumLibraries(installDirectory string, architecture string) (librar
 				libraries = append(libraries, library)
 			}
 		}
+	}
+
+	if len(libraries) == 0 {
+		err = unusableErr
 	}
 
 	return

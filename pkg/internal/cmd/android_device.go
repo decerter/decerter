@@ -25,7 +25,7 @@ func RestoreAndroid(logger *logging.Logger) (err error) {
 	currentPlatform := platform.Detect("/")
 
 	if currentPlatform.Type != platform.AndroidType {
-		err = ErrNotAndroid
+		err = fmt.Errorf("%w, there are no netd hooks to restore", ErrNotAndroid)
 		logger.Error("Could not restore netd hooks", "error", err)
 		return
 	}
@@ -46,7 +46,7 @@ func AndroidTLS(packageNames []string, logger *logging.Logger) (err error) {
 	currentPlatform := platform.Detect("/")
 
 	if currentPlatform.Type != platform.AndroidType {
-		err = ErrNotAndroid
+		err = fmt.Errorf("%w, android tls checks the apps installed on the device: run it there as root", ErrNotAndroid)
 		logger.Error("Could not check the apps", "error", err)
 		return
 	}

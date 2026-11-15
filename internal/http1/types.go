@@ -106,28 +106,31 @@ const (
 	chunkEndState
 	trailerState
 	closeBodyState
+	// the request side after a CONNECT without a body: nothing is parsed until the response says whether a tunnel follows
+	connectState
 	stoppedState
 )
 
 // one side of a conn; offset is the stream offset of the next byte, start the one of the open message
 // head collects the head, scanned is how far it was searched for its end, lineStart where the line being searched starts, hasStartLine whether a non-empty line came
 // line collects a chunk-size line or the line end after a chunk, trailer the trailer section; remaining are the body or chunk bytes still to come
-// pendingStop stops the side at its next Feed, the other side switched the protocol
+// pendingStop stops the side at its next Feed, the other side switched the protocol; isConnectData is true once bytes came while a CONNECT waited for its response
 type parser struct {
-	side         Side
-	state        parseState
-	offset       int64
-	start        int64
-	index        int
-	head         []byte
-	scanned      int
-	lineStart    int
-	hasStartLine bool
-	line         []byte
-	trailer      []byte
-	trailerStart int64
-	remaining    int64
-	pendingStop  error
+	side          Side
+	state         parseState
+	offset        int64
+	start         int64
+	index         int
+	head          []byte
+	scanned       int
+	lineStart     int
+	hasStartLine  bool
+	line          []byte
+	trailer       []byte
+	trailerStart  int64
+	remaining     int64
+	pendingStop   error
+	isConnectData bool
 }
 
 // a request whose final response has not come yet

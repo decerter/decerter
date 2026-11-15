@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -29,9 +30,11 @@ import (
 	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/intercept"
+	"github.com/decerter/decerter/internal/output"
 	"github.com/decerter/decerter/internal/platform"
 	"github.com/decerter/decerter/internal/proxy"
 	"github.com/decerter/decerter/internal/route"
+	"github.com/decerter/decerter/internal/tls/openssl"
 	"github.com/cilium/ebpf"
 )
 
@@ -94,8 +97,8 @@ type App struct {
 	captureBpfPrograms  map[bpf.BpfProgramName]*ebpf.Program
 	tcpListener         *net.TCPListener
 	udpConnection       *net.UDPConn
-	captureErr          error
-	captureErrMutex     *sync.Mutex
+	stopErr             error
+	stopErrMutex        *sync.Mutex
 	secretsErr          error
 	closeFunctions      [](func() error)
 }
@@ -153,8 +156,8 @@ func New(ctx context.Context, flags redirect.Filter, scopeFilter *filter.Filter,
 		captureBpfPrograms:  nil,
 		tcpListener:         nil,
 		udpConnection:       nil,
-		captureErr:          nil,
-		captureErrMutex:     &sync.Mutex{},
+		stopErr:             nil,
+		stopErrMutex:        &sync.Mutex{},
 		secretsErr:          nil,
 		closeFunctions:      [](func() error){},
 	}
@@ -401,7 +404,7 @@ func (app *App) StartProxy() (err error) {
 			recordMessage = recorder.Record
 		}
 
-		pipeline = intercept.New(rules, os.Stdout, recordMessage)
+		pipeline = intercept.New(rules, output.Stdout, recordMessage)
 		app.logger.Info("Intercepting the flows of the proxy", "rules", len(app.rules), "tls", secretsBpfMaps != nil)
 	case v1.DecryptProcessing:
 		app.logger.Info("Decrypting tls flows of the tcp proxy and dtls sessions of the udp proxy")
@@ -671,7 +674,7 @@ func (app *App) StartCapture() (err error) {
 
 		if runErr != nil {
 			app.logger.Error("Could not read captured packets", "error", runErr)
-			app.setCaptureErr(runErr)
+			app.setStopErr(runErr)
 			app.cancel()
 		}
 	})
@@ -701,7 +704,7 @@ func (app *App) StartCapture() (err error) {
 		default:
 			app.logger.Error("Could not write capture file", "error", writeErr, "fileName", app.capturePath)
 			// read by Shutdown after the wait group, nothing is captured without the writer so decerter stops
-			app.setCaptureErr(writeErr)
+			app.setStopErr(writeErr)
 			app.cancel()
 		}
 	})
@@ -728,11 +731,11 @@ func (app *App) StartCapture() (err error) {
 	return
 }
 
-// a capture error stops decerter, Shutdown returns it
-func (app *App) setCaptureErr(err error) {
-	app.captureErrMutex.Lock()
-	defer app.captureErrMutex.Unlock()
-	app.captureErr = errors.Join(app.captureErr, err)
+// an error that stops decerter, from the capture writer or the key log reader, Shutdown returns it
+func (app *App) setStopErr(err error) {
+	app.stopErrMutex.Lock()
+	defer app.stopErrMutex.Unlock()
+	app.stopErr = errors.Join(app.stopErr, err)
 }
 
 // stdout is not closed, it is the stream
@@ -825,15 +828,15 @@ func (app *App) StartFlowTable() {
 	}
 
 	// stdout carries the capture stream, the table goes to stderr with the logs then
-	output := os.Stdout
+	var writer io.Writer = output.Stdout
 
 	if app.capturePath == capture.StreamPath {
-		output = os.Stderr
+		writer = os.Stderr
 	}
 
 	// flow_map printer
 	app.waitGroup.Go(func() {
-		redirect.Read(app.ctx, app.redirectBpfMaps[redirect.FlowMap], output)
+		redirect.Read(app.ctx, app.redirectBpfMaps[redirect.FlowMap], writer)
 	})
 }
 
@@ -842,7 +845,8 @@ func (app *App) StartFlowTable() {
 // container's own), each with the offsets of its version. Android hooks BoringSSL's ssl_log_secret in Conscrypt's libssl with the offsets of the Android release, and in the libflutter.so of
 // each selected Flutter app with the offsets of its Dart version; with --libssl the library given, as BoringSSL when it has ssl_log_secret and as OpenSSL otherwise
 // in run and capture mode the redirect object has to be loaded already, the secrets object shares its uid_map and tgid_map; in keylog mode it owns them
-// on an architecture without the secrets object, and on Android when neither Conscrypt nor a Flutter app can be hooked, keylog mode fails, run and capture mode go on without TLS secrets
+// on an architecture without the secrets object, on Linux without libssl.so.3 or .4 (and no --libssl), and on Android when neither Conscrypt nor a Flutter
+// app can be hooked, keylog mode fails, run and capture mode go on without TLS secrets
 func (app *App) LoadSecretsBpfObjects() (err error) {
 	supportedErr := secrets.CheckSupported()
 
@@ -872,6 +876,13 @@ func (app *App) LoadSecretsBpfObjects() (err error) {
 		}
 	} else {
 		found, foundSeen, findErr := app.findOpensslHooks()
+
+		// no libssl.so.3 or .4 on the host and none mapped by a selected process: run and capture mode go on without TLS secrets, keylog mode fails;
+		// a --libssl that is not there always fails
+		if (app.libssl == "") && errors.Is(findErr, openssl.ErrLibraryNotFound) {
+			err = app.withoutSecrets(findErr)
+			return
+		}
 
 		if err = findErr; err != nil {
 			return
@@ -956,9 +967,18 @@ func (app *App) StartKeylog() {
 		return
 	}
 
-	// secrets key log printer, writes NSS key log lines to stdout
+	// secrets key log printer, writes NSS key log lines to stdout; keylog mode has nothing else to do, a reader that gave up stops decerter
 	app.waitGroup.Go(func() {
-		secrets.ReadKeyLog(app.ctx, app.secretsBpfMaps[secrets.SecretsEventMap], os.Stdout, app.logger)
+		readErr := secrets.ReadKeyLog(app.ctx, app.secretsBpfMaps[secrets.SecretsEventMap], output.Stdout, app.logger)
+
+		switch {
+		case readErr == nil:
+		// the reader of stdout went away, output.Stdout stopped decerter already
+		case output.IsGone(readErr):
+		default:
+			app.setStopErr(readErr)
+			app.cancel()
+		}
 	})
 }
 
@@ -1191,6 +1211,14 @@ func (app *App) ShareNetdHooks() (err error) {
 // the one start order of every mode, used by the run, capture and keylog commands and by the e2e tests
 // the mode comes from New: keylog, isCapture, or run mode otherwise; Shutdown undoes whatever part of it ran, also after an error
 func (app *App) Start() (err error) {
+	// a write to stdout after its reader went away stops decerter, as other Unix tools do: decerter run | head stops once head exited
+	output.Stdout.OnGone(func() {
+		if app.ctx.Err() == nil {
+			app.logger.Info("Stdout reader went away, stopping")
+		}
+
+		app.cancel()
+	})
 	// on Android a decerter killed before puts netd's hooks back first
 	err = app.PreparePlatform()
 
@@ -1391,9 +1419,9 @@ func (app *App) startRunMode() (err error) {
 func (app *App) Shutdown() (err error) {
 	app.cancel()
 	app.waitGroup.Wait()
-	app.captureErrMutex.Lock()
-	err = app.captureErr
-	app.captureErrMutex.Unlock()
+	app.stopErrMutex.Lock()
+	err = app.stopErr
+	app.stopErrMutex.Unlock()
 
 	for _, closeFunction := range slices.Backward(app.closeFunctions) {
 		closeErr := closeFunction()

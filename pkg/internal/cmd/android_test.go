@@ -79,7 +79,7 @@ func TestRestoreAndroidNegative(state *testing.T) {
 	logger := logging.New(logs, slog.LevelInfo)
 	err := RestoreAndroid(&logger)
 
-	if !errors.Is(err, ErrNotAndroid) || !strings.Contains(logs.String(), `"msg":"Could not restore netd hooks"`) {
+	if !errors.Is(err, ErrNotAndroid) || !strings.Contains(err.Error(), "there are no netd hooks to restore") || !strings.Contains(logs.String(), `"msg":"Could not restore netd hooks"`) {
 		state.Errorf("Test of cmd.RestoreAndroid function failed, error should be %v, error: %v, logs: %s", ErrNotAndroid, err, logs.String())
 		return
 	}
@@ -92,7 +92,8 @@ func TestAndroidTLSNegative(state *testing.T) {
 	logger := logging.New(logs, slog.LevelInfo)
 	err := AndroidTLS([]string{"com.example.app"}, &logger)
 
-	if !errors.Is(err, ErrNotAndroid) || !strings.Contains(logs.String(), `"msg":"Could not check the apps"`) {
+	// the message is its own, not the one of android restore
+	if !errors.Is(err, ErrNotAndroid) || !strings.Contains(err.Error(), "checks the apps installed on the device") || strings.Contains(err.Error(), "netd") || !strings.Contains(logs.String(), `"msg":"Could not check the apps"`) {
 		state.Errorf("Test of cmd.AndroidTLS function failed, error should be %v, error: %v, logs: %s", ErrNotAndroid, err, logs.String())
 		return
 	}

@@ -45,6 +45,7 @@ func (conn *Conn) Close(side Side) (events []Event) {
 	switch parser.state {
 	case
 		idleState,
+		connectState,
 		stoppedState:
 	case headState:
 		events = append(events, parser.stop(parser.start, ErrClosed))
@@ -142,6 +143,9 @@ func (conn *Conn) step(parser *parser, data []byte, events []Event) (consumed in
 	case closeBodyState:
 		consumed = len(data)
 		result = append(result, parser.body(data, data))
+	case connectState:
+		consumed = len(data)
+		parser.isConnectData = true
 	case stoppedState:
 		consumed = len(data)
 	}
@@ -251,6 +255,10 @@ func (conn *Conn) finishHead(parser *parser, head Head, headEnd int64, events []
 		headEvent.IsInterim = isInterim && (head.Status != 101)
 		isTunnel = (method == "CONNECT") && (head.Status >= 200) && (head.Status < 300)
 		headEvent.Framing, headEvent.Length, err = responseFraming(head, method)
+
+		if (method == "CONNECT") && !isInterim {
+			conn.answerConnect(isTunnel)
+		}
 	}
 
 	if err != nil {
@@ -278,8 +286,12 @@ func (conn *Conn) finishHead(parser *parser, head Head, headEnd int64, events []
 		parser.state = closeBodyState
 	}
 
-	// what follows a switch of protocol or a tunnel is no HTTP/1
+	// what follows a switch of protocol or a tunnel is no HTTP/1; a CONNECT waits for its response, a refused one (407) is followed by more requests
 	switch {
+	case (parser.side == RequestSide) && (head.Method == "CONNECT") && (headEvent.Framing == NoneFraming):
+		parser.state = connectState
+		parser.start = headEnd
+		parser.isConnectData = false
 	case (parser.side == RequestSide) && (head.Method == "CONNECT"):
 		result = append(result, parser.stop(headEnd, ErrConnect))
 	case (parser.side == ResponseSide) && (head.Status == 101):
@@ -291,6 +303,20 @@ func (conn *Conn) finishHead(parser *parser, head Head, headEnd int64, events []
 	}
 
 	return
+}
+
+// the final response to a CONNECT came: a 2xx starts the tunnel, the request side stops at its next bytes; a refusal lets it parse the next request,
+// unless bytes came while it waited: those were sent into the tunnel or are the middle of a request, the request side stops then too
+func (conn *Conn) answerConnect(isTunnel bool) {
+	request := &conn.parsers[RequestSide]
+
+	switch {
+	case request.state != connectState:
+	case isTunnel || request.isConnectData:
+		request.pendingStop = ErrConnect
+	default:
+		request.state = idleState
+	}
 }
 
 // a request has a body only with Transfer-Encoding, which must end in chunked, or Content-Length (RFC 9112 section 6.3)

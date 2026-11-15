@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"log/slog"
 	"net"
@@ -305,7 +306,7 @@ func TestShutdownPositive(state *testing.T) {
 		},
 	)
 	captureErr := errors.New("capture failed")
-	app.setCaptureErr(captureErr)
+	app.setStopErr(captureErr)
 	err = app.Shutdown()
 
 	if !errors.Is(err, errClose) || !errors.Is(err, captureErr) || (len(order) != 2) || (order[0] != 2) || !strings.Contains(logs.String(), "Could not close bpf resource") {
@@ -459,6 +460,44 @@ func TestLoadSecretsBpfObjectsNegative(state *testing.T) {
 
 		if !errors.Is(err, negative.Expected) || (shutdownErr != nil) || !strings.Contains(logs.String(), negative.Logs) {
 			state.Errorf("Test of app.LoadSecretsBpfObjects function failed, case %q, error should be %v, logs should contain %q, error: %v, shutdown error: %v, logs: %q", negative.Name, negative.Expected, negative.Logs, err, shutdownErr, logs.String())
+		}
+	}
+}
+
+// Test if app.LoadSecretsBpfObjects returns with the expected output on a Linux host without libssl.so.3 or .4 and no --libssl: run and capture mode go
+// on without TLS secrets, run mode with a warning, and keylog mode fails.
+func TestLoadSecretsWithoutLibsslPositive(state *testing.T) {
+	missing := fmt.Errorf("%w: libssl.so.3 or libssl.so.4, give its path with --libssl", openssl.ErrLibraryNotFound)
+	previous := findLibssl
+	findLibssl = func(override string) (libraries []openssl.Library, err error) {
+		err = missing
+		return
+	}
+	state.Cleanup(func() {
+		findLibssl = previous
+	})
+
+	linux := platform.Platform{Type: platform.LinuxType, SDK: 0, Release: "", DataDirectory: state.TempDir(), APISocket: ""}
+	positiveCases := []struct {
+		Name     string
+		Options  appOptions
+		Expected error
+		Logs     string
+	}{
+		{Name: "run mode", Options: appOptions{Platform: linux}, Expected: nil, Logs: "running without TLS secrets"},
+		{Name: "capture mode", Options: appOptions{IsCapture: true, Platform: linux}, Expected: nil, Logs: ""},
+		{Name: "keylog mode", Options: appOptions{Keylog: true, Platform: linux}, Expected: openssl.ErrLibraryNotFound, Logs: "Could not load secrets uprobe"},
+	}
+
+	for _, positive := range positiveCases {
+		logs := &bytes.Buffer{}
+		app := newOptionsApp(state.Context(), positive.Options, logs)
+		err := app.LoadSecretsBpfObjects()
+		shutdownErr := app.Shutdown()
+		isWithout := (app.secretsBpfMaps == nil) && ((positive.Expected != nil) || errors.Is(app.secretsErr, openssl.ErrLibraryNotFound))
+
+		if !errors.Is(err, positive.Expected) || ((positive.Expected == nil) != (err == nil)) || !isWithout || (shutdownErr != nil) || !strings.Contains(logs.String(), positive.Logs) {
+			state.Errorf("Test of app.LoadSecretsBpfObjects function failed, case %q, error should be %v, logs should contain %q, error: %v, secrets error: %v, shutdown error: %v, logs: %q", positive.Name, positive.Expected, positive.Logs, err, app.secretsErr, shutdownErr, logs.String())
 		}
 	}
 }

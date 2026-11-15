@@ -3,6 +3,7 @@
 package api
 
 import (
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	v1 "github.com/decerter/decerter/api"
 	"github.com/decerter/decerter/internal/capture"
 	"github.com/decerter/decerter/internal/history"
+	"github.com/decerter/decerter/internal/http1"
 	"github.com/decerter/decerter/internal/intercept"
 )
 
@@ -32,8 +34,9 @@ const (
 	// exchanges per page
 	defaultExchangeLimit int = 100
 	maxExchangeLimit     int = 1000
-	// a request body: an edit of the largest datagram in hex fits
-	maxRequestBytes int64 = 1 << 20
+	// a request body: an edit of the largest held message in hex fits, a whole HTTP message with the largest body the proxy keeps and a head as large as
+	// the parsers take (twice that for the fields of an HTTP/2 head written as lines), with room for the JSON around it
+	maxRequestBytes int64 = 2*int64(intercept.MaxHTTPBodyBytes+2*http1.MaxHeadBytes) + (64 << 10)
 	// events a client of the stream may be behind before it is dropped, and the time one write to it may take
 	eventBuffer       int           = 256
 	eventWriteTimeout time.Duration = 10 * time.Second
@@ -61,6 +64,12 @@ type Info struct {
 // what the server serves: the history of the run, the hold queue and the rules; Holds and Rules are nil without --intercept
 // KeyLog looks up the NSS key log lines of a session, nil without the secrets uprobe; Bus carries the events of everything
 // Captures are the captures, the stream and the captured packets: on decerter capture the packets of the recorded sockets, on decerter run the ones of the proxy's upstream sockets; nil without capture programs
+// the body of a pcap export, it keeps the error of the client's connection apart from a failure to make the file
+type exportWriter struct {
+	writer   io.Writer
+	writeErr error
+}
+
 type Backend struct {
 	Info     Info
 	History  *history.History

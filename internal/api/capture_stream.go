@@ -34,6 +34,16 @@ func streamCapture(backend *Backend, writer http.ResponseWriter, request *http.R
 		return
 	}
 
+	// the stream decides each flow when it starts, like a capture
+	if scope != nil {
+		err = scope.CheckFlowScope()
+
+		if err != nil {
+			writeError(writer, http.StatusBadRequest, fmt.Errorf("%w: filter: %w", ErrBadRequest, err), logger)
+			return
+		}
+	}
+
 	plaintext := false
 
 	if text := request.URL.Query().Get("plaintext"); text != "" {

@@ -5,6 +5,7 @@ package tlsrecord
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 )
 
@@ -25,6 +26,8 @@ const (
 	replayWindowLength uint64 = 64
 	// the hellos a direction may put together: the ClientHello, again after a HelloVerifyRequest, and some to spare; each takes a message sequence number
 	maxDTLSMessages int = 8
+	// the protected records of a direction that may fail their MAC before one passes; the keys are wrong when this many in a row fail
+	maxBadRecords int = 8
 	// a datagram a relay sends may grow to this or to the length it came with, whichever is more: the IPv6 minimum MTU minus the IPv6 and UDP headers fits every path
 	MinDatagramLength int = 1232
 )
@@ -48,12 +51,14 @@ type replayWindow struct {
 
 // one direction of a DTLS session: the hellos of epoch 0 it is putting together, the keys of epoch 1 and the numbers seen in epoch 1
 // holding is true once the protected records of the direction wait until they are decrypted, released once held records went on raw because the secrets were late
+// badRecords counts the records that failed their MAC before one passed
 type dtlsHalf struct {
 	direction  Direction
 	messages   map[uint16]*dtlsMessage
 	protection *protection
 	sealer     *protection
 	window     replayWindow
+	badRecords int
 	holding    bool
 	released   bool
 }
@@ -84,6 +89,7 @@ type DTLSConn struct {
 	heldBytes      int
 	assemblyBytes  int
 	datagrams      [2]uint64
+	dropped        [2]uint64
 	err            error
 }
 
@@ -99,8 +105,8 @@ func NewDTLS(holdLimit int, intercept bool) (conn DTLSConn) {
 		holdLimit: holdLimit,
 		intercept: intercept,
 		halves: [2]dtlsHalf{
-			{direction: ClientDirection, messages: map[uint16]*dtlsMessage{}, protection: nil, sealer: nil, window: replayWindow{}, holding: false, released: false},
-			{direction: ServerDirection, messages: map[uint16]*dtlsMessage{}, protection: nil, sealer: nil, window: replayWindow{}, holding: false, released: false},
+			{direction: ClientDirection, messages: map[uint16]*dtlsMessage{}, protection: nil, sealer: nil, window: replayWindow{}, badRecords: 0, holding: false, released: false},
+			{direction: ServerDirection, messages: map[uint16]*dtlsMessage{}, protection: nil, sealer: nil, window: replayWindow{}, badRecords: 0, holding: false, released: false},
 		},
 		session:        Session{},
 		serverRandom:   [randomLength]byte{},
@@ -113,13 +119,19 @@ func NewDTLS(holdLimit int, intercept bool) (conn DTLSConn) {
 		heldBytes:      0,
 		assemblyBytes:  0,
 		datagrams:      [2]uint64{},
+		dropped:        [2]uint64{},
 		err:            nil,
 	}
 	return
 }
 
 // add the next datagram of a direction, it is copied; records are its records that came out now, the ones before an error included
-// an error is final: the datagram is not DTLS 1.2 this package can read, every later call returns it again
+// a record that can't be read on its own is dropped and counted (Dropped), as an endpoint drops it (RFC 6347 section 4.1.2.7): the rest of a datagram
+// that does not frame, a record of an epoch above 1, a protected record before the ServerHello, one that fails its MAC; a lost, reordered or injected
+// datagram does not end the session
+// an error is final: the session is not DTLS 1.2 this package can read, an authenticated record breaks it or the keys are wrong (the first
+// maxBadRecords protected records of a direction fail), every later call returns it again
+// intercept: a record that is dropped and the part of the datagram behind an error go on as they came (ForwardAction), the receiver decides
 func (conn *DTLSConn) Feed(direction Direction, datagram []byte) (records []Record, err error) {
 	if err = conn.err; err != nil {
 		return
@@ -128,11 +140,13 @@ func (conn *DTLSConn) Feed(direction Direction, datagram []byte) (records []Reco
 	half := &conn.halves[direction]
 	index := conn.datagrams[direction]
 	conn.datagrams[direction]++
+	rest := datagram
 
-	for rest := datagram; len(rest) > 0; {
+	for len(rest) > 0 {
 		contentType, epoch, sequence, length, frameErr := frameDTLSRecord(rest)
 
-		if err = frameErr; err != nil {
+		if frameErr != nil {
+			conn.dropped[direction]++
 			break
 		}
 
@@ -155,6 +169,11 @@ func (conn *DTLSConn) Feed(direction Direction, datagram []byte) (records []Reco
 		if err != nil {
 			break
 		}
+	}
+
+	// intercept: what the record layer did not read goes on, so a relay that gives up still sends the whole datagram
+	if conn.intercept && (len(rest) > 0) {
+		records = append(records, forwardDTLSTail(direction, index, bytes.Clone(rest)))
 	}
 
 	// the hellos a peer started and never finished count too, so it can't make decerter keep more than the limit
@@ -192,14 +211,29 @@ func (conn *DTLSConn) SetSecrets(secrets Secrets) (records []Record, err error) 
 
 	for len(conn.held) > 0 {
 		current := conn.held[0]
-		record, openErr := conn.open(&conn.halves[current.record.Direction], current)
+		half := &conn.halves[current.record.Direction]
 
-		// the record that does not decrypt and the ones behind it stay for Unsent
-		if err = openErr; err != nil {
-			return
+		// the window has only the records that passed their MAC, a copy of one of them is left out now
+		if half.window.isNew(current.record.Sequence) {
+			record, openErr := conn.open(half, current)
+
+			switch {
+			case openErr == nil:
+				half.window.mark(current.record.Sequence)
+				records = append(records, record)
+			case errors.Is(openErr, ErrBadRecordMAC) && half.isBadRecordDropped():
+				conn.dropped[current.record.Direction]++
+
+				if conn.intercept && !current.isSent {
+					records = append(records, forwardDTLSRecord(current.record, current.raw))
+				}
+			default:
+				// the record that does not decrypt and the ones behind it stay for Unsent
+				err = openErr
+				return
+			}
 		}
 
-		records = append(records, record)
 		conn.held = conn.held[1:]
 		conn.heldBytes -= len(current.raw)
 	}
@@ -273,7 +307,14 @@ func (conn *DTLSConn) Session() (session Session) {
 	return
 }
 
-// what happens to one record: epoch 0 is read as it is, epoch 1 is decrypted or waits for the keys
+// the records of each direction the record layer dropped, see Feed
+func (conn *DTLSConn) Dropped() (dropped [2]uint64) {
+	dropped = conn.dropped
+	return
+}
+
+// what happens to one record: epoch 0 is read as it is, epoch 1 is decrypted or waits for the keys, a record that can't be read is dropped
+// the replay window moves only for a record that passed its MAC (RFC 6347 section 4.1.2.6), a held one is checked against it when the keys come
 func (conn *DTLSConn) take(half *dtlsHalf, record Record, raw []byte, records []Record) (result []Record, err error) {
 	result = records
 
@@ -289,14 +330,12 @@ func (conn *DTLSConn) take(half *dtlsHalf, record Record, raw []byte, records []
 		result = append(result, record)
 		err = conn.handle(half, record)
 		return
-	case record.Epoch > dtlsProtectedEpoch:
-		err = fmt.Errorf("%w: epoch %d", ErrRenegotiation, record.Epoch)
+	case (record.Epoch > dtlsProtectedEpoch) || (conn.session.Version == 0):
+		// the epoch of a renegotiation, or keys that can't be there yet
+		result = conn.drop(result, record, raw)
 		return
-	case conn.session.Version == 0:
-		err = fmt.Errorf("%w: protected record before the server hello", ErrUnexpectedRecord)
-		return
-	case !half.window.accept(record.Sequence):
-		// a copy of a record that came already, the receiver would drop it too
+	case !half.window.isNew(record.Sequence):
+		// a copy of a record that passed already, the receiver would drop it too
 		return
 	case half.protection == nil:
 		// a conn that only reads has nothing to send
@@ -314,11 +353,45 @@ func (conn *DTLSConn) take(half *dtlsHalf, record Record, raw []byte, records []
 
 	opened, openErr := conn.open(half, heldRecord{record: record, raw: raw, isSent: false})
 
-	if err = openErr; err != nil {
+	switch {
+	case openErr == nil:
+		half.window.mark(record.Sequence)
+		result = append(result, opened)
+	case errors.Is(openErr, ErrBadRecordMAC) && half.isBadRecordDropped():
+		result = conn.drop(result, record, raw)
+	default:
+		err = openErr
+
+		if conn.intercept {
+			result = append(result, forwardDTLSRecord(record, raw))
+		}
+	}
+
+	return
+}
+
+// a record that failed its MAC was changed or injected on the way and is dropped; keys that open none of the first maxBadRecords records of the
+// direction are the wrong keys, that ends the session
+func (half *dtlsHalf) isBadRecordDropped() (isDropped bool) {
+	if half.window.isStarted {
+		isDropped = true
 		return
 	}
 
-	result = append(result, opened)
+	half.badRecords++
+	isDropped = half.badRecords < maxBadRecords
+	return
+}
+
+// a record the record layer can't read is counted, intercept lets it go on as it came
+func (conn *DTLSConn) drop(records []Record, record Record, raw []byte) (result []Record) {
+	result = records
+	conn.dropped[record.Direction]++
+
+	if conn.intercept {
+		result = append(result, forwardDTLSRecord(record, raw))
+	}
+
 	return
 }
 
@@ -342,6 +415,23 @@ func forwardDTLSRecord(record Record, raw []byte) (forwarded Record) {
 	forwarded.Payload = raw[dtlsRecordHeaderLength:]
 	forwarded.Action = ForwardAction
 	forwarded.Raw = raw
+	return
+}
+
+// the part of a datagram behind a record that does not frame or an error goes on as it came, as one record of epoch 0 so its bytes are always free to send
+func forwardDTLSTail(direction Direction, datagram uint64, tail []byte) (forwarded Record) {
+	forwarded = Record{
+		Direction:   direction,
+		ContentType: 0,
+		Decrypted:   false,
+		Epoch:       0,
+		Sequence:    0,
+		Datagram:    datagram,
+		Length:      len(tail),
+		Payload:     nil,
+		Action:      ForwardAction,
+		Raw:         tail,
+	}
 	return
 }
 
@@ -625,8 +715,24 @@ func (conn *DTLSConn) protect() (err error) {
 	return
 }
 
-// a number is new when it is above the newest one or inside the window and not seen yet, it is marked as seen then
-func (window *replayWindow) accept(sequence uint64) (isNew bool) {
+// a number is new when the window is empty, above the newest one or inside the window and not seen yet
+func (window *replayWindow) isNew(sequence uint64) (isNew bool) {
+	switch {
+	case !window.isStarted:
+	case sequence > window.highest:
+	case window.highest-sequence >= replayWindowLength:
+		return
+	case window.bitmap&(1<<(window.highest-sequence)) != 0:
+		return
+	default:
+	}
+
+	isNew = true
+	return
+}
+
+// mark a number as seen, only once its record passed the MAC; a number that is not new changes nothing
+func (window *replayWindow) mark(sequence uint64) {
 	switch {
 	case !window.isStarted:
 		window.isStarted = true
@@ -637,15 +743,9 @@ func (window *replayWindow) accept(sequence uint64) (isNew bool) {
 		window.bitmap = window.bitmap<<(sequence-window.highest) | 1
 		window.highest = sequence
 	case window.highest-sequence >= replayWindowLength:
-		return
-	case window.bitmap&(1<<(window.highest-sequence)) != 0:
-		return
 	default:
 		window.bitmap |= 1 << (window.highest - sequence)
 	}
-
-	isNew = true
-	return
 }
 
 // the first record of a datagram, length is the record with its header, a record has to end inside its datagram (RFC 6347 section 4.1.1)
@@ -705,9 +805,10 @@ func NewDTLSEncrypter() (encrypter DTLSEncrypter) {
 	return
 }
 
-// a record that came with ForwardAction can go on raw while its sequence number was not given to a sealed record, a record of epoch 0 always can
+// a record that came with ForwardAction can go on raw while its sequence number was not given to a sealed record; only epoch 1 is sealed, a record
+// of another epoch always can
 func (encrypter *DTLSEncrypter) Forward(record Record) (isFree bool) {
-	if record.Epoch == 0 {
+	if record.Epoch != dtlsProtectedEpoch {
 		isFree = true
 		return
 	}

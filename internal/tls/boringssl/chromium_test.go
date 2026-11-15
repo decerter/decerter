@@ -115,6 +115,43 @@ func TestFindChromiumLibrariesPositive(state *testing.T) {
 	}
 }
 
+// Test if boringssl.FindChromiumLibraries returns with the expected output for extractNativeLibs=true: the apk keeps a compressed (or unaligned)
+// copy of the library the package manager extracted, the extracted file is found and the copy skipped; a compressed library without an extracted
+// one is no error while another library is usable.
+func TestFindChromiumLibrariesExtractedPositive(state *testing.T) {
+	directory := state.TempDir()
+	library := []byte("\x7fELF library")
+	err := errors.Join(
+		writeAPK(filepath.Join(directory, "base.apk"), []apkEntry{
+			{Name: monochromeEntry, Data: library, Stored: false, Unaligned: false},
+			{Name: "lib/x86_64/libchrome.so", Data: library, Stored: true, Unaligned: true},
+		}),
+		writeAPK(filepath.Join(directory, "split_cronet.apk"), []apkEntry{{Name: cronetEntry, Data: library, Stored: false, Unaligned: false}}),
+		os.MkdirAll(filepath.Join(directory, "lib", "x86_64"), 0o700),
+	)
+
+	if err == nil {
+		err = errors.Join(os.WriteFile(filepath.Join(directory, "lib", "x86_64", "libmonochrome_64.so"), library, 0o600), os.WriteFile(filepath.Join(directory, "lib", "x86_64", "libchrome.so"), library, 0o600))
+	}
+
+	if err != nil {
+		state.Fatalf("Test of boringssl.FindChromiumLibraries failed, cannot write the app, error: %s", err.Error())
+	}
+
+	libraries, err := boringssl.FindChromiumLibraries(directory, "amd64")
+	names := []string{}
+
+	for _, current := range libraries {
+		names = append(names, filepath.Base(current.Path)+"!"+current.Entry)
+	}
+
+	expected := []string{"libchrome.so!", "libmonochrome_64.so!"}
+
+	if (err != nil) || !slices.Equal(names, expected) {
+		state.Errorf("Test of boringssl.FindChromiumLibraries function failed, the extracted libraries should be found, libraries should be %q, libraries: %q, error: %v", expected, names, err)
+	}
+}
+
 // Test if boringssl.FindChromiumLibraries returns with the expected errors: a compressed or unaligned library, an apk that is no zip, an architecture
 // without Android ABI.
 func TestFindChromiumLibrariesNegative(state *testing.T) {

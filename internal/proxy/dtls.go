@@ -7,7 +7,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"sync"
 	"time"
 
@@ -15,6 +14,7 @@ import (
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/intercept"
+	"github.com/decerter/decerter/internal/output"
 	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
 )
@@ -100,7 +100,14 @@ func (dtls *dtlsInterception) close() {
 	dtls.wake.Broadcast()
 	flow := dtls.flow
 	flow.Session = dtls.conn.Session()
+	dropped := dtls.conn.Dropped()
 	dtls.mutex.Unlock()
+
+	// records an endpoint drops too: a datagram that does not frame, another epoch, a record that fails its MAC
+	if (dropped[tlsrecord.ClientDirection] != 0) || (dropped[tlsrecord.ServerDirection] != 0) {
+		dtls.logger.Debug("Dtls records the record layer could not read", "up", dropped[tlsrecord.ClientDirection], "down", dropped[tlsrecord.ServerDirection])
+	}
+
 	dtls.senders.Wait()
 
 	if dtls.pipeline == nil {
@@ -108,8 +115,8 @@ func (dtls *dtlsInterception) close() {
 	}
 
 	text := fmt.Sprintf("%s sni=%q alpn=%q records up=%s down=%s\n", intercept.LinePrefix(flow, intercept.DTLSLayer), flow.Session.ServerName, flow.Session.Protocol, statsText(dtls.stats[tlsrecord.ClientDirection]), statsText(dtls.stats[tlsrecord.ServerDirection]))
-	// stdout is the output of the tool as in printFlow, a failed write has nowhere to go
-	_, _ = os.Stdout.WriteString(text)
+	// stdout is the output of the tool as in printFlow
+	_, _ = output.Stdout.WriteString(text)
 }
 
 // observe: the datagram went on, its decrypted application data is printed; a session that can't be read is left alone with one log line
@@ -160,7 +167,7 @@ func (dtls *dtlsInterception) take(direction tlsrecord.Direction, datagram []byt
 	dtls.pushRecords(records)
 
 	if err != nil {
-		// the records of the datagram that came out went on, the rest of it can't be read
+		// the records of the datagram that came out went on, the record that failed and the rest of the datagram behind it go on raw with them
 		dtls.giveUp(err)
 	} else if dtls.conn.Waiting() && (!wasWaiting || (dtls.conn.Holding() && !wasHolding)) {
 		dtls.lookup(false)

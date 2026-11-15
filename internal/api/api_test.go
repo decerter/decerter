@@ -31,6 +31,7 @@ import (
 	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/history"
+	"github.com/decerter/decerter/internal/http1"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/platform"
 	"github.com/decerter/decerter/internal/tlsrecord"
@@ -192,6 +193,8 @@ func TestHandlerPositive(state *testing.T) {
 		{Method: http.MethodGet, Path: "/flows?filter=http.request.method+%3D%3D+%22GET%22+%26%26+http.response.code+%3D%3D+200", Status: http.StatusOK},
 		{Method: http.MethodGet, Path: "/messages/1?length=70000", Status: http.StatusBadRequest, IsInvalid: true},
 		{Method: http.MethodGet, Path: "/holds", Status: http.StatusOK},
+		{Method: http.MethodGet, Path: "/holds?offset=1&length=2", Status: http.StatusOK},
+		{Method: http.MethodGet, Path: "/holds?length=70000", Status: http.StatusBadRequest, IsInvalid: true},
 		{Method: http.MethodPut, Path: fmt.Sprintf("/holds/%d", test.heldID), Body: `{"payload": {"type": "text", "value": "GET /test HTTP/1.1\r\n\r\n"}}`, Status: http.StatusOK},
 		{Method: http.MethodPut, Path: fmt.Sprintf("/holds/%d", test.heldID), Body: `{"payload": {"type": "hex", "value": "47 45 54 20 2f 74 65 73 74"}}`, Status: http.StatusOK},
 		{Method: http.MethodPut, Path: fmt.Sprintf("/holds/%d", test.heldID), Body: `{"payload": {"type": "hex", "value": "4"}}`, Status: http.StatusBadRequest},
@@ -227,6 +230,15 @@ func TestHandlerPositive(state *testing.T) {
 		{Method: http.MethodGet, Path: "/captures/stream", Status: http.StatusConflict},
 	}
 	succeeded := map[string]bool{}
+	// a window of each held payload, "query" from byte 1, and the whole payloads without one
+	for path, expected := range map[string]v1.Payload{"/holds?offset=1&length=2": {Offset: 1, Length: 2, Total: 5, Hex: "7565", Escaped: "ue"}, "/holds": {Offset: 0, Length: 5, Total: 5, Hex: "7175657279", Escaped: "query"}} {
+		holds := v1.HoldList{}
+		_, err = getJSON(server, path, &holds)
+
+		if (err != nil) || (len(holds.Holds) != 2) || (holds.Holds[0].Payload == nil) || (*holds.Holds[0].Payload != expected) || (holds.Holds[1].Payload == nil) || (*holds.Holds[1].Payload != expected) {
+			state.Fatalf("Test of api.Handler failed, GET %s should have the payload %+v of each hold, holds: %+v, error: %v", path, expected, holds, err)
+		}
+	}
 
 	for _, positive := range positiveCases {
 		operationID, body, caseErr := checkCase(state.Context(), server, router, positive)
@@ -811,6 +823,37 @@ func checkCase(ctx context.Context, server *httptest.Server, router routers.Rout
 		Options:                &openapi3filter.Options{IncludeResponseStatus: true},
 	})
 	return
+}
+
+// an edit request with payload bytes in hex
+func hexEdit(length int) (body string) {
+	encoded, _ := json.Marshal(v1.EditRequest{Payload: v1.Value{Type: v1.HexValueType, Value: strings.Repeat("ab", length)}})
+	body = string(encoded)
+	return
+}
+
+// Test if a request body takes the edit of the largest HTTP message a hold can have: the largest body and head, in hex.
+func TestReadJSONSizePositive(state *testing.T) {
+	request := httptest.NewRequest(http.MethodPut, v1.BasePath+"/holds/1", strings.NewReader(hexEdit(intercept.MaxHTTPBodyBytes+2*http1.MaxHeadBytes)))
+	request.Header.Set("Content-Type", jsonMediaType)
+	edit := v1.EditRequest{}
+	err := readJSON(httptest.NewRecorder(), request, &edit)
+
+	if (err != nil) || (len(edit.Payload.Value) != 2*(intercept.MaxHTTPBodyBytes+2*http1.MaxHeadBytes)) {
+		state.Errorf("Test of api.readJSON failed, the edit of the largest HTTP message should be read, length: %d, error: %v", len(edit.Payload.Value), err)
+	}
+}
+
+// Test if a request body larger than the limit is refused.
+func TestReadJSONSizeNegative(state *testing.T) {
+	request := httptest.NewRequest(http.MethodPut, v1.BasePath+"/holds/1", strings.NewReader(hexEdit(int(maxRequestBytes))))
+	request.Header.Set("Content-Type", jsonMediaType)
+	edit := v1.EditRequest{}
+	err := readJSON(httptest.NewRecorder(), request, &edit)
+
+	if _, isTooLarge := errors.AsType[*http.MaxBytesError](err); !isTooLarge || !errors.Is(err, ErrBadRequest) {
+		state.Errorf("Test of api.readJSON failed, a body over %d bytes should be refused, error: %v", maxRequestBytes, err)
+	}
 }
 
 // the status, headers and body of the answer, the body is read and closed

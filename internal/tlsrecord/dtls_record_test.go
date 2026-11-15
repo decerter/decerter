@@ -262,8 +262,6 @@ func TestDTLSRecordNegative(state *testing.T) {
 		Err     error
 	}{
 		{Name: "application data in epoch 0", IsKeyed: true, Raw: dtlsRecord(ApplicationDataContentType, 0, 9, []byte("GET / HTTP/1.1\r\n\r\n")), Err: ErrUnexpectedRecord},
-		{Name: "protected record in front of the server hello", IsKeyed: false, Raw: dtlsRecord(ApplicationDataContentType, dtlsProtectedEpoch, 0, make([]byte, 40)), Err: ErrUnexpectedRecord},
-		{Name: "record of epoch 3", IsKeyed: true, Raw: dtlsRecord(ApplicationDataContentType, 3, 0, make([]byte, 40)), Err: ErrRenegotiation},
 		{Name: "plaintext over the limit", IsKeyed: true, Raw: dtlsRecord(ApplicationDataContentType, dtlsProtectedEpoch, 500, overflow[recordHeaderLength:]), Err: ErrRecordOverflow},
 		{Name: "change cipher spec under the keys", IsKeyed: true, Raw: dtlsRecord(ChangeCipherSpecContentType, dtlsProtectedEpoch, 501, changeCipherSpec[recordHeaderLength:]), Err: ErrRenegotiation},
 	}

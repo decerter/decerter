@@ -4,11 +4,13 @@ package capture
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/netip"
 	"slices"
+	"strings"
 	"syscall"
 	"time"
 
@@ -27,6 +29,9 @@ const (
 	historyServerSequence uint32 = 1 << 31
 	// the most payload one synthesized datagram of the history export carries
 	maxHistoryDatagram int = 65535 - 48
+	// the notes one packet of the history export carries, the notes past it are counted: a flow with many dropped or cut messages would need more than
+	// the 65535 bytes of a pcapng comment
+	maxHistoryNote int = 4096
 )
 
 // the latest packets the capture hub handed out, at most limit bytes of them; packets[start:] are kept, the slice is compacted when half of it is gone
@@ -59,16 +64,10 @@ func (ring *packetRing) add(packet capturebpf.Packet) {
 	}
 }
 
-// the packets of the cookies, oldest first: the cookies of their sockets, or with isByFlow of the flows they belong to, which in run mode are the app's sockets the history knows
-func (ring *packetRing) packetsOf(cookies map[uint64][32]byte, isByFlow bool) (packets []capturebpf.Packet) {
+// the packets of the sockets of the cookies, oldest first
+func (ring *packetRing) packetsOf(cookies map[uint64][32]byte) (packets []capturebpf.Packet) {
 	for _, packet := range ring.packets[ring.start:] {
-		cookie := packet.Cookie
-
-		if isByFlow {
-			cookie = packet.FlowCookie
-		}
-
-		if _, ok := cookies[cookie]; ok {
+		if _, ok := cookies[packet.Cookie]; ok {
 			packets = append(packets, packet)
 		}
 	}
@@ -77,8 +76,10 @@ func (ring *packetRing) packetsOf(cookies map[uint64][32]byte, isByFlow bool) (p
 }
 
 // the pcap export of the captured packets: the packets the hub still keeps of the flows, as a pcapng with a DSB in front of each TLS session or, plaintext, with synthesized decrypted packets
-// flows maps the cookies of the flows of the history to the client randoms of their sessions, zero for a flow without one; a session whose secrets are gone from secrets_map is written without keys
-// in run mode the packets are the ones of the proxy's upstream sockets, a TLS session there has the client random and the keys of the app's session, the proxy sealed its edits with them
+// flows maps the socket cookies of the flows of the history (history.ExportFlow.SocketCookie) to the client randoms of their sessions, zero for a flow
+// without one; a session whose secrets are gone from secrets_map is written without keys
+// in run mode the packets are the ones of the proxy's upstream sockets, one per flow and per udp session, a TLS session there has the client random and
+// the keys of the app's session, the proxy sealed its edits with them
 func (hub *Hub) Export(output io.Writer, flows map[uint64][32]byte, plaintext bool, logger *slog.Logger) (err error) {
 	if hub.ring == nil {
 		err = ErrNoPacketHistory
@@ -86,7 +87,7 @@ func (hub *Hub) Export(output io.Writer, flows map[uint64][32]byte, plaintext bo
 	}
 
 	hub.mutex.Lock()
-	packets := hub.ring.packetsOf(flows, true)
+	packets := hub.ring.packetsOf(flows)
 	hub.mutex.Unlock()
 	writerSnaplen := hub.snaplen
 
@@ -108,7 +109,7 @@ func (hub *Hub) Export(output io.Writer, flows map[uint64][32]byte, plaintext bo
 
 		// the writer knows a session by the socket of its packets
 		for _, packet := range packets {
-			if clientRandom := flows[packet.FlowCookie]; clientRandom != [32]byte{} {
+			if clientRandom := flows[packet.Cookie]; clientRandom != [32]byte{} {
 				recorder.known[packet.Cookie] = clientRandom
 			}
 		}
@@ -155,6 +156,12 @@ func WriteHistory(output io.Writer, flows []history.ExportFlow) (err error) {
 	for _, packet := range packets {
 		err = writer.WritePacket(packet)
 
+		// a comment that does not fit its option is cut, one packet does not end the export
+		if errors.Is(err, pcapng.ErrCommentSize) {
+			packet.Comment = strings.ToValidUTF8(packet.Comment[:maxHistoryNote], "")
+			err = writer.WritePacket(packet)
+		}
+
 		if err != nil {
 			return
 		}
@@ -164,12 +171,13 @@ func WriteHistory(output io.Writer, flows []history.ExportFlow) (err error) {
 	return
 }
 
-// the synthesized connection of one flow of the history, the arrays are by tlsrecord.Direction
+// the synthesized connection of one flow of the history, the arrays are by tlsrecord.Direction; omitted counts the notes that did not fit maxHistoryNote
 type historyConnection struct {
 	endpoints [2]Endpoint
 	sequence  [2]uint32
 	isTCP     bool
 	note      string
+	omitted   int
 	packets   []pcapng.Packet
 }
 
@@ -180,6 +188,7 @@ func appendHistoryFlow(packets []pcapng.Packet, flow history.ExportFlow) (result
 		sequence:  [2]uint32{historyClientSequence, historyServerSequence},
 		isTCP:     flow.Values.IPProtocol == syscall.IPPROTO_TCP,
 		note:      describeHistoryFlow(flow),
+		omitted:   0,
 		packets:   packets,
 	}
 	opened := timestampOf(flow.Flow.Opened)
@@ -292,6 +301,12 @@ func (connection *historyConnection) add(direction tlsrecord.Direction, data []b
 		packet.Direction = pcapng.InboundDirection
 	}
 
+	// a note is only counted while one waits, the count goes behind it
+	if connection.omitted > 0 {
+		connection.note += fmt.Sprintf("; %d more notes, the API has every message", connection.omitted)
+		connection.omitted = 0
+	}
+
 	if connection.note != "" {
 		packet.Comment = notePrefix + connection.note
 		connection.note = ""
@@ -300,7 +315,13 @@ func (connection *historyConnection) add(direction tlsrecord.Direction, data []b
 	connection.packets = append(connection.packets, packet)
 }
 
+// the notes wait for the next packet, those past maxHistoryNote are only counted
 func (connection *historyConnection) addNote(text string) {
+	if (connection.note != "") && (len(connection.note)+len(text) > maxHistoryNote) {
+		connection.omitted++
+		return
+	}
+
 	if connection.note != "" {
 		connection.note += "; "
 	}

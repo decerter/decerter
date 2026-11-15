@@ -51,8 +51,10 @@ func UpdateSelection(uids []uint32, tgids []uint32, bpfMaps map[bpf.BpfMapName]*
 }
 
 // nothing to read without the uprobe
-func ReadKeyLog(ctx context.Context, eventMap *ebpf.Map, writer io.Writer, logger *slog.Logger) {
-	logger.Error("Could not read key log", "error", CheckSupported())
+func ReadKeyLog(ctx context.Context, eventMap *ebpf.Map, writer io.Writer, logger *slog.Logger) (err error) {
+	err = CheckSupported()
+	logger.Error("Could not read key log", "error", err)
+	return
 }
 
 // no secrets without the uprobe

@@ -123,8 +123,15 @@ func startFakeAPI(state *testing.T) (target ui.Target) {
 	mux.HandleFunc("GET /api/v1/holds", func(writer http.ResponseWriter, request *http.Request) {
 		holds := v1.HoldList{Holds: []v1.Hold{}}
 
+		// list_held reads a window of each payload, whole payloads can be too large for one answer
+		if !request.URL.Query().Has("length") {
+			writeJSON(writer, http.StatusBadRequest, v1.Error{Error: "unexpected query " + request.URL.RawQuery})
+			return
+		}
+
 		for id := range uint64(3) {
-			holds.Holds = append(holds.Holds, v1.Hold{ID: 10 + id, FlowID: 7, Direction: v1.UpDirection, Layer: v1.TLSLayer, Length: len(holdPayload), OriginalLength: len(holdPayload), Payload: &v1.Payload{Offset: 0, Length: len(holdPayload), Total: len(holdPayload), Hex: hex.EncodeToString([]byte(holdPayload)), Escaped: holdPayload}})
+			payload := window(holdPayload, request)
+			holds.Holds = append(holds.Holds, v1.Hold{ID: 10 + id, FlowID: 7, Direction: v1.UpDirection, Layer: v1.TLSLayer, Length: len(holdPayload), OriginalLength: len(holdPayload), Payload: &payload})
 		}
 
 		writeJSON(writer, http.StatusOK, holds)

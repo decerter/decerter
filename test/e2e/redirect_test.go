@@ -386,8 +386,8 @@ func TestCaptureDropPositive(state *testing.T) {
 	}
 }
 
-// Test if decerter run goes on when its stdout is a pipe whose reader is gone, as with decerter run | head after head exited or Ctrl-C with | grep: the flow
-// line of a relayed flow fails with EPIPE instead of a SIGPIPE that kills decerter, and an interrupt then stops decerter cleanly with its shutdown run.
+// Test if decerter run stops by itself when its stdout is a pipe whose reader is gone, as with decerter run | head after head exited: the flow line of a
+// relayed flow fails with EPIPE instead of a SIGPIPE that kills decerter, and decerter then runs its normal shutdown and exits with 0, without an interrupt.
 func TestRunClosedStdoutPositive(state *testing.T) {
 	reader, writer, err := os.Pipe()
 
@@ -409,30 +409,42 @@ func TestRunClosedStdoutPositive(state *testing.T) {
 
 	server := startServer(state, serverConfig{})
 	command, _, logs, stop := startDecerterProcessTo(state, writer, nil, []string{"Redirecting flows"}, "run", "--uid", strconv.FormatUint(uint64(testUser.UID), 10), "--dst-cidr", destinationPrefix.String())
+	output, curlErr := runCurl(state.Context(), testUser, []string{server.URL + "pipe"})
 
-	// two flows, each ends with a flow line on stdout
-	for range 2 {
-		output, curlErr := runCurl(state.Context(), testUser, []string{server.URL + "pipe"})
-
-		if (curlErr != nil) || (output != "/pipe") {
-			state.Fatalf("Test of a closed stdout failed, the flow should be relayed, output: %q, error: %v, logs:\n%s", output, curlErr, logs.String())
-		}
+	if (curlErr != nil) || (output != "/pipe") {
+		state.Fatalf("Test of a closed stdout failed, the flow should be relayed, output: %q, error: %v, logs:\n%s", output, curlErr, logs.String())
 	}
 
-	// the flow line is written once the proxy saw both sides close
-	time.Sleep(500 * time.Millisecond)
-	err = command.Process.Signal(syscall.Signal(0))
-
-	if err != nil {
-		state.Fatalf("Test of a closed stdout failed, decerter should still run after its flow lines failed, error: %v, logs:\n%s", err, logs.String())
+	// the flow line is written once the proxy saw both sides close, decerter exits after its shutdown
+	if !hasExited(command.Process.Pid, 15*time.Second) {
+		state.Fatalf("Test of a closed stdout failed, decerter should stop after its flow line failed, logs:\n%s", logs.String())
 	}
 
 	err = stop()
 
-	if (err != nil) || !strings.Contains(logs.String(), "Got shutdown signal") {
-		state.Errorf("Test of a closed stdout failed, an interrupt should stop decerter cleanly, error: %v, logs:\n%s", err, logs.String())
+	if (err != nil) || !strings.Contains(logs.String(), "Stdout reader went away, stopping") || strings.Contains(logs.String(), "Got shutdown signal") || strings.Contains(logs.String(), `"level":"ERROR"`) {
+		state.Errorf("Test of a closed stdout failed, decerter should stop cleanly by itself, error: %v, logs:\n%s", err, logs.String())
 		return
 	}
+}
+
+// true once the process is gone or a zombie that waits for its parent, false after timeout
+func hasExited(pid int, timeout time.Duration) (isExited bool) {
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		stat, readErr := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+
+		// the state follows the comm in parentheses
+		if (readErr != nil) || strings.Contains(string(stat[bytes.LastIndexByte(stat, ')')+1:]), " Z ") {
+			isExited = true
+			return
+		}
+
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	return
 }
 
 // Test if a datagram to a multicast group is never redirected, one upstream socket of the proxy could not relay it: the group gets it straight from

@@ -234,27 +234,8 @@ func TestEscapePositive(state *testing.T) {
 	}
 }
 
-// Test if intercept.EscapeField and intercept.LinePrefix return with the expected output: a comm a process set to a terminal escape sequence or a line break reaches the line only escaped.
-func TestEscapeFieldPositive(state *testing.T) {
-	positiveCases := map[string]string{
-		"":                        "",
-		"curl":                    "curl",
-		"Web Content":             "Web Content",
-		"\x1b":                    "\\x1b",
-		"\x1b]0;owned\x07\x1b[2J": "\\x1b]0;owned\\x07\\x1b[2J",
-		"a\nudp pid=1":            "a\\x0audp pid=1",
-		"\xffa\\":                 "\\xffa\\\\",
-	}
-
-	for field, expected := range positiveCases {
-		text := intercept.EscapeField(field)
-
-		if text != expected {
-			state.Errorf("Test of intercept.EscapeField function failed, field: %q, result should be %q, result: %q", field, expected, text)
-			return
-		}
-	}
-
+// Test if intercept.LinePrefix returns with the expected output: a comm a process set to a terminal escape sequence or a line break reaches the line only escaped.
+func TestLinePrefixEscapePositive(state *testing.T) {
 	flow := intercept.Flow{ID: 1, Cookie: 1, IPProtocol: 6, Client: netip.MustParseAddrPort("127.0.0.1:5000"), Destination: netip.MustParseAddrPort("127.0.0.1:443"), Tgid: 10, UID: 1001, Comm: "\x1b[31mx\n", Session: tlsrecord.Session{}, Values: filter.Values{}}
 	prefix := intercept.LinePrefix(flow, intercept.TCPLayer)
 

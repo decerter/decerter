@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -565,6 +566,97 @@ func TestWebPositive(state *testing.T) {
 			state.Errorf("Test of the page failed, %s has %q", name, match)
 			return
 		}
+	}
+}
+
+// Test if the intercept form offers every layer PUT /intercept takes and the page names each of them in its state text.
+func TestInterceptLayersPositive(state *testing.T) {
+	page, err := webFiles.ReadFile("web/index.html")
+
+	if err != nil {
+		state.Fatalf("Could not read index.html, error: %s", err.Error())
+	}
+
+	script, err := webFiles.ReadFile("web/app.js")
+
+	if err != nil {
+		state.Fatalf("Could not read app.js, error: %s", err.Error())
+	}
+
+	selectMatch := regexp.MustCompile(`(?s)<select id="intercept-layer"[^>]*>(.*?)</select>`).FindSubmatch(page)
+
+	if selectMatch == nil {
+		state.Fatalf("Test of the page failed, index.html has no intercept-layer select")
+	}
+
+	offered := []string{}
+
+	for _, option := range regexp.MustCompile(`<option value="([^"]*)">`).FindAllSubmatch(selectMatch[1], -1) {
+		offered = append(offered, string(option[1]))
+	}
+
+	labels := regexp.MustCompile(`(?s)const interceptLayers = \{(.*?)\};`).FindSubmatch(script)
+
+	if labels == nil {
+		state.Fatalf("Test of the page failed, app.js has no interceptLayers")
+	}
+
+	for _, layer := range []v1.Layer{"", v1.TCPLayer, v1.TLSLayer, v1.UDPLayer, v1.DTLSLayer, v1.HTTPLayer} {
+		key := string(layer) + ":"
+
+		if layer == "" {
+			key = "'':"
+		}
+
+		if !slices.Contains(offered, string(layer)) || !strings.Contains(string(labels[1]), "\n  "+key) {
+			state.Errorf("Test of the page failed, layer %q should be offered and named, offered: %q", layer, offered)
+		}
+	}
+}
+
+// Test if the page pages the exchanges of a flow like its messages and caps what live events add to the lists: the flows, the messages and the exchanges.
+func TestListBoundsPositive(state *testing.T) {
+	page, err := webFiles.ReadFile("web/index.html")
+
+	if err != nil {
+		state.Fatalf("Could not read index.html, error: %s", err.Error())
+	}
+
+	script, err := webFiles.ReadFile("web/app.js")
+
+	if err != nil {
+		state.Fatalf("Could not read app.js, error: %s", err.Error())
+	}
+
+	// the body of a function of app.js, up to the next line that closes a top-level block
+	bodyOf := func(name string) (body string) {
+		match := regexp.MustCompile(`(?s)\nfunction ` + name + `\(.*?\n\}\n`).Find(script)
+		body = string(match)
+		return
+	}
+	expected := []struct {
+		name    string
+		text    string
+		pattern string
+	}{
+		{name: "a button for the next page of exchanges", text: string(page), pattern: `<button id="more-exchanges" type="button" hidden>`},
+		{name: "a cap on the rows", text: string(script), pattern: `const maxListRows = 1000;`},
+		{name: "the next page of exchanges by the cursor", text: string(script), pattern: `/flows/\$\{state.flowId\}/exchanges\?cursor=\$\{encodeURIComponent\(state.exchangesCursor\)\}`},
+		{name: "the button shown while there is a next page", text: string(script), pattern: `byId\('more-exchanges'\).hidden = !state.exchangesCursor;`},
+		{name: "flow events trim the flows", text: bodyOf("onFlow"), pattern: `trimFlows\(\);`},
+		{name: "message events stop at the cap", text: bodyOf("onMessage"), pattern: `state.messages.length >= maxListRows`},
+		{name: "exchange events stop at the cap", text: bodyOf("onExchange"), pattern: `state.exchanges.length >= maxListRows`},
+	}
+
+	for _, check := range expected {
+		if !regexp.MustCompile(check.pattern).MatchString(check.text) {
+			state.Errorf("Test of the page failed, it should have %s, %q", check.name, check.pattern)
+		}
+	}
+
+	// no single page of 1000 exchanges read again on every event
+	if strings.Contains(string(script), "exchanges?limit=1000") || strings.Contains(bodyOf("onExchange"), "loadExchanges") {
+		state.Errorf("Test of the page failed, the exchanges should be paged and updated from their events")
 	}
 }
 

@@ -61,13 +61,13 @@ func TestShareHooksNegative(state *testing.T) {
 		return
 	}
 
-	// the state is written before the cgroup is opened
+	// the state is written only once the cgroup is open, nothing was changed without it
 	statePath := filepath.Join(directory, "netd-hooks.json")
 	_, err = attach.ShareHooks(missing, netdState.Hooks, statePath)
-	_, readErr := attach.ReadNetdState(statePath)
+	_, statErr := os.Stat(statePath)
 
-	if !errors.Is(err, attach.ErrShare) || (readErr != nil) {
-		state.Errorf("Test of attach.ShareHooks function failed, error should be %v with the state written, error: %v, read error: %v", attach.ErrShare, err, readErr)
+	if !errors.Is(err, attach.ErrShare) || !errors.Is(statErr, fs.ErrNotExist) {
+		state.Errorf("Test of attach.ShareHooks function failed, error should be %v without a state file, error: %v, stat error: %v", attach.ErrShare, err, statErr)
 		return
 	}
 

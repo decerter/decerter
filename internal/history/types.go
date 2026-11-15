@@ -29,6 +29,10 @@ const (
 	maxFlowHTTPValues int = 256
 	// the bytes a gRPC message boundary counts in the history
 	grpcMessageBytes int64 = 16
+	// the interim (1xx) heads one exchange keeps, a server that sends them without end does not grow the history
+	maxInterimHeads int = 16
+	// a head the exchange limits have no room for keeps its start line only, with at most this much of its target
+	maxCutTarget int = 256
 )
 
 // how much the history keeps: flows, messages and payload bytes in total and per flow, exchanges and their bytes in total and per flow
@@ -52,23 +56,25 @@ type Counters struct {
 
 // values is what the scope filter knew of the flow when it was decided, clientRandom the one of its ClientHello, zero without one
 // session comes from the messages once the record layer has it; traffic is by tlsrecord.Direction
+// upstreamCookie is the proxy's upstream socket of a flow of run mode, zero in capture mode
 type flowRecord struct {
-	id            uint64
-	cookie        uint64
-	values        filter.Values
-	clientRandom  [32]byte
-	session       tlsrecord.Session
-	layer         intercept.Layer
-	opened        time.Time
-	closed        time.Time
-	isOpen        bool
-	traffic       [2]api.Traffic
-	messageIDs    []uint64
-	payloadBytes  int64
-	isTruncated   bool
-	exchangeIDs   []uint64
-	exchangeBytes int64
-	http          *filter.HTTPValues
+	id             uint64
+	cookie         uint64
+	upstreamCookie uint64
+	values         filter.Values
+	clientRandom   [32]byte
+	session        tlsrecord.Session
+	layer          intercept.Layer
+	opened         time.Time
+	closed         time.Time
+	isOpen         bool
+	traffic        [2]api.Traffic
+	messageIDs     []uint64
+	payloadBytes   int64
+	isTruncated    bool
+	exchangeIDs    []uint64
+	exchangeBytes  int64
+	http           *filter.HTTPValues
 }
 
 // one exchange of a flow: its request and final response by api.Side, the 1xx responses before it; bytes is what it keeps of heads and bodies
@@ -165,10 +171,13 @@ func DefaultLimits() (limits Limits) {
 }
 
 // a flow of the history for the pcap export: Values are its fields with the session the record layer read, ClientRandom the one of its session, zero without one
+// SocketCookie is the socket whose packets the capture keeps for the flow: the proxy's upstream socket of the flow in run mode, the flow's own in capture
+// mode; the UDP sessions of one unconnected socket share the flow's cookie, each has an upstream socket of its own
 type ExportFlow struct {
 	Flow         api.Flow
 	Values       filter.Values
 	ClientRandom [32]byte
+	SocketCookie uint64
 	Messages     []ExportMessage
 }
 

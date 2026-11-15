@@ -11,7 +11,7 @@ The page (HTML, CSS and vanilla JS embedded in the binary, no build step):
 - the flow list, live over the event stream, with a filter box in the [filter language](filter.md) and paging;
 - a flow with its messages and its HTTP exchanges (HTTP/2 stream, method, URL, status, body lengths, edits and notes);
 - a message as escaped text or a hex dump, 4 KiB at a time, and as the peer sent it when it was changed; an exchange with its heads and a window of either body; a gRPC body with a line in front of each message;
-- intercept on and off with a filter, a direction and the layer (records or whole HTTP messages);
+- intercept on and off with a filter, a direction and the layer (every record layer, one of tcp, tls, udp and dtls, or whole HTTP messages);
 - the held messages, to edit as escaped text (`\r`, `\n`, `\t`, `\\`, `\xNN`; line breaks are only layout) or as hex, and to forward or drop.
 
 There is no rules editor; rules are added with curl or a script. The full UI is the separate decerter-pro.

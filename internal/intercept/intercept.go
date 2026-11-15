@@ -62,6 +62,9 @@ type Message struct {
 	Exchange  uint64
 }
 
+// the body a message of layer http may have, a larger one goes on as its records with a note
+const MaxHTTPBodyBytes int = 1 << 20
+
 // how a message reached the recorder of a pipeline
 type Origin string
 

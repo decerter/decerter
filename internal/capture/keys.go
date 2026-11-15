@@ -39,6 +39,8 @@ const (
 	totalLimitReason  string = "too many bytes of all flows waited for secrets"
 	stoppedReason     string = "no secrets before the capture stopped"
 	clientHelloReason string = "could not read the client hello"
+	// a datagram of a decrypted DTLS session with a record the record layer dropped
+	droppedRecordNote string = "dtls record not decrypted, the datagram is written as it came"
 )
 
 type flowState uint8

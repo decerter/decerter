@@ -16,6 +16,7 @@ import (
 	"slices"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/decerter/decerter/api"
 	"github.com/decerter/decerter/internal/filter"
@@ -482,5 +483,76 @@ func TestCapturesDirectoryNegative(state *testing.T) {
 	if err != nil {
 		state.Errorf("Test of capture.Captures.Close failed, error: %s", err.Error())
 		return
+	}
+}
+
+// Test if capture.Captures.Stop of a capture that could not start returns with ErrCaptureNotFound instead of waiting for it forever.
+func TestCapturesStopDiscardedNegative(state *testing.T) {
+	captures, _, _ := testCaptures(state)
+	// a capture that is listed while its file and writer are made
+	stored, err := captures.add(nil, false)
+
+	if err != nil {
+		state.Fatalf("Test of capture.Captures failed, cannot add a capture, error: %s", err.Error())
+	}
+
+	stopChannel := make(chan error, 1)
+
+	// the client that stops it meanwhile
+	go func() {
+		_, stopErr := captures.Stop(stored.view.ID)
+		stopChannel <- stopErr
+	}()
+
+	// the stop waits for the capture once it marked it
+	for isStopping := false; !isStopping; {
+		captures.mutex.Lock()
+		isStopping = stored.isStopping
+		captures.mutex.Unlock()
+		time.Sleep(time.Millisecond)
+	}
+
+	captures.discard(stored)
+
+	select {
+	case err = <-stopChannel:
+		if !errors.Is(err, ErrCaptureNotFound) {
+			state.Errorf("Test of capture.Captures.Stop failed, error should be %v, error: %v", ErrCaptureNotFound, err)
+		}
+	case <-time.After(5 * time.Second):
+		state.Fatalf("Test of capture.Captures.Stop failed, it still waits for a capture that could not start")
+	}
+
+	if err = captures.Close(); err != nil {
+		state.Errorf("Test of capture.Captures.Close failed, error: %s", err.Error())
+	}
+}
+
+// Test if capture.Captures.Close stops the captures that still run when the hub never ran, as when decerter fails to start, instead of waiting for them forever.
+func TestCapturesCloseRunningPositive(state *testing.T) {
+	captures, _, dataDirectory := testCaptures(state)
+	_, err := captures.Start(nil, false)
+
+	if err != nil {
+		state.Fatalf("Test of capture.Captures.Start failed, error: %s", err.Error())
+	}
+
+	closeChannel := make(chan error, 1)
+
+	// the shutdown of a decerter whose hub never ran
+	go func() {
+		closeChannel <- captures.Close()
+	}()
+
+	select {
+	case err = <-closeChannel:
+	case <-time.After(5 * time.Second):
+		state.Fatalf("Test of capture.Captures.Close failed, it still waits for a running capture")
+	}
+
+	_, statErr := os.Stat(filepath.Join(dataDirectory, CaptureDirectoryName))
+
+	if (err != nil) || !errors.Is(statErr, fs.ErrNotExist) {
+		state.Errorf("Test of capture.Captures.Close failed, the files should be removed, error: %v, stat error: %v", err, statErr)
 	}
 }

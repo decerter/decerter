@@ -5,6 +5,7 @@
 package history_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/decerter/decerter/api"
@@ -85,7 +86,7 @@ func TestExchangesNegative(state *testing.T) {
 }
 
 // Test if history.History keeps its bounds when the only flow is the one over them: it is never evicted for itself, its exchange or message is not
-// kept and the flow is truncated; a head is kept even over the bytes.
+// kept and the flow is truncated; a head is kept even over the bytes, cut to its start line.
 func TestOwnLimitsPositive(state *testing.T) {
 	limits := history.Limits{Flows: 0, Messages: 1, FlowMessages: 10, PayloadBytes: 4, FlowPayloadBytes: 100, Exchanges: 1, FlowExchanges: 10, ExchangeBytes: 10, FlowExchangeBytes: 100}
 	flows := history.New(limits, nil)
@@ -114,6 +115,56 @@ func TestOwnLimitsPositive(state *testing.T) {
 
 	if !flow.Truncated || (status.Messages != 1) || (status.PayloadBytes != limits.PayloadBytes) || (status.EvictedFlows != 1) {
 		state.Errorf("Test of history.History.Record function failed, one message cut to the payload bytes should stay, flow: %+v, status: %+v", flow, status)
+		return
+	}
+}
+
+// Test if the exchanges of history.History keep their bounds for heads and gRPC boundaries: a server that sends 1xx heads without end gets
+// maxInterimHeads of them kept and published, a final head and an edited head without room keep their start line (the target cut to 256 bytes),
+// gRPC boundaries stop at the flow's bytes; the flow is truncated and its bytes stay within FlowExchangeBytes and a few cut heads.
+func TestExchangeHeadLimitsPositive(state *testing.T) {
+	limits := history.DefaultLimits()
+	limits.FlowExchangeBytes = 2000
+	events := 0
+	flows := history.New(limits, func(event api.Event) {
+		if event.Type == api.ExchangeEventType {
+			events++
+		}
+	})
+	flowID := flows.OpenFlow(1, testValues(80, filter.AbsentTLSState), [32]byte{})
+	id := flows.OpenExchange(flowID, "HTTP/1.1", api.RequestSide, testRequest("GET", "/"))
+	hint := api.HTTPMessage{HTTPHead: api.HTTPHead{Version: "HTTP/1.1", Status: 103, Reason: "Early Hints", Headers: []api.Header{{Name: "Link", Value: "</style.css>; rel=preload"}}}, State: api.CompleteHTTPState}
+
+	for range 1000 {
+		flows.AddHead(id, api.ResponseSide, hint, true)
+	}
+
+	exchange, _ := flows.Exchange(id)
+
+	if (len(exchange.Interim) != 16) || (events != 17) {
+		state.Fatalf("Test of history.History.AddHead function failed, 16 interim heads should be kept and published, kept: %d, events: %d", len(exchange.Interim), events)
+	}
+
+	large := []api.Header{{Name: "X-Large", Value: strings.Repeat("v", 5000)}}
+	flows.AddHead(id, api.ResponseSide, api.HTTPMessage{HTTPHead: api.HTTPHead{Version: "HTTP/1.1", Status: 200, Reason: "OK", Headers: large}, Framing: api.LengthFraming, State: api.HeadHTTPState}, false)
+	flows.AppendGRPC(id, api.ResponseSide, make([]api.GRPCMessage, 1000))
+	long := testRequest("GET", "/"+strings.Repeat("a", 1000))
+	second := flows.OpenExchange(flowID, "HTTP/1.1", api.RequestSide, long)
+	edited := long.HTTPHead
+	edited.Headers = large
+	flows.EndMessage(second, api.RequestSide, history.HTTPEnd{State: api.CompleteHTTPState, Trailers: nil, Note: "", Edit: &history.HTTPEdit{Head: edited, URL: "", Body: nil, Verdict: api.ForwardVerdict}})
+	exchange, _ = flows.Exchange(id)
+	other, _ := flows.Exchange(second)
+	flow, _ := flows.Flow(flowID)
+	status := flows.Status()
+
+	if (exchange.Response == nil) || (exchange.Response.Status != 200) || (len(exchange.Response.Headers) != 0) || (len(exchange.Response.GRPCMessages) >= 1000) || (other.Request == nil) || (len(other.Request.Target) != 256) || (len(other.Request.Headers) != 0) || !other.Request.Edited {
+		state.Errorf("Test of history.History exchanges failed, the heads without room should keep their start line and the gRPC boundaries stop at the limit, response: %+v, request: %+v", exchange.Response, other.Request)
+		return
+	}
+
+	if !flow.Truncated || (status.ExchangeBytes > limits.FlowExchangeBytes+1000) {
+		state.Errorf("Test of history.History exchanges failed, the flow should be truncated within its bytes, flow: %+v, status: %+v", flow, status)
 		return
 	}
 }

@@ -12,6 +12,8 @@ import (
 // a changed form keeps its head as it is written, with two fixes so the receiver reads the body that was written:
 // Transfer-Encoding chunked re-chunks the body as one chunk with the trailer section of the original, Content-Length gets the length of the body;
 // a body without either gets a Content-Length field at the end of the head, unless the original body was delimited by the end of the stream
+// a response that has no body by its status or its request (HEAD, 1xx, 204, 304) goes on as written: its Content-Length and Transfer-Encoding describe
+// the representation, no body follows
 // a form without the empty line after its head or with a head that can't be read goes on as it is written, Err says why
 func Rebuild(message Message, form []byte) (rebuilt Rebuilt) {
 	if bytes.Equal(form, message.Form()) {
@@ -41,6 +43,8 @@ func Rebuild(message Message, form []byte) (rebuilt Rebuilt) {
 	var framed []byte
 
 	switch {
+	case (message.Head.Side == ResponseSide) && (message.Framing == NoneFraming):
+		framed = body
 	case (len(codings) > 0) && isChunked(codings):
 		trailer := []byte("\r\n")
 

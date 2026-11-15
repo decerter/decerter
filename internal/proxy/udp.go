@@ -248,6 +248,7 @@ func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.Add
 	// out of scope the datagrams go on as they are, past the rules and the history
 	if session.isInScope {
 		flowID := recorder.OpenFlow(cookie, values, hello.ClientRandom)
+		recorder.SetUpstream(flowID, upstreamCookie)
 		session.interceptFlow = intercept.FlowOf(flowID, cookie, flow, client, values)
 		startDTLS(ctx, connection, session, datagram, secretsBpfMaps, pipeline, recorder, logger)
 	} else {
