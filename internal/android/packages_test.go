@@ -84,6 +84,8 @@ func TestParsePackagesNegative(state *testing.T) {
 		"com.example.app -1 0 /data/user/0/com.example.app\n",
 		packagesList + "com.example.broken\n",
 		"com.example.app 10200 0 /data/user/0/com.example.app default 3003 0 one 1 @null\n",
+		// a line longer than the scanner's buffer
+		"com.example.app 10200 " + strings.Repeat("x", 70000) + "\n",
 	}
 
 	for _, negative := range negativeCases {

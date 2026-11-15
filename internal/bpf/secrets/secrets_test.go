@@ -238,3 +238,13 @@ func sequence(length int, start byte) (data []byte) {
 
 	return
 }
+
+// Test if secrets.CheckSupported returns with the expected output: amd64 and arm64 have the secrets object.
+func TestCheckSupportedPositive(state *testing.T) {
+	err := CheckSupported()
+
+	if err != nil {
+		state.Errorf("Test of secrets.CheckSupported function failed, error: %s", err.Error())
+		return
+	}
+}
