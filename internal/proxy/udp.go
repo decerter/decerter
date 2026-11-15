@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/decerter/decerter/internal/bpf"
-	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/intercept"
@@ -180,7 +179,7 @@ func datagramDestination(controlMessage []byte) (local netip.Addr, err error) {
 // the flow is looked up for every datagram: a new socket on the same client port or a new destination of an unconnected socket gets its own session
 // the datagram that starts a session tells if it is DTLS
 func udpSessionOf(ctx context.Context, connection *net.UDPConn, client netip.AddrPort, local netip.Addr, datagram []byte, sessions *UDPSessions, idleTimeout time.Duration, bpfMaps map[bpf.BpfMapName]*ebpf.Map, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, captureBpfMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, scope *filter.Filter, recorder *history.History, waitGroup *sync.WaitGroup, logger *slog.Logger) (session *UDPSession, err error) {
-	cookie, flow, lookupErr := redirect.FlowByClient(client, syscall.IPPROTO_UDP, bpfMaps)
+	cookie, flow, lookupErr := flowByClient(client, syscall.IPPROTO_UDP, bpfMaps)
 
 	if err = lookupErr; err != nil {
 		logger.Warn("Could not find flow of client", "error", err, "client", client)

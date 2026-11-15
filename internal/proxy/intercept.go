@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/decerter/decerter/internal/bpf"
-	"github.com/decerter/decerter/internal/bpf/secrets"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
@@ -323,7 +322,7 @@ func (interception *interception) spin(clientRandom [32]byte) {
 	deadline := time.Now().Add(interceptSpin)
 
 	for time.Now().Before(deadline) {
-		_, found, lookupErr := secrets.Lookup(clientRandom, interception.secretsBpfMaps)
+		_, found, lookupErr := secretsByRandom(clientRandom, interception.secretsBpfMaps)
 
 		if lookupErr != nil {
 			return
@@ -401,7 +400,7 @@ func (interception *interception) poll() {
 
 // ask secrets_map for the session and let the held records go on if they are there, isLast makes missing secrets the end of the interception
 func (interception *interception) lookup(isLast bool) {
-	sessionSecrets, found, lookupErr := secrets.Lookup(interception.conn.Session().ClientRandom, interception.secretsBpfMaps)
+	sessionSecrets, found, lookupErr := secretsByRandom(interception.conn.Session().ClientRandom, interception.secretsBpfMaps)
 
 	if lookupErr != nil {
 		interception.giveUp(lookupErr)

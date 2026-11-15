@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/decerter/decerter/internal/bpf/redirect"
-	"github.com/decerter/decerter/internal/bpf/secrets"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/tlsrecord"
 )
@@ -129,7 +128,7 @@ func watchTLS(ctx context.Context, observer *TLSObserver, logger *slog.Logger) {
 
 // ask secrets_map for the session of the conn and let the hold queue go if they are there, isLast makes missing secrets an error
 func lookupSecrets(conn *tlsrecord.Conn, observer *TLSObserver, isLast bool) (records []tlsrecord.Record, err error) {
-	sessionSecrets, found, lookupErr := secrets.Lookup(conn.Session().ClientRandom, observer.secretsBpfMaps)
+	sessionSecrets, found, lookupErr := secretsByRandom(conn.Session().ClientRandom, observer.secretsBpfMaps)
 
 	if err = lookupErr; err != nil {
 		return

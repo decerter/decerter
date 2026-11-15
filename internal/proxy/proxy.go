@@ -15,9 +15,16 @@ import (
 	"github.com/decerter/decerter/internal/bpf"
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
 	"github.com/decerter/decerter/internal/bpf/redirect"
+	"github.com/decerter/decerter/internal/bpf/secrets"
 	"github.com/decerter/decerter/internal/filter"
 	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
+)
+
+// the lookups in the bpf maps, the tests have no maps and set their own
+var (
+	flowByClient    = redirect.FlowByClient
+	secretsByRandom = secrets.Lookup
 )
 
 // the process can be gone by the time the proxy accepts, the flow is still proxied then, comm comes from the bpf flow instead

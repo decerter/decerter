@@ -13,7 +13,6 @@ import (
 
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/bpf/redirect"
-	"github.com/decerter/decerter/internal/bpf/secrets"
 	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/tlsrecord"
@@ -227,7 +226,7 @@ func (dtls *dtlsInterception) poll() {
 
 // ask secrets_map for the session and let the held records go on if they are there, isLast makes missing secrets the end of the decryption
 func (dtls *dtlsInterception) lookup(isLast bool) {
-	sessionSecrets, found, lookupErr := secrets.Lookup(dtls.conn.Session().ClientRandom, dtls.secretsBpfMaps)
+	sessionSecrets, found, lookupErr := secretsByRandom(dtls.conn.Session().ClientRandom, dtls.secretsBpfMaps)
 
 	if lookupErr != nil {
 		dtls.giveUp(lookupErr)

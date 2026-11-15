@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/decerter/decerter/internal/bpf"
-	"github.com/decerter/decerter/internal/bpf/redirect"
 	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/intercept"
@@ -119,7 +118,7 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 		}
 	}()
 
-	cookie, flow, lookupErr := redirect.FlowByClient(clientAddressPort, syscall.IPPROTO_TCP, bpfMaps)
+	cookie, flow, lookupErr := flowByClient(clientAddressPort, syscall.IPPROTO_TCP, bpfMaps)
 
 	if lookupErr != nil {
 		logger.Warn("Could not find flow of client", "error", lookupErr)
