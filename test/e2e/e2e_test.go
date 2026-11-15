@@ -20,7 +20,6 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
-	"runtime/coverage"
 	"strconv"
 	"strings"
 	"sync"
@@ -55,8 +54,8 @@ const (
 	apiAssemblyTimeout time.Duration = time.Second
 	// the test binary runs as decerter with its arguments when this is 1
 	decerterCommandEnvironment string = "DECERTER_E2E_COMMAND"
-	// with go test -cover, a test binary that runs as decerter writes its coverage counters into this directory when decerter ends: the profile of go test has
-	// nothing of its child processes, make coverage merges both
+	// with go test -cover, a test binary that runs as decerter gets this directory as its GOCOVERDIR and writes its coverage counters into it when it exits:
+	// the profile of go test has nothing of its child processes, make coverage merges both
 	coverDirectoryEnvironment string = "DECERTER_E2E_COVERDIR"
 )
 
@@ -101,7 +100,7 @@ func TestMain(main *testing.M) {
 	// the test binary is decerter for the mcp stdio and the distro OpenSSL cases, its arguments are decerter's
 	if os.Getenv(decerterCommandEnvironment) == "1" {
 		decertercmd.Execute()
-		os.Exit(writeCoverage())
+		os.Exit(0)
 	}
 
 	// the test binary is the Go HTTP/2 client of the test user in the http/2 cases
@@ -129,25 +128,7 @@ func decerterEnvironment() (environment []string) {
 	environment = []string{decerterCommandEnvironment + "=1", "PATH=/usr/local/bin:/usr/bin:/bin"}
 
 	if directory := os.Getenv(coverDirectoryEnvironment); directory != "" {
-		environment = append(environment, coverDirectoryEnvironment+"="+directory)
-	}
-
-	return
-}
-
-// the coverage counters of a test binary that ran as decerter, for go tool covdata; nothing without the directory, code is the exit code
-func writeCoverage() (code int) {
-	directory := os.Getenv(coverDirectoryEnvironment)
-
-	if directory == "" {
-		return
-	}
-
-	err := errors.Join(coverage.WriteMetaDir(directory), coverage.WriteCountersDir(directory))
-
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "could not write the coverage of decerter into %s (go test -cover -covermode=atomic builds the counters in): %s\n", directory, err.Error())
-		code = 1
+		environment = append(environment, "GOCOVERDIR="+directory)
 	}
 
 	return
