@@ -76,8 +76,9 @@ func writeEmptyNetdState(directory string, cgroup string) (err error) {
 	return
 }
 
-// Test if app.Start returns with the expected errors before anything is loaded: an unknown --libssl in keylog mode, an api socket that can't be
-// created in run and capture mode, a data directory that can't be made, locked or read on Android; Shutdown undoes what ran.
+// Test if app.Start returns with the expected errors before anything is loaded: an unknown --libssl in keylog mode, an api socket under a file in
+// run and capture mode (Listen makes a missing directory, a file in the way fails as root and without a group decerter too), a data directory that
+// can't be made, locked or read on Android; Shutdown undoes what ran.
 func TestStartNegative(state *testing.T) {
 	directory := state.TempDir()
 	notDirectory := filepath.Join(directory, "file")
@@ -112,8 +113,8 @@ func TestStartNegative(state *testing.T) {
 		Expected error
 	}{
 		{Name: "keylog with a --libssl that does not exist", Options: appOptions{Keylog: true, Libssl: filepath.Join(directory, "missing", "libssl.so.3"), Platform: linux}, Expected: openssl.ErrLibraryNotFound},
-		{Name: "run mode with an api socket in a missing directory", Options: appOptions{APISocket: filepath.Join(directory, "missing", "api.sock"), Platform: linux}, Expected: api.ErrSocket},
-		{Name: "capture mode with an api socket in a missing directory", Options: appOptions{IsCapture: true, APISocket: filepath.Join(directory, "missing", "api.sock"), Platform: linux}, Expected: api.ErrSocket},
+		{Name: "run mode with an api socket under a file", Options: appOptions{APISocket: filepath.Join(notDirectory, "api.sock"), Platform: linux}, Expected: api.ErrSocket},
+		{Name: "capture mode with an api socket under a file", Options: appOptions{IsCapture: true, APISocket: filepath.Join(notDirectory, "api.sock"), Platform: linux}, Expected: api.ErrSocket},
 		{Name: "a data directory that is a file", Options: appOptions{Keylog: true, Platform: androidPlatform(notDirectory)}, Expected: platform.ErrDataDirectory},
 		{Name: "a data directory another decerter holds", Options: appOptions{Keylog: true, Platform: androidPlatform(locked)}, Expected: attach.ErrLocked},
 		{Name: "a netd hook state that can't be read", Options: appOptions{Keylog: true, Platform: androidPlatform(corrupt)}, Expected: attach.ErrNetdState},
