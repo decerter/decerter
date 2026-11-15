@@ -531,7 +531,7 @@ func startStdioMCP(state *testing.T, socket string, runAs *account, allowWrite b
 	}
 
 	command := exec.Command(executable, arguments...)
-	command.Env = []string{decerterCommandEnvironment + "=1", "PATH=/usr/local/bin:/usr/bin:/bin"}
+	command.Env = decerterEnvironment()
 	command.Stderr = os.Stderr
 
 	if runAs != nil {

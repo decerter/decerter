@@ -347,7 +347,7 @@ func testUnknownVersion(state *testing.T, libsslPath string, libcryptoPath strin
 	commandCtx, cancel := context.WithTimeout(state.Context(), commandTimeout)
 	defer cancel()
 	command := exec.CommandContext(commandCtx, executable, "keylog", "--uid", strconv.FormatUint(uint64(testUser.UID), 10), "--libssl", changedLibssl)
-	command.Env = []string{decerterCommandEnvironment + "=1", "PATH=/usr/local/bin:/usr/bin:/bin"}
+	command.Env = decerterEnvironment()
 	output, err := command.CombinedOutput()
 	expected := []string{openssl.ErrUnknownVersion.Error() + ": " + unknown + " on " + runtime.GOARCH, nearest, "run make generate-openssl-offsets"}
 
@@ -733,6 +733,12 @@ func startDecerterCommand(state *testing.T, ready []string, arguments ...string)
 
 // startDecerterCommand with decerter's logs, which keep growing while it runs
 func startDecerterCommandLogs(state *testing.T, ready []string, arguments ...string) (stdout *lockedBuffer, logs *lockedBuffer, stop func() error) {
+	_, stdout, logs, stop = startDecerterProcess(state, ready, arguments...)
+	return
+}
+
+// startDecerterCommandLogs with the process, for a test that signals it
+func startDecerterProcess(state *testing.T, ready []string, arguments ...string) (command *exec.Cmd, stdout *lockedBuffer, logs *lockedBuffer, stop func() error) {
 	executable, err := os.Executable()
 
 	if err != nil {
@@ -740,8 +746,8 @@ func startDecerterCommandLogs(state *testing.T, ready []string, arguments ...str
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), decerterCommandTimeout)
-	command := exec.CommandContext(ctx, executable, arguments...)
-	command.Env = []string{decerterCommandEnvironment + "=1", "PATH=/usr/local/bin:/usr/bin:/bin"}
+	command = exec.CommandContext(ctx, executable, arguments...)
+	command.Env = decerterEnvironment()
 	command.Cancel = func() (cancelErr error) {
 		cancelErr = command.Process.Signal(os.Interrupt)
 		return

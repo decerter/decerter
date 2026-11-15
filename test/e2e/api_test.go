@@ -487,20 +487,7 @@ func startAPIDecerter(state *testing.T, mode decerterMode, rules []intercept.Rul
 
 // startAPIDecerter with --block-quic when blockQuic is true
 func startBlockingAPIDecerter(state *testing.T, mode decerterMode, rules []intercept.Rule, blockQuic bool) (client apiClient) {
-	socket := filepath.Join(state.TempDir(), "api.sock")
-	decerter := newBlockingDecerter(state, mode, "", rules, testFlags(), "", socket, blockQuic)
-	startApp(state, &decerter, mode)
-	client = apiClient{
-		client: &http.Client{
-			Transport: &http.Transport{
-				DialContext: func(ctx context.Context, network string, address string) (net.Conn, error) {
-					dialer := net.Dialer{}
-					return dialer.DialContext(ctx, "unix", socket)
-				},
-			},
-		},
-		socket: socket,
-	}
+	client = startFlagsAPIDecerter(state, mode, rules, testFlags(), blockQuic)
 	return
 }
 

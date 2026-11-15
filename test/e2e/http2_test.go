@@ -190,6 +190,26 @@ func runClient(mode string, arguments []string) (code int) {
 		return
 	}
 
+	// the peer mode reports what its sockets see of their peers, the send mode sends one datagram
+	if (mode == "peer") || (mode == "send") {
+		report, reportErr := "", error(nil)
+
+		if mode == "peer" {
+			report, reportErr = reportPeers(target)
+		} else {
+			report, reportErr = sendDatagram(target)
+		}
+
+		if reportErr != nil {
+			fmt.Fprintln(os.Stderr, reportErr.Error())
+			code = 1
+			return
+		}
+
+		fmt.Print(report)
+		return
+	}
+
 	protocols := &http.Protocols{}
 
 	if strings.HasPrefix(target, "https:") {
