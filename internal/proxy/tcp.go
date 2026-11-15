@@ -290,10 +290,9 @@ func pipeTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn, op
 
 // what one side sent before the scope was decided
 type openingRead struct {
-	data    []byte
-	isTLS   bool
-	hello   tlsrecord.Hello
-	isFirst bool
+	data  []byte
+	isTLS bool
+	hello tlsrecord.Hello
 }
 
 // read until a ClientHello field can be decided: the whole ClientHello the client sends first, the first client bytes that are no ClientHello, or the server speaking first
@@ -325,18 +324,18 @@ func readOpening(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn
 	waitGroup.Go(func() {
 		buffer := make([]byte, copyBufferLength)
 		readCount, _ := upstream.Read(buffer)
-		serverChannel <- openingRead{data: buffer[:readCount], isTLS: false, hello: tlsrecord.Hello{}, isFirst: false}
+		serverChannel <- openingRead{data: buffer[:readCount], isTLS: false, hello: tlsrecord.Hello{}}
 	})
 
 	var clientRead, serverRead openingRead
+	isServerFirst := false
 
 	select {
 	case clientRead = <-clientChannel:
-		clientRead.isFirst = true
 		cancel(upstream)
 		serverRead = <-serverChannel
 	case serverRead = <-serverChannel:
-		serverRead.isFirst = true
+		isServerFirst = true
 		cancel(client)
 		clientRead = <-clientChannel
 	}
@@ -351,7 +350,7 @@ func readOpening(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn
 	clientChunk := TLSChunk{direction: tlsrecord.ClientDirection, data: clientRead.data}
 	serverChunk := TLSChunk{direction: tlsrecord.ServerDirection, data: serverRead.data}
 
-	if serverRead.isFirst {
+	if isServerFirst {
 		opening = []TLSChunk{serverChunk, clientChunk}
 	} else {
 		opening = []TLSChunk{clientChunk, serverChunk}

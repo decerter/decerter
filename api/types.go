@@ -14,6 +14,8 @@ const (
 	BasePath string = "/api/v1"
 	// the host name clients put in the URL, the server does not look at it: curl --unix-socket /run/decerter/api.sock http://decerter/api/v1/status
 	HostName string = "decerter"
+	// the header of GET /api/v1/flows/pcap with the number of flows the filter took
+	FlowsHeader string = "Decerter-Flows"
 )
 
 // what the proxy does with the flows in scope

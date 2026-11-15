@@ -213,7 +213,7 @@ func TestDownloadNegative(state *testing.T) {
 		}
 	}()
 
-	result, err := NewClient(target).download(state.Context(), "/flows/pcap", nil, pcapngMediaType, output, "flows", "pcapng")
+	result, _, err := NewClient(target).download(state.Context(), "/flows/pcap", nil, pcapngMediaType, output, "flows", "pcapng", io.Discard)
 	entries, readErr := os.ReadDir(directory)
 
 	if !errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, ErrOutputFile) || (result.Path != "") || (readErr != nil) || (len(entries) != 0) {

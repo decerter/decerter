@@ -175,11 +175,11 @@ func TestReadToolsArgumentsPositive(state *testing.T) {
 		Arguments map[string]any
 		Text      string
 	}{
-		{Name: "list_flows", Arguments: map[string]any{"cursor": "c1"}, Text: `"flows": []`},
+		{Name: "list_flows", Arguments: map[string]any{"cursor": "c1"}, Text: `{"flows":[]}`},
 		{Name: "list_messages", Arguments: map[string]any{"flow_id": 1, "cursor": "c2"}, Text: ""},
-		{Name: "list_exchanges", Arguments: map[string]any{"flow_id": 1, "cursor": "c3"}, Text: `"note": "request: request note; response: response note"`},
+		{Name: "list_exchanges", Arguments: map[string]any{"flow_id": 1, "cursor": "c3"}, Text: `"note":"request: request note; response: response note"`},
 		{Name: "get_exchange_body", Arguments: map[string]any{"id": 4}, Text: `<untrusted-traffic id="x4-request">`},
-		{Name: "list_held", Arguments: nil, Text: `"id": 5`},
+		{Name: "list_held", Arguments: nil, Text: `"id":5`},
 		{Name: "export_pcap", Arguments: map[string]any{"filter": "tls"}, Text: ""},
 	}
 
@@ -192,9 +192,17 @@ func TestReadToolsArgumentsPositive(state *testing.T) {
 		}
 	}
 
+	// a result without traffic data has no note
+	text, isError := call(state, session, "list_flows", map[string]any{"cursor": "c1"}, nil)
+
+	if isError || (text != "{\"flows\":[]}\n") {
+		state.Errorf("Test of list_flows failed, an empty page should be its JSON alone, text: %q", text)
+		return
+	}
+
 	// the held message without a payload has none and is not omitted
 	held := HeldResult{}
-	_, isError := call(state, session, "list_held", nil, &held)
+	_, isError = call(state, session, "list_held", nil, &held)
 
 	if isError || (len(held.Holds) != 1) || (held.Holds[0].Payload != nil) || held.Holds[0].PayloadOmitted {
 		state.Errorf("Test of list_held failed, a hold without a payload should have none and not be omitted, holds: %+v", held.Holds)
@@ -233,8 +241,11 @@ func TestTailEventsStopPositive(state *testing.T) {
 		}
 	})
 	session := connect(state, target, state.TempDir(), false)
-	events := EventsResult{}
-	_, isError := call(state, session, "tail_events", map[string]any{"seconds": 5}, &events)
+	events := struct {
+		Events  []v1.Event `json:"events"`
+		Stopped StopReason `json:"stopped"`
+	}{}
+	_, isError := call(state, session, "tail_events", map[string]any{"seconds": 5, "full": true}, &events)
 
 	if isError || (events.Stopped != OverflowStopReason) || (len(events.Events) != 2) || (events.Events[1].Type != v1.OverflowEventType) {
 		state.Errorf("Test of tail_events failed, an overflow should end the tail and be kept, events: %+v", events)
@@ -248,11 +259,14 @@ func TestTailEventsStopPositive(state *testing.T) {
 		return
 	}
 
-	events = EventsResult{}
-	_, isError = call(state, session, "tail_events", map[string]any{"seconds": 5}, &events)
+	short := struct {
+		Events  []EventSummary `json:"events"`
+		Stopped StopReason     `json:"stopped"`
+	}{}
+	_, isError = call(state, session, "tail_events", map[string]any{"seconds": 5}, &short)
 
-	if isError || (events.Stopped != ClosedStopReason) || (len(events.Events) != 1) {
-		state.Errorf("Test of tail_events failed, a stream decerter ends should stop the tail as closed, events: %+v", events)
+	if isError || (short.Stopped != ClosedStopReason) || (len(short.Events) != 1) || (short.Events[0].Type != v1.RuleDeletedEventType) {
+		state.Errorf("Test of tail_events failed, a stream decerter ends should stop the tail as closed, events: %+v", short)
 		return
 	}
 }
@@ -300,9 +314,9 @@ func TestTailEventsNegative(state *testing.T) {
 		cancel()
 	}()
 
-	result, events, err := tailEvents(client)(ctx, nil, TailEventsInput{Seconds: 30, MaxEvents: 10, Types: nil})
+	result, events, err := tailEvents(client)(ctx, nil, TailEventsInput{Seconds: 30, MaxEvents: 10, Types: nil, Full: false})
 
-	if !errors.Is(err, context.Canceled) || (result != nil) || (len(events.Events) != 0) {
+	if !errors.Is(err, context.Canceled) || (result != nil) || (events != nil) {
 		state.Errorf("Test of mcp.tailEvents function failed, a caller that went away should be %v, events: %+v, error: %v", context.Canceled, events, err)
 		return
 	}

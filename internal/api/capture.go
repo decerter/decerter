@@ -170,6 +170,7 @@ func exportPcap(backend *Backend, writer http.ResponseWriter, request *http.Requ
 	flows := backend.History.Export(scope)
 	writer.Header().Set("Content-Type", pcapngMediaType)
 	writer.Header().Set("Content-Disposition", `attachment; filename="decerter-flows.pcapng"`)
+	writer.Header().Set(v1.FlowsHeader, strconv.Itoa(len(flows)))
 	writer.WriteHeader(http.StatusOK)
 	output := &exportWriter{writer: writer, writeErr: nil}
 

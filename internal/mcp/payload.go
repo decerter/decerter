@@ -153,11 +153,15 @@ func apiWindow(payload v1.Payload) (window PayloadWindow, err error) {
 	return
 }
 
-// the same window without the data, for the metadata in the text of a result
-func (payload PayloadWindow) withoutData() (stripped PayloadWindow) {
+// the window for the metadata in the text of a result: the escaped data goes into the marker, the hex only withHex
+func (payload PayloadWindow) metadata(withHex bool) (stripped PayloadWindow) {
 	stripped = payload
-	stripped.PayloadHex = ""
 	stripped.PayloadEscaped = ""
+
+	if !withHex {
+		stripped.PayloadHex = ""
+	}
+
 	return
 }
 
@@ -183,6 +187,43 @@ func escapeFlow(flow v1.Flow) (escaped v1.Flow) {
 		}
 
 		escaped.TLS = &tlsInfo
+	}
+
+	return
+}
+
+// the short form of an event: ids, the flow's destination and comm, an exchange's method, URL and status
+func summarizeEvent(event v1.Event) (summary EventSummary) {
+	summary = EventSummary{Type: event.Type, Time: event.Time, Reason: escapeText(event.Reason)}
+
+	if flow := event.Flow; flow != nil {
+		summary.FlowID, summary.Protocol, summary.Destination, summary.Comm = flow.ID, flow.Protocol, flow.Destination, escapeText(flow.Process.Comm)
+
+		if flow.TLS != nil {
+			summary.ServerName = escapeText(flow.TLS.ServerName)
+		}
+	}
+
+	if message := event.Message; message != nil {
+		summary.MessageID, summary.FlowID, summary.Direction, summary.Layer, summary.Length, summary.Verdict = message.ID, message.FlowID, message.Direction, message.Layer, message.Length, message.Verdict
+	}
+
+	if hold := event.Hold; hold != nil {
+		summary.HoldID, summary.FlowID, summary.ExchangeID, summary.Direction, summary.Layer, summary.Length = hold.ID, hold.FlowID, hold.ExchangeID, hold.Direction, hold.Layer, hold.Length
+	}
+
+	if event.Exchange != nil {
+		exchange := summarize(escapeExchange(*event.Exchange))
+		summary.ExchangeID, summary.FlowID, summary.Method, summary.URL, summary.Status = exchange.ID, exchange.FlowID, exchange.Method, exchange.URL, exchange.Status
+		summary.RequestState, summary.ResponseState = exchange.RequestState, exchange.ResponseState
+	}
+
+	if event.Rule != nil {
+		summary.RuleID = event.Rule.ID
+	}
+
+	if event.Intercept != nil {
+		summary.Enabled = new(event.Intercept.Enabled)
 	}
 
 	return
@@ -269,23 +310,41 @@ func escapeHeaders(headers []v1.Header) (escaped []v1.Header) {
 	return
 }
 
-// the text of a result with data from the traffic: the fixed note, the metadata as JSON, then each payload in its marker
-func untrustedText(metadata any, payloads []string) (text string, err error) {
+// the text of a result with data from the traffic: the fixed note when it has any (isTraffic), the metadata as JSON, then each payload in its marker
+func untrustedText(metadata any, payloads []string, isTraffic bool) (text string, err error) {
 	builder := &strings.Builder{}
-	builder.WriteString(untrustedNote + "\n\n")
-	encoder := json.NewEncoder(builder)
-	encoder.SetEscapeHTML(false)
-	encoder.SetIndent("", "  ")
-	err = encoder.Encode(metadata)
+
+	if isTraffic || (len(payloads) > 0) {
+		builder.WriteString(untrustedNote + "\n\n")
+	}
+
+	metadataText, err := jsonText(metadata)
 
 	if err != nil {
 		return
 	}
+
+	builder.WriteString(metadataText + "\n")
 
 	for _, payload := range payloads {
 		builder.WriteString("\n" + payload + "\n")
 	}
 
 	text = builder.String()
+	return
+}
+
+// value as compact JSON without HTML escaping: a filter's && and a regex's (?P<name>) stay as they are
+func jsonText(value any) (text string, err error) {
+	builder := &strings.Builder{}
+	encoder := json.NewEncoder(builder)
+	encoder.SetEscapeHTML(false)
+	err = encoder.Encode(value)
+
+	if err != nil {
+		return
+	}
+
+	text = strings.TrimSuffix(builder.String(), "\n")
 	return
 }

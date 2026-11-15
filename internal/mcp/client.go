@@ -129,9 +129,11 @@ func (client Client) decode(response *http.Response, method string, path string,
 	return
 }
 
-// GET path and write the answer, it must have mediaType, into a new file of output named after kind; the file is only made once the api answered 200
-// runs as long as the copy, until ctx is done
-func (client Client) download(ctx context.Context, path string, query url.Values, mediaType string, output Output, kind string, extension string) (result FileResult, err error) {
+// GET path and write the answer, it must have mediaType, into a new file of output named after kind, and into counter; the file is only made once the api answered 200
+// runs as long as the copy, at most downloadTimeout; header is the answer's
+func (client Client) download(ctx context.Context, path string, query url.Values, mediaType string, output Output, kind string, extension string, counter io.Writer) (result FileResult, header http.Header, err error) {
+	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
+	defer cancel()
 	response, err := client.get(ctx, path, query, mediaType)
 
 	if err != nil {
@@ -142,7 +144,8 @@ func (client Client) download(ctx context.Context, path string, query url.Values
 		err = errors.Join(err, response.Body.Close())
 	}()
 
-	result, err = output.save(kind, extension, response.Body)
+	header = response.Header
+	result, err = output.save(kind, extension, io.TeeReader(response.Body, counter))
 
 	// a file error names its path, anything else came from reading the answer
 	if _, isFileErr := errors.AsType[*fs.PathError](err); (err != nil) && !isFileErr {

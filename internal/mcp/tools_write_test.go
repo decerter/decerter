@@ -27,10 +27,10 @@ var (
 	}{
 		{Name: "set_intercept", IsDestructive: false, IsIdempotent: true},
 		{Name: "edit_held", IsDestructive: false, IsIdempotent: true},
-		{Name: "forward_held", IsDestructive: false, IsIdempotent: true},
-		{Name: "drop_held", IsDestructive: true, IsIdempotent: true},
+		{Name: "forward_held", IsDestructive: false, IsIdempotent: false},
+		{Name: "drop_held", IsDestructive: true, IsIdempotent: false},
 		{Name: "add_rule", IsDestructive: false, IsIdempotent: false},
-		{Name: "delete_rule", IsDestructive: true, IsIdempotent: true},
+		{Name: "delete_rule", IsDestructive: true, IsIdempotent: false},
 		{Name: "start_capture", IsDestructive: false, IsIdempotent: false},
 		{Name: "stop_capture", IsDestructive: true, IsIdempotent: true},
 	}
@@ -212,8 +212,8 @@ func TestWriteToolsListPositive(state *testing.T) {
 	for _, expected := range writeTools {
 		tool, isTool := tools[expected.Name]
 
-		if !isTool || (tool.Annotations == nil) || tool.Annotations.ReadOnlyHint || (tool.Annotations.DestructiveHint == nil) || (*tool.Annotations.DestructiveHint != expected.IsDestructive) || (tool.Annotations.IdempotentHint != expected.IsIdempotent) || (tool.Annotations.OpenWorldHint == nil) || *tool.Annotations.OpenWorldHint || (tool.Description == "") || (tool.OutputSchema == nil) {
-			state.Errorf("Test of the tool list failed, %s should be listed with %+v, tool: %+v", expected.Name, expected, tool)
+		if !isTool || (tool.Annotations == nil) || tool.Annotations.ReadOnlyHint || (tool.Annotations.DestructiveHint == nil) || (*tool.Annotations.DestructiveHint != expected.IsDestructive) || (tool.Annotations.IdempotentHint != expected.IsIdempotent) || (tool.Annotations.OpenWorldHint == nil) || *tool.Annotations.OpenWorldHint || (tool.Description == "") || ((tool.OutputSchema == nil) != (expected.Name == "edit_held")) {
+			state.Errorf("Test of the tool list failed, %s should be listed with %+v, an output schema unless it returns traffic, tool: %+v", expected.Name, expected, tool)
 			return
 		}
 
@@ -271,12 +271,18 @@ func TestWriteToolsPositive(state *testing.T) {
 		text, isError := call(state, session, "edit_held", positive.Arguments, &held)
 		escaped := Escape([]byte(positive.Data))
 
-		if isError || !held.Edited || (held.Length != len(positive.Data)) || (held.Payload == nil) || (held.Payload.PayloadHex != hex.EncodeToString([]byte(positive.Data))) || (held.Payload.PayloadEscaped != escaped) {
+		hexData := ""
+
+		if positive.Arguments["format"] == "hex" {
+			hexData = hex.EncodeToString([]byte(positive.Data))
+		}
+
+		if isError || !held.Edited || (held.Length != len(positive.Data)) || (held.Payload == nil) || (held.Payload.PayloadHex != hexData) || (inMarker(text, "h10") != escaped) {
 			state.Errorf("Test of edit_held failed, %v should send %q, held: %+v, text: %s", positive.Arguments, positive.Data, held, text)
 			return
 		}
 
-		if !strings.HasPrefix(text, untrustedNote) || !strings.Contains(text, "<untrusted-traffic id=\"h10\">\n"+escaped+"\n</untrusted-traffic>") || (strings.Count(afterNote(text), "</untrusted-traffic>") != 1) || strings.Contains(afterNote(text), "payload_hex") || strings.ContainsAny(text, "\x00") {
+		if !strings.HasPrefix(text, untrustedNote) || !strings.Contains(text, "<untrusted-traffic id=\"h10\">\n"+escaped+"\n</untrusted-traffic>") || (strings.Count(afterNote(text), "</untrusted-traffic>") != 1) || (strings.Contains(afterNote(text), "payload_hex") != (hexData != "")) || strings.ContainsAny(text, "\x00") {
 			state.Errorf("Test of edit_held failed, %v should give the payload escaped once inside its marker, text: %s", positive.Arguments, text)
 			return
 		}

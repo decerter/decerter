@@ -209,12 +209,22 @@ func TestCaptureHandlerRunModePositive(state *testing.T) {
 		return
 	}
 
-	// the plaintext export is synthesized from the history, the dsb export has the captured packets, none in this test
-	for path, hasMessage := range map[string]bool{"/flows/pcap": true, "/flows/pcap?format=dsb": false} {
-		_, _, body, sendErr := send(state.Context(), server, http.MethodGet, v1.BasePath+path, "")
+	// the plaintext export is synthesized from the history, the dsb export has the captured packets, none in this test; both count the flows the filter took
+	exports := []struct {
+		Path       string
+		HasMessage bool
+		Flows      string
+	}{
+		{Path: "/flows/pcap", HasMessage: true, Flows: "1"},
+		{Path: "/flows/pcap?format=dsb", HasMessage: false, Flows: "1"},
+		{Path: "/flows/pcap?filter=tls", HasMessage: false, Flows: "0"},
+	}
 
-		if (sendErr != nil) || (bytes.Contains(body, []byte("query")) != hasMessage) {
-			state.Errorf("Test of the capture handlers failed, GET %s should have the message of the history: %v, body: %x, error: %v", path, hasMessage, body, sendErr)
+	for _, export := range exports {
+		_, header, body, sendErr := send(state.Context(), server, http.MethodGet, v1.BasePath+export.Path, "")
+
+		if (sendErr != nil) || (bytes.Contains(body, []byte("query")) != export.HasMessage) || (header.Get(v1.FlowsHeader) != export.Flows) {
+			state.Errorf("Test of the capture handlers failed, GET %s should have the message of the history: %v and %s flows, header: %v, body: %x, error: %v", export.Path, export.HasMessage, export.Flows, header, body, sendErr)
 			return
 		}
 	}

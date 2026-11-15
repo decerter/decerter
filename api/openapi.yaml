@@ -581,6 +581,10 @@ paths:
               description: attachment; filename="decerter-flows.pcapng"
               schema:
                 type: string
+            Decerter-Flows:
+              description: The number of flows of the history the filter took, 0 when it took none
+              schema:
+                type: integer
           content:
             application/x-pcapng:
               schema:

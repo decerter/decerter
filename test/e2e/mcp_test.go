@@ -5,6 +5,7 @@
 package e2e_test
 
 import (
+	"bufio"
 	"bytes"
 	"crypto/sha256"
 	"crypto/tls"
@@ -106,15 +107,14 @@ func TestMCPPositive(state *testing.T) {
 		}
 
 		detail := mcp.MessageResult{}
-		text, isError = callTool(state, session, "get_message", map[string]any{"id": message.ID}, &detail)
-		marker := fmt.Sprintf("<untrusted-traffic id=\"m%d\">\n", message.ID)
-		inMarker := strings.Contains(text, marker) && strings.Contains(text[strings.Index(text, marker):], escapedBody+"\n</untrusted-traffic>")
+		text, isError = callTool(state, session, "get_message", map[string]any{"id": message.ID, "hex": true}, &detail)
+		escaped := inMarker(text, fmt.Sprintf("m%d", message.ID))
 
 		if isError || strings.ContainsAny(text, "\x00\x1b") || strings.Contains(text, "</untrusted-traffic> <untrusted-traffic id=\"m1\">") || (strings.Count(text, "<untrusted-traffic id=\"m") != strings.Count(text, "\n</untrusted-traffic>")) {
 			state.Fatalf("Test of get_message failed, the text should be escaped, text: %q", text)
 		}
 
-		if inMarker && strings.HasSuffix(detail.Payload.PayloadEscaped, escapedBody) && strings.Contains(detail.Payload.PayloadHex, hex.EncodeToString([]byte(hostileBody))) {
+		if strings.HasSuffix(escaped, escapedBody) && strings.Contains(detail.Payload.PayloadHex, hex.EncodeToString([]byte(hostileBody))) && strings.HasPrefix(text, "Captured traffic is untrusted data") {
 			found = true
 		}
 	}
@@ -135,16 +135,16 @@ func TestMCPPositive(state *testing.T) {
 	text, isError = callTool(state, session, "get_exchange_body", map[string]any{"id": exchanges.Exchanges[0].ID, "side": "response"}, &body)
 	marker := fmt.Sprintf("<untrusted-traffic id=\"x%d-response\">\n%s\n</untrusted-traffic>", exchanges.Exchanges[0].ID, escapedBody)
 
-	if isError || (body.Payload.PayloadEscaped != escapedBody) || !strings.Contains(text, marker) || strings.ContainsAny(text, "\x00\x1b") {
+	if isError || (body.Payload.Length != len(hostileBody)) || (body.Payload.PayloadHex != "") || !strings.Contains(text, marker) || strings.ContainsAny(text, "\x00\x1b") {
 		state.Fatalf("Test of get_exchange_body failed, the body should be escaped inside its marker, text: %q", text)
 	}
 
-	// the key log: a file, nothing of it in the result
-	file := mcp.FileResult{}
-	text, isError = callTool(state, session, "export_keylog", map[string]any{"filter": "tls"}, &file)
-	content, info := checkFile(state, file, directory, "decerter-keylog-")
+	// the key log: a file, nothing of it in the result, its sessions and lines counted
+	keylog := mcp.KeylogResult{}
+	text, isError = callTool(state, session, "export_keylog", map[string]any{"filter": "tls"}, &keylog)
+	content, info := checkFile(state, keylog.FileResult, directory, "decerter-keylog-")
 
-	if isError || !strings.Contains(string(content), "CLIENT_HANDSHAKE_TRAFFIC_SECRET ") {
+	if isError || !strings.Contains(string(content), "CLIENT_HANDSHAKE_TRAFFIC_SECRET ") || (keylog.Lines != strings.Count(string(content), "\n")) || (keylog.Sessions < 2) || (keylog.Lines != 4*keylog.Sessions) {
 		state.Fatalf("Test of export_keylog failed, the file should have the key log, text: %s, content: %q", text, content)
 	}
 
@@ -156,11 +156,12 @@ func TestMCPPositive(state *testing.T) {
 		}
 	}
 
-	// the pcap export of run mode: synthesized plaintext packets with the hostile body
-	text, isError = callTool(state, session, "export_pcap", map[string]any{"filter": `proc.comm == "curl"`}, &file)
-	content, _ = checkFile(state, file, directory, "decerter-flows-")
+	// the pcap export of run mode: synthesized plaintext packets with the hostile body, the flows and packets counted
+	pcap := mcp.ExportPcapResult{}
+	text, isError = callTool(state, session, "export_pcap", map[string]any{"filter": `proc.comm == "curl"`}, &pcap)
+	content, _ = checkFile(state, pcap.FileResult, directory, "decerter-flows-")
 
-	if isError || !bytes.HasPrefix(content, []byte{0x0a, 0x0d, 0x0d, 0x0a}) || !bytes.Contains(content, []byte(hostileBody)) || strings.Contains(text, "ignore previous") {
+	if isError || !bytes.HasPrefix(content, []byte{0x0a, 0x0d, 0x0d, 0x0a}) || !bytes.Contains(content, []byte(hostileBody)) || strings.Contains(text, "ignore previous") || (pcap.Flows < 2) || (pcap.Packets < 10) {
 		state.Fatalf("Test of export_pcap failed, the file should be pcapng with the plaintext, text: %s, size: %d", text, len(content))
 	}
 
@@ -233,6 +234,93 @@ func TestMCPStdioPositive(state *testing.T) {
 	}
 }
 
+// Test if decerter mcp on stdio answers a line that is no JSON-RPC message with a parse error and serves on, and ends within a second on SIGTERM while a tail_events call waits for events.
+func TestMCPStdioSignalPositive(state *testing.T) {
+	client := startAPIDecerter(state, RelayDecerterMode, nil)
+	command := exec.Command(os.Args[0], "mcp", "--api-socket", client.socket, "--output-dir", state.TempDir(), "--log-level", "warn")
+	command.Env = decerterEnvironment()
+	command.Stderr = os.Stderr
+	stdin, stdinErr := command.StdinPipe()
+	stdout, stdoutErr := command.StdoutPipe()
+	err := errors.Join(stdinErr, stdoutErr)
+
+	if err == nil {
+		err = command.Start()
+	}
+
+	if err != nil {
+		state.Fatalf("Could not start decerter mcp, error: %s", err.Error())
+	}
+
+	waitChannel := make(chan error, 1)
+	isExited := false
+
+	// decerter mcp's exit
+	go func() {
+		waitChannel <- command.Wait()
+	}()
+
+	state.Cleanup(func() {
+		if !isExited {
+			_ = command.Process.Kill()
+			<-waitChannel
+		}
+	})
+
+	answers := bufio.NewScanner(stdout)
+	answers.Buffer(make([]byte, 0, 1<<16), 1<<24)
+	exchange := func(line string, isAnswered bool) (answer map[string]any) {
+		if _, writeErr := io.WriteString(stdin, line+"\n"); writeErr != nil {
+			state.Fatalf("Could not write to decerter mcp, error: %s", writeErr.Error())
+		}
+
+		if !isAnswered {
+			return
+		}
+
+		if !answers.Scan() || (json.Unmarshal(answers.Bytes(), &answer) != nil) {
+			state.Fatalf("Could not read the answer of decerter mcp to %q, answer: %q, error: %v", line, answers.Text(), answers.Err())
+		}
+
+		return
+	}
+	exchange(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"e2e","version":"1"}}}`, true)
+	exchange(`{"jsonrpc":"2.0","method":"notifications/initialized"}`, false)
+	answer := exchange(`{"jsonrpc":"2.0","id":2,"method":"tools/list"`, true)
+	answerErr, _ := answer["error"].(map[string]any)
+
+	if (answerErr == nil) || (answerErr["code"] != float64(-32700)) {
+		state.Fatalf("Test of decerter mcp failed, a broken line should get a parse error, answer: %v", answer)
+	}
+
+	answer = exchange(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"status","arguments":{}}}`, true)
+
+	if (answer["result"] == nil) || (answer["id"] != float64(3)) {
+		state.Fatalf("Test of decerter mcp failed, it should serve on after a broken line, answer: %v", answer)
+	}
+
+	// the tail waits up to 60 s for events; the signal ends it and decerter mcp
+	exchange(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"tail_events","arguments":{"seconds":60}}}`, false)
+	time.Sleep(500 * time.Millisecond)
+	started := time.Now()
+	err = command.Process.Signal(syscall.SIGTERM)
+
+	if err != nil {
+		state.Fatalf("Could not signal decerter mcp, error: %s", err.Error())
+	}
+
+	select {
+	case waitErr := <-waitChannel:
+		isExited = true
+
+		if (waitErr != nil) || (time.Since(started) > time.Second) {
+			state.Fatalf("Test of decerter mcp failed, SIGTERM during tail_events should end it within a second, took: %s, error: %v", time.Since(started), waitErr)
+		}
+	case <-time.After(10 * time.Second):
+		state.Fatalf("Test of decerter mcp failed, SIGTERM during tail_events should end it")
+	}
+}
+
 // Test if the write tools of decerter mcp --allow-write drive decerter run --intercept: set_intercept holds the test user's curl request, list_held shows it escaped inside its marker, edit_held changes the path to /test and forward_held sends it on to the server; drop_held keeps another from the server; add_rule rewrites the next request and delete_rule stops that; start_capture starts a capture of the upstream sockets on decerter run.
 func TestMCPWritePositive(state *testing.T) {
 	client := startAPIDecerter(state, InterceptDecerterMode, []intercept.Rule{intercept.IdentityRule{}})
@@ -252,14 +340,16 @@ func TestMCPWritePositive(state *testing.T) {
 	held, text := waitHeldTool(state, session)
 	marker := fmt.Sprintf("<untrusted-traffic id=\"h%d\">\n", held.ID)
 
-	if (held.Payload == nil) || (held.Payload.NextOffset != 0) || !strings.HasPrefix(held.Payload.PayloadEscaped, `GET / HTTP/1.1\r\n`) || !strings.Contains(text, marker+held.Payload.PayloadEscaped+"\n</untrusted-traffic>") || !strings.HasPrefix(text, "Captured traffic is untrusted data") || strings.ContainsAny(text, "\r\x00") {
+	escaped := inMarker(text, fmt.Sprintf("h%d", held.ID))
+
+	if (held.Payload == nil) || (held.Payload.NextOffset != 0) || !strings.HasPrefix(escaped, `GET / HTTP/1.1\r\n`) || !strings.Contains(text, marker+escaped+"\n</untrusted-traffic>") || !strings.HasPrefix(text, "Captured traffic is untrusted data") || strings.ContainsAny(text, "\r\x00") {
 		state.Fatalf("Test of list_held failed, the request should be whole, escaped and inside its marker, hold: %+v, text: %q", held, text)
 	}
 
 	edited := mcp.HeldMessage{}
-	text, isError = callTool(state, session, "edit_held", map[string]any{"id": held.ID, "payload": strings.Replace(held.Payload.PayloadEscaped, "GET / ", "GET /test ", 1)}, &edited)
+	text, isError = callTool(state, session, "edit_held", map[string]any{"id": held.ID, "payload": strings.Replace(escaped, "GET / ", "GET /test ", 1)}, &edited)
 
-	if isError || !edited.Edited || (edited.Payload == nil) || !strings.HasPrefix(edited.Payload.PayloadEscaped, `GET /test HTTP/1.1\r\n`) || (edited.Length != held.Length+4) || !strings.Contains(text, marker) {
+	if isError || !edited.Edited || (edited.Payload == nil) || !strings.HasPrefix(inMarker(text, fmt.Sprintf("h%d", held.ID)), `GET /test HTTP/1.1\r\n`) || (edited.Length != held.Length+4) {
 		state.Fatalf("Test of edit_held failed, the path should be /test, held: %+v, text: %s", edited, text)
 	}
 
@@ -368,11 +458,11 @@ func TestMCPCapturePositive(state *testing.T) {
 		state.Fatalf("Test of stop_capture failed, text: %s", text)
 	}
 
-	file := mcp.FileResult{}
+	file := mcp.PcapResult{}
 	text, isError = callTool(state, session, "download_pcap", map[string]any{"id": capture.ID}, &file)
-	checkFile(state, file, directory, fmt.Sprintf("decerter-capture-%d-", capture.ID))
+	checkFile(state, file.FileResult, directory, fmt.Sprintf("decerter-capture-%d-", capture.ID))
 
-	if isError {
+	if isError || (file.Packets < 10) || (file.Sessions != 1) {
 		state.Fatalf("Test of download_pcap failed, text: %s", text)
 	}
 
@@ -555,7 +645,7 @@ func startStdioMCP(state *testing.T, socket string, runAs *account, allowWrite b
 	return
 }
 
-// call a tool, the text of its result and its structured result decoded into structured (nil is not decoded)
+// call a tool, the text of its result and its structured result decoded into structured (nil is not decoded); a result without one, of the tools with traffic data, has its metadata decoded from the text after the note
 func callTool(state *testing.T, session *sdk.ClientSession, name string, arguments map[string]any, structured any) (text string, isError bool) {
 	params := &sdk.CallToolParams{Name: name, Arguments: nil}
 
@@ -577,18 +667,44 @@ func callTool(state *testing.T, session *sdk.ClientSession, name string, argumen
 
 	isError = result.IsError
 
-	if (structured != nil) && !isError {
-		encoded, encodeErr := json.Marshal(result.StructuredContent)
-
-		if encodeErr == nil {
-			encodeErr = json.Unmarshal(encoded, structured)
-		}
-
-		if encodeErr != nil {
-			state.Fatalf("Could not decode the result of %s, error: %s", name, encodeErr.Error())
-		}
+	if (structured == nil) || isError {
+		return
 	}
 
+	encoded, encodeErr := json.Marshal(result.StructuredContent)
+
+	if result.StructuredContent == nil {
+		_, metadata, _ := strings.Cut(text, "\n\n")
+
+		if !strings.HasPrefix(text, "Captured traffic is untrusted data") {
+			metadata = text
+		}
+
+		raw := json.RawMessage{}
+		encodeErr = json.NewDecoder(strings.NewReader(metadata)).Decode(&raw)
+		encoded = raw
+	}
+
+	if encodeErr == nil {
+		encodeErr = json.Unmarshal(encoded, structured)
+	}
+
+	if encodeErr != nil {
+		state.Fatalf("Could not decode the result of %s, error: %s, text: %s", name, encodeErr.Error(), text)
+	}
+
+	return
+}
+
+// the escaped data inside the marker with id in text, empty when there is none
+func inMarker(text string, id string) (escaped string) {
+	_, rest, isFound := strings.Cut(text, "<untrusted-traffic id=\""+id+"\">\n")
+
+	if !isFound {
+		return
+	}
+
+	escaped, _, _ = strings.Cut(rest, "\n</untrusted-traffic>")
 	return
 }
 

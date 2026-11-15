@@ -14,42 +14,43 @@ import (
 )
 
 // the write tools, one per non-GET operation of api/openapi.yaml, registered only with decerter mcp --allow-write; drop_held, delete_rule and stop_capture are destructive
+// set_intercept, edit_held and stop_capture are idempotent: a second same call changes nothing more; a second forward_held, drop_held or delete_rule is an error
 // tool name, operationId: set_intercept setIntercept, edit_held editHold, forward_held forwardHold, drop_held dropHold, add_rule addRule, delete_rule deleteRule,
 // start_capture startCapture, stop_capture stopCapture
 func addWriteTools(server *sdk.Server, client Client) (err error) {
 	directions := []any{v1.UpDirection, v1.DownDirection, v1.BothDirection}
 	layers := []any{v1.TCPLayer, v1.TLSLayer, v1.UDPLayer, v1.DTLSLayer, v1.HTTPLayer}
-	err = addTool(server, writeTool("set_intercept", "Set intercept", "Turn holding on or off. On, the messages of direction (up by default) and layer whose flow the filter takes are held until forward_held, drop_held or decerter's hold timeout (which forwards them as they are); with layer http a held message is a whole HTTP request or response: on HTTP/1 the head as it came and the body, its edit keeps the head as written and decerter fixes Content-Length and chunking; on HTTP/2 one name: value line per header field (pseudo-header fields such as :method, :path, :status first), CR LF, a blank line and the body without padding, only its stream waits, and decerter encodes the edit again (lower-case names, content-length fixed, trailers as they came, gRPC prefixes not recomputed); a dropped HTTP/2 message resets its stream. A new filter, direction or layer applies to the messages after it. Off forwards every held message as it is. Needs decerter run --intercept. Returns the new intercept state.", false, true), setIntercept(client), nil, []enumProperty{{Name: "direction", Values: directions}, {Name: "layer", Values: layers}})
+	err = addTool(server, writeTool("set_intercept", "Set intercept", "Set the whole intercept state: every call replaces it, a field left out takes its default, not its old value. {\"enabled\": true} alone holds every message going up of every flow in scope, DNS included: give a filter. Off forwards every held message as it is, and filter, direction and layer go back to their defaults too. On, the messages of direction (up by default) and layer whose flow the filter takes are held until forward_held, drop_held or decerter's hold timeout (which forwards them as they are); with layer http a held message is a whole HTTP request or response: on HTTP/1 the head as it came and the body, its edit keeps the head as written and decerter fixes Content-Length and chunking; on HTTP/2 one name: value line per header field (pseudo-header fields such as :method, :path, :status first), CR LF, a blank line and the body without padding, only its stream waits, and decerter encodes the edit again (lower-case names, content-length fixed, trailers as they came, gRPC prefixes not recomputed); a dropped HTTP/2 message resets its stream. A new filter, direction or layer applies to the messages after it. Needs decerter run --intercept. Returns the new intercept state.", false, true), setIntercept(client), nil, []enumProperty{{Name: "direction", Values: directions}, {Name: "layer", Values: layers}})
 
 	if err != nil {
 		return
 	}
 
-	err = addTool(server, writeTool("edit_held", "Edit held message", "Replace the whole payload of a held message; it goes on with the new payload when forwarded or at its hold timeout. payload is the escaped form of list_held's payload_escaped (\\\\ \\n \\r \\t \\xNN are bytes) or hex with format hex. Returns the held message with a window of its new payload inside an <untrusted-traffic> marker.", false, true), editHeld(client), nil, []enumProperty{{Name: "format", Values: []any{EscapedPayloadFormat, HexPayloadFormat}}})
+	err = addTool(server, writeTool("edit_held", "Edit held message", "Replace the whole payload of a held message; it goes on with the new payload when forwarded or at its hold timeout. payload is in the escaped form of the payload in list_held's marker (\\\\ \\n \\r \\t \\xNN are bytes) or hex with format hex. Returns the held message with a window of its new payload inside an <untrusted-traffic> marker (and in payload_hex with format hex). "+trafficText, false, true), editHeld(client), nil, []enumProperty{{Name: "format", Values: []any{EscapedPayloadFormat, HexPayloadFormat}}})
 
 	if err != nil {
 		return
 	}
 
-	err = addTool(server, writeTool("forward_held", "Forward held message", "Let a held message go on, with its edit if it has one.", false, true), decideHeld(client, "forward", ForwardedOutcome), nil, nil)
+	err = addTool(server, writeTool("forward_held", "Forward held message", "Let a held message go on, with its edit if it has one. A held message is decided once: a second call is a not-found error.", false, false), decideHeld(client, "forward", ForwardedOutcome), nil, nil)
 
 	if err != nil {
 		return
 	}
 
-	err = addTool(server, writeTool("drop_held", "Drop held message", "Drop a held message: it never reaches its peer. A TLS record is left out, TCP bytes are not sent, a datagram is lost; the peers are not told, an HTTP client waits until its own timeout.", true, true), decideHeld(client, "drop", DroppedOutcome), nil, nil)
+	err = addTool(server, writeTool("drop_held", "Drop held message", "Drop a held message: it never reaches its peer. A TLS record is left out, TCP bytes are not sent, a datagram is lost; the peers are not told, an HTTP client waits until its own timeout. A second call is a not-found error.", true, false), decideHeld(client, "drop", DroppedOutcome), nil, nil)
 
 	if err != nil {
 		return
 	}
 
-	err = addTool(server, writeTool("add_rule", "Add rule", "Add a match-and-replace rule after the existing ones: every occurrence of find in a message of direction, layer and the flows of filter becomes replace. A message is one TLS or DTLS record, one read of a plain TCP stream or one UDP datagram, so a value that spans two messages is not found; with layer http it is one whole HTTP request or response: HTTP/1 with its body without chunk framing (Content-Length and chunking fixed after the replace), HTTP/2 as name: value lines with the pseudo-header fields first (a request's path is the line :path: / and its CR LF), CR LF, a blank line and the body (encoded again, content-length fixed). text values are the characters as they are (a JSON \\r\\n is CR LF), not the escaped form of the read tools. Needs decerter run --intercept. Returns the rule with its id.", false, false), addRule(client), nil, []enumProperty{{Name: "direction", Values: directions}, {Name: "layer", Values: layers}, {Name: "find.type", Values: []any{v1.TextValueType, v1.HexValueType, v1.RegexValueType}}, {Name: "replace.type", Values: []any{v1.TextValueType, v1.HexValueType}}})
+	err = addTool(server, writeTool("add_rule", "Add rule", "Add a match-and-replace rule after the existing ones: every occurrence of find in a message of direction, layer and the flows of filter becomes replace. A message is one TLS or DTLS record, one read of a plain TCP stream or one UDP datagram, so a value that spans two messages is not found; with layer http it is one whole HTTP request or response: HTTP/1 with its body without chunk framing (Content-Length and chunking fixed after the replace), HTTP/2 as name: value lines with the pseudo-header fields first (a request's path is the line :path: / and its CR LF), CR LF, a blank line and the body (encoded again, content-length fixed). text values are the characters as they are (a JSON \\r\\n is CR LF), not the escaped form of the read tools. The rule's hits count the messages it changed. Needs decerter run --intercept. Returns the rule with its id.", false, false), addRule(client), nil, []enumProperty{{Name: "direction", Values: directions}, {Name: "layer", Values: layers}, {Name: "find.type", Values: []any{v1.TextValueType, v1.HexValueType, v1.RegexValueType}}, {Name: "replace.type", Values: []any{v1.TextValueType, v1.HexValueType}}})
 
 	if err != nil {
 		return
 	}
 
-	err = addTool(server, writeTool("delete_rule", "Delete rule", "Delete a rule of the API; a message it is working on is finished first, the next ones are not changed by it.", true, true), deleteRule(client), nil, nil)
+	err = addTool(server, writeTool("delete_rule", "Delete rule", "Delete a rule of the API; a message it is working on is finished first, the next ones are not changed by it. A second call is a not-found error.", true, false), deleteRule(client), nil, nil)
 
 	if err != nil {
 		return
@@ -91,8 +92,8 @@ func setIntercept(client Client) (handle sdk.ToolHandlerFor[SetInterceptInput, v
 }
 
 // the payload is decoded here and goes to the api as hex; the answer's payload is escaped again from its hex like list_held's
-func editHeld(client Client) (handle sdk.ToolHandlerFor[EditHeldInput, HeldMessage]) {
-	handle = func(ctx context.Context, request *sdk.CallToolRequest, input EditHeldInput) (result *sdk.CallToolResult, held HeldMessage, err error) {
+func editHeld(client Client) (handle sdk.ToolHandlerFor[EditHeldInput, any]) {
+	handle = func(ctx context.Context, request *sdk.CallToolRequest, input EditHeldInput) (result *sdk.CallToolResult, output any, err error) {
 		data, err := Unescape(input.Payload)
 
 		if input.Format == HexPayloadFormat {
@@ -110,21 +111,7 @@ func editHeld(client Client) (handle sdk.ToolHandlerFor[EditHeldInput, HeldMessa
 			return
 		}
 
-		held = HeldMessage{
-			ID:             hold.ID,
-			FlowID:         hold.FlowID,
-			ExchangeID:     hold.ExchangeID,
-			Direction:      hold.Direction,
-			Layer:          hold.Layer,
-			HeldAt:         hold.HeldAt,
-			Deadline:       hold.Deadline,
-			Edited:         hold.Edited,
-			Length:         hold.Length,
-			OriginalLength: hold.OriginalLength,
-			Payload:        nil,
-			PayloadOmitted: false,
-		}
-		metadata := held
+		metadata := heldMessage(hold)
 		payloads := []string{}
 
 		if hold.Payload != nil {
@@ -136,12 +123,11 @@ func editHeld(client Client) (handle sdk.ToolHandlerFor[EditHeldInput, HeldMessa
 			}
 
 			payload := window(edited, 0, defaultPayloadBytes)
-			held.Payload = &payload
-			metadata.Payload = new(payload.withoutData())
+			metadata.Payload = new(payload.metadata(input.Format == HexPayloadFormat))
 			payloads = append(payloads, Wrap("h"+strconv.FormatUint(hold.ID, 10), payload.PayloadEscaped))
 		}
 
-		result, err = untrustedResult(metadata, payloads)
+		result, err = untrustedResult(metadata, payloads, true)
 		return
 	}
 	return

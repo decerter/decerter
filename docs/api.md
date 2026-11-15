@@ -43,7 +43,7 @@ The host in the URL is `decerter`, `localhost` or a loopback address (with or wi
 | `POST /rules` | addRule | add a rule |
 | `DELETE /rules/{id}` | deleteRule | delete a rule |
 | `GET /keylog` | exportKeylog | NSS key log of the TLS and DTLS sessions in the history |
-| `GET /flows/pcap` | exportPcap | the history as pcapng: `format=plaintext` (synthesized packets) or `format=dsb` (captured packets with secrets) |
+| `GET /flows/pcap` | exportPcap | the history as pcapng: `format=plaintext` (synthesized packets) or `format=dsb` (captured packets with secrets); the header `Decerter-Flows` counts the flows the filter took |
 | `GET /captures` | listCaptures | the API's captures ([capture](capture.md#capture-api)) |
 | `POST /captures` | startCapture | start one with its own filter and format |
 | `POST /captures/{id}/stop` | stopCapture | stop it |

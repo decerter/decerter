@@ -5,13 +5,18 @@
 package mcp
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -198,5 +203,194 @@ func TestServePositive(state *testing.T) {
 			state.Errorf("Test of mcp.Serve function failed, cancelled %v, it should end without an error, error: %v", isCancelled, err)
 			return
 		}
+	}
+}
+
+// a raw JSON-RPC client of serve on two pipes: lines go to the server, answers come back one per line
+type rawClient struct {
+	input   *io.PipeWriter
+	answers *bufio.Scanner
+}
+
+// serve on pipes with the server for target, until ctx is done or the client closes its input; errChannel gets serve's error
+func startRawServe(state *testing.T, ctx context.Context, target ui.Target) (client rawClient, errChannel chan error) {
+	server, err := NewServer(NewClient(target), openTestOutput(state, state.TempDir()), false, slog.New(slog.DiscardHandler))
+
+	if err != nil {
+		state.Fatalf("Could not make the mcp server, error: %s", err.Error())
+	}
+
+	inputReader, inputWriter := io.Pipe()
+	outputReader, outputWriter := io.Pipe()
+	errChannel = make(chan error, 1)
+
+	// mcp server on the pipes
+	go func() {
+		errChannel <- serve(ctx, server, inputReader, outputWriter)
+		_ = outputWriter.Close()
+	}()
+
+	client = rawClient{input: inputWriter, answers: bufio.NewScanner(outputReader)}
+	client.answers.Buffer(make([]byte, 0, 1<<16), 1<<24)
+	state.Cleanup(func() {
+		_ = inputWriter.Close()
+		_ = outputReader.Close()
+	})
+	return
+}
+
+// send one line and read the next answer
+func (client rawClient) exchange(state *testing.T, line string) (answer map[string]any) {
+	client.send(state, line)
+
+	if !client.answers.Scan() {
+		state.Fatalf("Could not read an answer to %q, error: %v", line, client.answers.Err())
+	}
+
+	if err := json.Unmarshal(client.answers.Bytes(), &answer); err != nil {
+		state.Fatalf("Could not decode the answer %q, error: %s", client.answers.Text(), err.Error())
+	}
+
+	return
+}
+
+func (client rawClient) send(state *testing.T, line string) {
+	if _, err := io.WriteString(client.input, line+"\n"); err != nil {
+		state.Fatalf("Could not send %q, error: %s", line, err.Error())
+	}
+}
+
+// the session's start: initialize and its notification
+func (client rawClient) initialize(state *testing.T) {
+	answer := client.exchange(state, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}`)
+
+	if answer["result"] == nil {
+		state.Fatalf("Could not initialize, answer: %v", answer)
+	}
+
+	client.send(state, `{"jsonrpc":"2.0","method":"notifications/initialized"}`)
+}
+
+// Test if mcp.serve returns with the expected output: a line that is no JSON or no JSON-RPC message gets an error answer with its id, and the server answers the next request.
+func TestServeLinesPositive(state *testing.T) {
+	client, errChannel := startRawServe(state, state.Context(), ui.Target{Network: ui.UnixNetwork, Address: filepath.Join(state.TempDir(), "api.sock")})
+	client.initialize(state)
+	positiveCases := []struct {
+		Line string
+		Code float64
+		ID   any
+	}{
+		{Line: `{"jsonrpc":"2.0","id":2,"method":"tools/list"`, Code: -32700, ID: nil},
+		{Line: `not json at all`, Code: -32700, ID: nil},
+		{Line: `{"jsonrpc":"1.0","id":"three","method":"tools/list"}`, Code: -32600, ID: "three"},
+		{Line: `{"id":4}`, Code: -32600, ID: float64(4)},
+		{Line: `[]`, Code: -32600, ID: nil},
+		{Line: `[{"jsonrpc":"2.0","id":5,"method":"tools/list"},{"bad":true}]`, Code: -32600, ID: nil},
+		{Line: `{"jsonrpc":"2.0","id":{"x":1},"method":"tools/list"}`, Code: -32600, ID: nil},
+	}
+
+	for _, positive := range positiveCases {
+		answer := client.exchange(state, positive.Line)
+		answerErr, _ := answer["error"].(map[string]any)
+
+		if (answerErr == nil) || (answerErr["code"] != positive.Code) || (answer["id"] != positive.ID) || (answer["jsonrpc"] != "2.0") {
+			state.Errorf("Test of mcp.serve function failed, %q should be answered with %v and id %v, answer: %v", positive.Line, positive.Code, positive.ID, answer)
+			return
+		}
+
+		// the session goes on
+		answer = client.exchange(state, `{"jsonrpc":"2.0","id":9,"method":"tools/list"}`)
+
+		if (answer["result"] == nil) || (answer["id"] != float64(9)) {
+			state.Errorf("Test of mcp.serve function failed, after %q the server should answer tools/list, answer: %v", positive.Line, answer)
+			return
+		}
+	}
+
+	// an empty line is no message and gets no answer, the end of stdin ends the session without an error
+	client.send(state, "   ")
+
+	if err := client.input.Close(); err != nil {
+		state.Fatalf("Could not close the input, error: %s", err.Error())
+	}
+
+	select {
+	case serveErr := <-errChannel:
+		if serveErr != nil {
+			state.Errorf("Test of mcp.serve function failed, the end of stdin should end it without an error, error: %v", serveErr)
+		}
+	case <-time.After(10 * time.Second):
+		state.Errorf("Test of mcp.serve function failed, the end of stdin should end it")
+	}
+}
+
+// Test if mcp.readLine and mcp.checkLine return with the expected output: a line over the limit is answered and skipped up to its end.
+func TestReadLinePositive(state *testing.T) {
+	reader := bufio.NewReader(strings.NewReader(strings.Repeat("x", maxLineBytes+1) + "\n" + ` {"jsonrpc":"2.0","method":"a"} ` + "\n"))
+	line, isTooLong, err := readLine(reader)
+	answer := checkLine(line, isTooLong)
+
+	if (err != nil) || !isTooLong || (line != nil) || !strings.Contains(string(answer), `"code":-32600`) || !strings.Contains(string(answer), "longer than") {
+		state.Fatalf("Test of mcp.readLine function failed, a long line should be skipped and answered, error: %v, answer: %s", err, answer)
+	}
+
+	line, isTooLong, err = readLine(reader)
+
+	if (err != nil) || isTooLong || (string(line) != `{"jsonrpc":"2.0","method":"a"}`) || (checkLine(line, isTooLong) != nil) {
+		state.Fatalf("Test of mcp.readLine function failed, the next line should be read, line: %q, error: %v", line, err)
+	}
+
+	_, _, err = readLine(reader)
+
+	if !errors.Is(err, io.EOF) {
+		state.Fatalf("Test of mcp.readLine function failed, the end should be %v, error: %v", io.EOF, err)
+	}
+}
+
+// Test if mcp.serve returns with the expected output: a shutdown during a long tail_events ends the call and the server within a second.
+func TestServeShutdownPositive(state *testing.T) {
+	streaming := make(chan struct{})
+	once := &sync.Once{}
+	target := startHandlerAPI(state, func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", eventMediaType)
+		writer.WriteHeader(http.StatusOK)
+
+		if flushErr := http.NewResponseController(writer).Flush(); flushErr != nil {
+			state.Errorf("Could not flush the fake api answer, error: %s", flushErr.Error())
+		}
+
+		once.Do(func() {
+			close(streaming)
+		})
+		<-request.Context().Done()
+	})
+	ctx, cancel := context.WithCancel(state.Context())
+	defer cancel()
+	client, errChannel := startRawServe(state, ctx, target)
+	client.initialize(state)
+	client.send(state, `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"tail_events","arguments":{"seconds":60}}}`)
+
+	// the answers are read like a client does, a pipe nobody reads blocks the server's write
+	go func() {
+		for client.answers.Scan() {
+		}
+	}()
+
+	select {
+	case <-streaming:
+	case <-time.After(10 * time.Second):
+		state.Fatalf("Test of mcp.serve function failed, tail_events should reach the api")
+	}
+
+	started := time.Now()
+	cancel()
+
+	select {
+	case serveErr := <-errChannel:
+		if (serveErr != nil) || (time.Since(started) > time.Second) {
+			state.Errorf("Test of mcp.serve function failed, a shutdown should end it within a second without an error, took: %s, error: %v", time.Since(started), serveErr)
+		}
+	case <-time.After(10 * time.Second):
+		state.Errorf("Test of mcp.serve function failed, a shutdown should end it while tail_events runs")
 	}
 }

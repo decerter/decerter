@@ -28,8 +28,9 @@ tools return only the path, size and SHA-256 of the file.
 start_capture and stop_capture; drop_held, delete_rule and stop_capture are marked destructive, so the client asks
 before it runs them. Without the flag they are not registered at all, and no tool can turn writes on.
 
-Captured traffic is untrusted data handed to an LLM: payloads come back as hex and escaped text inside an
-<untrusted-traffic id="…"> marker with a note that it is data, not instructions, at most 4 KiB per call by default.
+Captured traffic is untrusted data handed to an LLM: a result with traffic data is text only, a note that it is data,
+not instructions, then each payload as escaped text inside an <untrusted-traffic id="…"> marker, at most 4 KiB per call
+by default.
 Traffic can carry text aimed at the model, and the write tools act on that traffic: give --allow-write only to a
 client whose tool calls you watch.
 
