@@ -27,6 +27,11 @@ const (
 	maxTextBytes int = 1024
 	// the bytes a decoder inflates of one compressed payload (gRPC gzip, WebSocket permessage-deflate)
 	maxInflatedBytes int = 1 << 20
+	// what a decode reads of one direction of a flow joined from its messages (Context.Joined), and the first bytes of it sniffing sees
+	MaxStreamBytes   int = 4 << 20
+	sniffStreamBytes int = 128 << 10
+	// the lines of a summary, one per PDU, the rest are counted
+	maxSummaryLines int = 32
 )
 
 // how a payload came, which decides its framing
@@ -45,6 +50,8 @@ const (
 // ContentType, Method, Target and Encoding are only set for a body; Target is the request target of the exchange, Encoding its grpc-encoding
 // Upgrade is the protocol an HTTP/1 Upgrade (101) switched the flow to, for a message after it, or the :protocol of an HTTP/2 extended CONNECT for its body;
 // Extensions is the Sec-WebSocket-Extensions the server answered it with; Handshake is set for the handshake records the history kept of a TLS or DTLS flow
+// Joined is set for one direction of a tcp or tls flow put together from its messages: the bytes start with the stream, a PDU cut at their end is where the
+// kept bytes end, and a decoder may keep state over the PDUs (an SMTP DATA, a MySQL result set)
 type Context struct {
 	Transport   Transport
 	Layer       v1.Layer
@@ -58,6 +65,7 @@ type Context struct {
 	Encoding    string
 	Extensions  string
 	Handshake   bool
+	Joined      bool
 }
 
 // a port a protocol is known by, on a record layer (tcp, tls, udp, dtls)
@@ -70,7 +78,8 @@ type Port struct {
 // hint gives a reason when the context names the protocol (a content type, an ALPN, an Upgrade), empty otherwise
 // sniff scores the bytes from 0 (not this protocol) to 100; decode adds the nodes and the summary to the tree
 // fromTarget finds the PDU in a request target when the body is empty (DoH GET ?dns=), nil when the protocol has none there
-// a protocol that needs bytes of more than one message (TCP reassembly) will get a frame function here that tells the length of a PDU from its first bytes
+// a stream protocol has frame, which tells the length of the PDU at the start of data (0 while the bytes don't tell yet, -1 when they are no PDU of it),
+// and pdu, which adds the nodes of the PDU at data[start:] and gives its root; unit names a PDU in errors (message, packet, line); decodeFramed walks them
 type decoder struct {
 	Protocol   string
 	Title      string
@@ -79,6 +88,23 @@ type decoder struct {
 	sniff      func(data []byte, context Context) (score int)
 	decode     func(tree *Tree, data []byte, context Context)
 	fromTarget func(target string) (data []byte, found bool)
+	frame      func(data []byte, state *streamState) (length int)
+	pdu        func(tree *Tree, data []byte, start int, state *streamState) (root *node)
+	unit       string
+}
+
+// what decodeFramed knows of a stream while it walks it: the context, the PDUs so far (index), isTLS once the rest are TLS records (STARTTLS, a taken
+// SSLRequest); mode, waiting, columns, sequence and command are a protocol's own: SMTP DATA, an IMAP literal, the columns of a MySQL result set,
+// a packet's sequence id, the last command
+type streamState struct {
+	context  Context
+	index    int
+	isTLS    bool
+	mode     string
+	waiting  int
+	columns  int
+	sequence int
+	command  byte
 }
 
 // a protocol that might be the payload's and why
@@ -92,13 +118,14 @@ type candidate struct {
 // the tree of one decode while it grows: count, size and isFull keep it within the limits, sink takes the nodes past them and keeps none
 // errors counts the nodes with an error, sniffing scores a payload by it
 type Tree struct {
-	roots   []*node
-	count   int
-	size    int
-	isFull  bool
-	errors  int
-	summary []string
-	sink    *node
+	roots       []*node
+	count       int
+	size        int
+	isFull      bool
+	errors      int
+	summary     []string
+	sink        *node
+	moreSummary int
 }
 
 // one field: offset and length are bytes of the payload, mask the bits of a field smaller than its bytes

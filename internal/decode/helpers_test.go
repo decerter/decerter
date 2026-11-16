@@ -15,11 +15,11 @@ import (
 
 // the contexts of the transports the tests use
 var (
-	udpContext  = Context{Transport: DatagramTransport, Layer: v1.UDPLayer, Direction: v1.UpDirection, ServerPort: 53, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false}
-	tcpContext  = Context{Transport: StreamTransport, Layer: v1.TCPLayer, Direction: v1.UpDirection, ServerPort: 53, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false}
-	dotContext  = Context{Transport: StreamTransport, Layer: v1.TLSLayer, Direction: v1.DownDirection, ServerPort: 853, ALPN: "dot", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false}
-	mdnsContext = Context{Transport: DatagramTransport, Layer: v1.UDPLayer, Direction: v1.UpDirection, ServerPort: 5353, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false}
-	otherUDP    = Context{Transport: DatagramTransport, Layer: v1.UDPLayer, Direction: v1.UpDirection, ServerPort: 9999, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false}
+	udpContext  = Context{Transport: DatagramTransport, Layer: v1.UDPLayer, Direction: v1.UpDirection, ServerPort: 53, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false, Joined: false}
+	tcpContext  = Context{Transport: StreamTransport, Layer: v1.TCPLayer, Direction: v1.UpDirection, ServerPort: 53, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false, Joined: false}
+	dotContext  = Context{Transport: StreamTransport, Layer: v1.TLSLayer, Direction: v1.DownDirection, ServerPort: 853, ALPN: "dot", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false, Joined: false}
+	mdnsContext = Context{Transport: DatagramTransport, Layer: v1.UDPLayer, Direction: v1.UpDirection, ServerPort: 5353, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false, Joined: false}
+	otherUDP    = Context{Transport: DatagramTransport, Layer: v1.UDPLayer, Direction: v1.UpDirection, ServerPort: 9999, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false, Joined: false}
 )
 
 func be16(value uint16) (data []byte) {

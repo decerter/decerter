@@ -53,6 +53,23 @@
         </div>
       </div>
     </div>
+    <details id="stream-view" hidden>
+      <summary>Stream: the messages of one direction joined, a message split over reads decodes as one</summary>
+      <div class="row toolbar">
+        <label><input type="radio" name="stream-direction" value="up" checked> client</label>
+        <label><input type="radio" name="stream-direction" value="down"> server</label>
+        <span id="stream-range" class="muted"></span>
+      </div>
+      <div id="stream-decode" class="decode">
+        <div class="row">
+          <label>decode as <select id="stream-decode-as" aria-label="decode the stream as"><option value="">auto</option></select></label>
+        </div>
+        <p id="stream-decode-summary" class="decode-summary"></p>
+        <p id="stream-decode-reason" class="muted"></p>
+        <p id="stream-location" class="muted"></p>
+        <ul id="stream-decode-tree" class="tree" aria-label="decode tree of the joined stream"></ul>
+      </div>
+    </details>
     <table id="messages-table" hidden>
       <thead><tr><th>#</th><th>time</th><th>dir</th><th>layer</th><th class="number">length</th><th>verdict</th></tr></thead>
       <tbody id="messages"></tbody>

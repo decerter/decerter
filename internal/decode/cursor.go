@@ -295,7 +295,7 @@ func isText(data []byte) (isReadable bool) {
 // the decoder of data among the registry but except by its sniff score from minimum on, the best one; its roots go under parent placed by place
 // protocol is empty when none scores enough; the nested context is a datagram of the outer one's direction
 func decodeNested(tree *Tree, parent *node, data []byte, place placement, context Context, except string, minimum int) (protocol string, summary []string) {
-	nested := Context{Transport: DatagramTransport, Layer: "", Direction: context.Direction, ServerPort: 0, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false}
+	nested := Context{Transport: DatagramTransport, Layer: "", Direction: context.Direction, ServerPort: 0, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false, Joined: false}
 	best, bestScore := decoder{}, 0
 
 	for _, known := range registry {

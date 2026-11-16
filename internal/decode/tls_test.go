@@ -26,10 +26,10 @@ import (
 
 // the contexts of the TLS tests: a tcp read to port 443, the handshake records decerter kept of a TLS and of a DTLS flow, a udp datagram
 var (
-	tlsTCPContext  = Context{Transport: StreamTransport, Layer: v1.TCPLayer, Direction: v1.UpDirection, ServerPort: 443, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false}
-	keptContext    = Context{Transport: StreamTransport, Layer: v1.TLSLayer, Direction: v1.DownDirection, ServerPort: 443, ALPN: "h2", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: true}
-	keptDTLS       = Context{Transport: DatagramTransport, Layer: v1.DTLSLayer, Direction: v1.UpDirection, ServerPort: 4433, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: true}
-	dtlsUDPContext = Context{Transport: DatagramTransport, Layer: v1.UDPLayer, Direction: v1.UpDirection, ServerPort: 4433, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false}
+	tlsTCPContext  = Context{Transport: StreamTransport, Layer: v1.TCPLayer, Direction: v1.UpDirection, ServerPort: 443, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false, Joined: false}
+	keptContext    = Context{Transport: StreamTransport, Layer: v1.TLSLayer, Direction: v1.DownDirection, ServerPort: 443, ALPN: "h2", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: true, Joined: false}
+	keptDTLS       = Context{Transport: DatagramTransport, Layer: v1.DTLSLayer, Direction: v1.UpDirection, ServerPort: 4433, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: true, Joined: false}
+	dtlsUDPContext = Context{Transport: DatagramTransport, Layer: v1.UDPLayer, Direction: v1.UpDirection, ServerPort: 4433, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false, Joined: false}
 )
 
 func be24(value int) (data []byte) {

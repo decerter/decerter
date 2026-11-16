@@ -66,7 +66,13 @@ func Decode(data []byte, context Context, as string) (result v1.Decode, err erro
 		return
 	}
 
-	input := data[:min(len(data), MaxInputBytes)]
+	limit := MaxInputBytes
+
+	if context.Joined {
+		limit = MaxStreamBytes
+	}
+
+	input := data[:min(len(data), limit)]
 	result = v1.Decode{
 		MessageID:  0,
 		ExchangeID: 0,
@@ -74,6 +80,8 @@ func Decode(data []byte, context Context, as string) (result v1.Decode, err erro
 		FlowID:     0,
 		Direction:  "",
 		Cut:        false,
+		Note:       "",
+		Segments:   nil,
 		Source:     "",
 		Protocol:   RawProtocol,
 		Summary:    "",
@@ -126,10 +134,16 @@ func Decode(data []byte, context Context, as string) (result v1.Decode, err erro
 	}
 
 	tree := newTree()
-	chosen.decode(tree, input, context)
+
+	if (chosen.frame != nil) && (context.Transport == StreamTransport) {
+		decodeFramed(tree, input, context, chosen)
+	} else {
+		chosen.decode(tree, input, context)
+	}
+
 	result.Protocol = chosen.Protocol
 	result.Tree = tree.view()
-	result.Summary = sanitize(strings.Join(tree.summary, "; "))
+	result.Summary = sanitize(tree.summaryText())
 	result.Truncated = result.Truncated || tree.isFull
 
 	if tree.isFull {
@@ -148,9 +162,15 @@ func candidatesOf(data []byte, context Context, as string) (candidates []candida
 	}
 
 	scores := map[string]int{}
+	sniffed := data
+
+	// a joined stream is sniffed by its start
+	if context.Joined {
+		sniffed = data[:min(len(data), sniffStreamBytes)]
+	}
 
 	for _, protocol := range registry {
-		scores[protocol.Protocol] = protocol.sniff(data, context)
+		scores[protocol.Protocol] = protocol.sniff(sniffed, context)
 	}
 
 	if as != "" {
@@ -172,16 +192,16 @@ func candidatesOf(data []byte, context Context, as string) (candidates []candida
 		}
 	}
 
-	sniffed := []candidate{}
+	bySniff := []candidate{}
 
 	for _, protocol := range registry {
 		if score := scores[protocol.Protocol]; score >= sniffThreshold {
-			sniffed = append(sniffed, candidate{Protocol: protocol.Protocol, Basis: v1.SniffDecodeBasis, Reason: "the bytes read as " + protocol.Title, Score: score})
+			bySniff = append(bySniff, candidate{Protocol: protocol.Protocol, Basis: v1.SniffDecodeBasis, Reason: "the bytes read as " + protocol.Title, Score: score})
 		}
 	}
 
-	slices.SortStableFunc(sniffed, func(a candidate, b candidate) int { return cmp.Compare(b.Score, a.Score) })
-	candidates = append(candidates, sniffed...)
+	slices.SortStableFunc(bySniff, func(a candidate, b candidate) int { return cmp.Compare(b.Score, a.Score) })
+	candidates = append(candidates, bySniff...)
 	return
 }
 

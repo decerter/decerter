@@ -15,7 +15,7 @@ import (
 
 // the context of a body with that content type
 func bodyContext(contentType string) (context Context) {
-	context = Context{Transport: BodyTransport, Layer: "", Direction: v1.UpDirection, ServerPort: 443, ALPN: "h2", ContentType: contentType, Upgrade: "", Method: "POST", Target: "/decerter.Echo/Say", Encoding: "", Extensions: "", Handshake: false}
+	context = Context{Transport: BodyTransport, Layer: "", Direction: v1.UpDirection, ServerPort: 443, ALPN: "h2", ContentType: contentType, Upgrade: "", Method: "POST", Target: "/decerter.Echo/Say", Encoding: "", Extensions: "", Handshake: false, Joined: false}
 	return
 }
 

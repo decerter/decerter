@@ -15,10 +15,10 @@ import (
 
 // the contexts of a flow an HTTP Upgrade switched to WebSocket, each way, with permessage-deflate, and the body of an HTTP/2 extended CONNECT
 var (
-	websocketUp      = Context{Transport: StreamTransport, Layer: v1.TCPLayer, Direction: v1.UpDirection, ServerPort: 8080, ALPN: "", ContentType: "", Upgrade: "websocket", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false}
-	websocketDown    = Context{Transport: StreamTransport, Layer: v1.TCPLayer, Direction: v1.DownDirection, ServerPort: 8080, ALPN: "", ContentType: "", Upgrade: "websocket", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false}
-	websocketDeflate = Context{Transport: StreamTransport, Layer: v1.TLSLayer, Direction: v1.DownDirection, ServerPort: 443, ALPN: "http/1.1", ContentType: "", Upgrade: "WebSocket", Method: "", Target: "", Encoding: "", Extensions: "permessage-deflate; client_max_window_bits=15", Handshake: false}
-	websocketBody    = Context{Transport: BodyTransport, Layer: "", Direction: v1.UpDirection, ServerPort: 443, ALPN: "h2", ContentType: "", Upgrade: "websocket", Method: "CONNECT", Target: "/chat", Encoding: "", Extensions: "", Handshake: false}
+	websocketUp      = Context{Transport: StreamTransport, Layer: v1.TCPLayer, Direction: v1.UpDirection, ServerPort: 8080, ALPN: "", ContentType: "", Upgrade: "websocket", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false, Joined: false}
+	websocketDown    = Context{Transport: StreamTransport, Layer: v1.TCPLayer, Direction: v1.DownDirection, ServerPort: 8080, ALPN: "", ContentType: "", Upgrade: "websocket", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false, Joined: false}
+	websocketDeflate = Context{Transport: StreamTransport, Layer: v1.TLSLayer, Direction: v1.DownDirection, ServerPort: 443, ALPN: "http/1.1", ContentType: "", Upgrade: "WebSocket", Method: "", Target: "", Encoding: "", Extensions: "permessage-deflate; client_max_window_bits=15", Handshake: false, Joined: false}
+	websocketBody    = Context{Transport: BodyTransport, Layer: "", Direction: v1.UpDirection, ServerPort: 443, ALPN: "h2", ContentType: "", Upgrade: "websocket", Method: "CONNECT", Target: "/chat", Encoding: "", Extensions: "", Handshake: false, Joined: false}
 )
 
 var testMask = []byte{0x37, 0xfa, 0x21, 0x3d}

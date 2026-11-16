@@ -183,6 +183,8 @@ const (
 	TargetDecodeSource DecodeSource = "target"
 	// the handshake records the history kept of one direction of a TLS or DTLS flow (GET /api/v1/flows/{id}/decode): they are in Data
 	HandshakeDecodeSource DecodeSource = "handshake"
+	// the payloads of one direction of a tcp or tls flow joined in order (GET /api/v1/flows/{id}/decode?part=stream): Segments map them to the messages
+	StreamDecodeSource DecodeSource = "stream"
 )
 
 // which bytes of a flow GET /api/v1/flows/{id}/decode decodes
@@ -191,6 +193,8 @@ type FlowPart string
 const (
 	// the handshake, alert and change cipher spec records of one direction, the plaintext of the ones decerter decrypted, at most 16 KiB
 	HandshakeFlowPart FlowPart = "handshake"
+	// the payloads of the tcp or tls messages of one direction joined in order, at most 4 MiB: a PDU split over reads decodes as one
+	StreamFlowPart FlowPart = "stream"
 )
 
 type EventType string
@@ -564,6 +568,7 @@ type Error struct {
 // how many bytes of the source were decoded, Total how many there are; Truncated is true when the input or the tree reached a limit
 // every string that comes from the traffic (names, text, unknown bytes) is escaped like Payload.Escaped; Error says why a decoder failed, the tree is raw then
 // Protocols are the values as takes; FlowID, Direction and Cut are set for a flow's handshake, Cut when a record did not fit the 16 KiB decerter keeps
+// a flow's stream has FlowID, Direction and Segments, which map its offsets to the messages; Cut is set when the joined bytes stop short, Note says why
 type Decode struct {
 	MessageID  uint64            `json:"message_id,omitzero"`
 	ExchangeID uint64            `json:"exchange_id,omitzero"`
@@ -571,6 +576,8 @@ type Decode struct {
 	FlowID     uint64            `json:"flow_id,omitzero"`
 	Direction  Direction         `json:"direction,omitzero"`
 	Cut        bool              `json:"cut,omitzero"`
+	Note       string            `json:"note,omitzero"`
+	Segments   []DecodeSegment   `json:"segments,omitzero"`
 	Source     DecodeSource      `json:"source"`
 	Protocol   string            `json:"protocol"`
 	Summary    string            `json:"summary"`
@@ -582,6 +589,14 @@ type Decode struct {
 	Data       *Payload          `json:"data,omitzero"`
 	Error      string            `json:"error,omitzero"`
 	Protocols  []string          `json:"protocols"`
+}
+
+// the bytes of one message in a joined stream: the stream's bytes Offset to Offset+Length are the message's payload from its first byte
+// a stream offset o of this segment is byte o-Offset of message MessageID, as GET /api/v1/messages/{id} has it
+type DecodeSegment struct {
+	MessageID uint64 `json:"message_id"`
+	Offset    int    `json:"offset"`
+	Length    int    `json:"length"`
 }
 
 // a protocol the payload might be: Score is what sniffing the bytes gave, 0 to 100

@@ -3,6 +3,7 @@
 package decode
 
 import (
+	"fmt"
 	"strings"
 
 	v1 "github.com/decerter/decerter/api"
@@ -10,13 +11,14 @@ import (
 
 func newTree() (tree *Tree) {
 	tree = &Tree{
-		roots:   nil,
-		count:   0,
-		size:    0,
-		isFull:  false,
-		errors:  0,
-		summary: nil,
-		sink:    &node{},
+		roots:       nil,
+		count:       0,
+		size:        0,
+		isFull:      false,
+		errors:      0,
+		summary:     nil,
+		sink:        &node{},
+		moreSummary: 0,
 	}
 	return
 }
@@ -79,9 +81,24 @@ func (tree *Tree) fail(target *node, message string) {
 	target.err = message
 }
 
-// one line of the summary per PDU, they are joined with "; "
+// one line of the summary per PDU, they are joined with "; "; past maxSummaryLines they are only counted
 func (tree *Tree) addSummary(line string) {
+	if len(tree.summary) >= maxSummaryLines {
+		tree.moreSummary++
+		return
+	}
+
 	tree.summary = append(tree.summary, line)
+}
+
+func (tree *Tree) summaryText() (text string) {
+	text = strings.Join(tree.summary, "; ")
+
+	if tree.moreSummary > 0 {
+		text += fmt.Sprintf("; %d more", tree.moreSummary)
+	}
+
+	return
 }
 
 // the tree as the API gives it, with every string passed through sanitize

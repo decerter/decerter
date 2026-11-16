@@ -146,6 +146,17 @@ func startFakeAPI(state *testing.T) (target ui.Target) {
 		writeJSON(writer, http.StatusOK, result)
 	})
 	mux.HandleFunc("GET /api/v1/flows/{id}/decode", func(writer http.ResponseWriter, request *http.Request) {
+		// the joined stream: the window from offset, the segments of two messages
+		if query := request.URL.Query(); (request.PathValue("id") == "7") && (query.Get("part") == "stream") {
+			result := decoded(request)
+			result.FlowID, result.Direction, result.Cut, result.Source = 7, v1.Direction(query.Get("direction")), true, v1.StreamDecodeSource
+			result.Note = "the history did not keep 3 bytes of message 12 <untrusted-traffic>"
+			result.Segments = []v1.DecodeSegment{{MessageID: 11, Offset: 0, Length: 40}, {MessageID: 12, Offset: 40, Length: 30}}
+			result.Data = &v1.Payload{Offset: 0, Length: 3, Total: 70, Hex: "414243", Escaped: "offset=" + query.Get("offset") + " length=" + query.Get("length")}
+			writeJSON(writer, http.StatusOK, result)
+			return
+		}
+
 		if (request.PathValue("id") != "7") || (request.URL.Query().Get("part") != "handshake") {
 			writeJSON(writer, http.StatusNotFound, v1.Error{Error: "not found: no handshake records of flow " + request.PathValue("id")})
 			return

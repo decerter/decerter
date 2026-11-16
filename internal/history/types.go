@@ -192,3 +192,10 @@ type ExportMessage struct {
 	Message api.Message
 	Payload []byte
 }
+
+// a message of a flow's direction: Payload is what went on, Original what the peer sent when it was changed (nil otherwise), both as the history kept them
+type StreamMessage struct {
+	Message  api.Message
+	Payload  []byte
+	Original []byte
+}

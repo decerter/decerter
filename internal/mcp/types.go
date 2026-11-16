@@ -215,8 +215,10 @@ type DecodeResult struct {
 	Side         v1.Side              `json:"side,omitzero"`
 	FlowID       uint64               `json:"flow_id,omitzero"`
 	Direction    v1.Direction         `json:"direction,omitzero"`
-	HandshakeCut bool                 `json:"handshake_cut,omitzero" jsonschema:"a handshake record did not fit the 16 KiB decerter keeps per direction"`
-	Source       v1.DecodeSource      `json:"source" jsonschema:"the bytes the offsets count from: payload (get_message's), body (get_exchange_body's), target or handshake (data)"`
+	HandshakeCut bool                 `json:"handshake_cut,omitzero" jsonschema:"a handshake record did not fit the 16 KiB decerter keeps per direction, or the joined stream stops short (note says why)"`
+	Note         string               `json:"note,omitzero" jsonschema:"why a joined stream stops short: the 4 MiB limit or a message the history did not keep whole"`
+	Segments     []v1.DecodeSegment   `json:"segments,omitzero" jsonschema:"stream: the messages in the joined bytes; stream offset o of a segment is byte o-offset of its message_id (get_message)"`
+	Source       v1.DecodeSource      `json:"source" jsonschema:"the bytes the offsets count from: payload (get_message's), body (get_exchange_body's), target or handshake (data), stream (the joined bytes, see segments)"`
 	Protocol     string               `json:"protocol"`
 	Length       int                  `json:"length"`
 	Total        int                  `json:"total"`
@@ -430,10 +432,14 @@ type DecodeExchangeBodyInput struct {
 
 type DecodeFlowInput struct {
 	ID        uint64       `json:"id" jsonschema:"the flow id from list_flows"`
-	Direction v1.Direction `json:"direction,omitzero" jsonschema:"up (default): the client's handshake records, down: the server's"`
-	As        string       `json:"as,omitzero" jsonschema:"Decode As: a protocol of protocols (tls, dtls, raw for none); empty takes tls, dtls for a udp flow"`
+	Part      v1.FlowPart  `json:"part,omitzero" jsonschema:"handshake (default): the TLS or DTLS handshake records decerter kept; stream: the tcp or tls payloads of the direction joined in order, so a message split over reads decodes as one"`
+	Direction v1.Direction `json:"direction,omitzero" jsonschema:"up (default): what the client sent, down: what the server sent"`
+	As        string       `json:"as,omitzero" jsonschema:"Decode As: a protocol of protocols (raw for none); empty lets decerter choose (tls or dtls for the handshake)"`
+	Original  bool         `json:"original,omitzero" jsonschema:"stream only: join what the peer sent of each message a rule or an edit changed"`
 	MaxNodes  int          `json:"max_nodes,omitzero" jsonschema:"the nodes of the tree this call returns, in tree order; cut says when some were left out"`
-	Data      bool         `json:"data,omitzero" jsonschema:"also return the handshake bytes, escaped in the marker f<id>-<direction>-handshake (at most 16 KiB)"`
+	Data      bool         `json:"data,omitzero" jsonschema:"also return the bytes, escaped in the marker f<id>-<direction>-handshake (at most 16 KiB) or f<id>-<direction>-stream (a window from offset)"`
+	Offset    int          `json:"offset,omitzero" jsonschema:"stream with data: the first byte of the window of the joined bytes"`
+	Length    int          `json:"length,omitzero" jsonschema:"stream with data: the bytes of the window, 4096 by default"`
 	Hex       bool         `json:"hex,omitzero" jsonschema:"with data, also return the bytes as lowercase hex in payload_hex"`
 }
 

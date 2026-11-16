@@ -156,3 +156,49 @@ func TestDecodeFlowPositive(state *testing.T) {
 		}
 	}
 }
+
+// Test if decodeFlow with part=stream returns with the expected output: a DNS query and answer over tcp split over reads decode as whole messages from the
+// joined bytes, segments map the offsets back to the messages, a window of the bytes is in data, and the plaintext of a TLS flow joins its tls messages.
+func TestDecodeStreamPositive(state *testing.T) {
+	test, err := newTestBackend(state.Context())
+
+	if err != nil {
+		state.Fatalf("Test of the stream decode failed, cannot fill the backend, error: %s", err.Error())
+	}
+
+	defer test.stop()
+	server := httptest.NewServer(Handler(test.backend, slog.New(slog.DiscardHandler)))
+	defer server.Close()
+
+	for direction, expected := range map[v1.Direction]string{v1.UpDirection: "Standard query 0xbeef A example.com", v1.DownDirection: "Standard query response 0xbeef A example.com A 93.184.216.34"} {
+		result := v1.Decode{}
+		status, err := getJSON(server, fmt.Sprintf("/flows/%d/decode?part=stream&direction=%s&offset=1&length=4", test.dnsTCP, direction), &result)
+		segments := map[v1.Direction]int{v1.UpDirection: 2, v1.DownDirection: 3}[direction]
+
+		if (err != nil) || (status != http.StatusOK) || (result.Protocol != "dns") || (result.Source != v1.StreamDecodeSource) || (result.Summary != expected) || (len(result.Tree) != 1) ||
+			(len(result.Segments) != segments) || (result.Segments[1].Offset != map[v1.Direction]int{v1.UpDirection: 1, v1.DownDirection: 5}[direction]) || result.Cut ||
+			(len(errorsIn(result.Tree)) != 0) || (result.Data == nil) || (result.Data.Offset != 1) || (result.Data.Length != 4) || (result.Candidates[0].Reason != "tcp port 53 is Domain Name System") {
+			state.Errorf("Test of decodeFlow failed, the %s stream should be one DNS message, status: %d, result: %+v, error: %v", direction, status, result, err)
+		}
+	}
+
+	result := v1.Decode{}
+	status, err := getJSON(server, fmt.Sprintf("/flows/%d/decode?part=stream&original=true", test.tlsFlow), &result)
+
+	if (err != nil) || (status != http.StatusOK) || (result.Total != len("GET / HTTP/1.1\r\nHost: example.com\r\n\r\n")) || (len(result.Segments) != 1) || (result.Segments[0].MessageID != test.request) {
+		state.Errorf("Test of decodeFlow failed, the TLS flow's stream should be what curl sent, status: %d, result: %+v, error: %v", status, result, err)
+	}
+}
+
+// the errors of a tree, depth first
+func errorsIn(nodes []v1.DecodeNode) (errors []string) {
+	for _, current := range nodes {
+		if current.Error != "" {
+			errors = append(errors, current.Name+": "+current.Error)
+		}
+
+		errors = append(errors, errorsIn(current.Children)...)
+	}
+
+	return
+}

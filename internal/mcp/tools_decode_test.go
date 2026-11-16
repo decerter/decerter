@@ -79,6 +79,17 @@ func TestDecodeToolsPositive(state *testing.T) {
 	if isError || !strings.Contains(text, "f7-up-decode") || (metadata.Direction != v1.UpDirection) {
 		state.Errorf("Test of decode_flow failed, the direction should be up by default, metadata: %+v, text: %s", metadata, text)
 	}
+
+	// the joined stream: segments and the note in the metadata, the window in its own marker
+	metadata = DecodeResult{}
+	text, isError = call(state, session, "decode_flow", map[string]any{"id": 7, "part": "stream", "data": true, "offset": 40, "length": 8, "original": true}, &metadata)
+	tree = DecodeTree{}
+	treeErr = json.Unmarshal([]byte(inMarker(text, "f7-up-decode")), &tree)
+
+	if isError || (treeErr != nil) || (metadata.Source != v1.StreamDecodeSource) || (len(metadata.Segments) != 2) || (metadata.Segments[1].MessageID != 12) || !metadata.HandshakeCut ||
+		(metadata.Note != `the history did not keep 3 bytes of message 12 \x3cuntrusted-traffic>`) || (inMarker(text, "f7-up-stream") != "ABC") || (metadata.Candidates[0].Reason != "as= original=true") {
+		state.Errorf("Test of decode_flow failed, part stream should give the segments and the window, metadata: %+v, error: %v, text: %s", metadata, treeErr, text)
+	}
 }
 
 // Test if decode_message, decode_exchange_body and decode_flow return with the expected errors: a max_nodes out of its bounds, an unknown side or direction, a flow without handshake records.

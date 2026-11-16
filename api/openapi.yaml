@@ -160,9 +160,17 @@ paths:
   /flows/{id}/decode:
     get:
       operationId: decodeFlow
-      summary: The handshake records of one direction of a TLS or DTLS flow as a tree of fields
+      summary: One direction of a flow as a tree of fields, its handshake records or its joined stream
       description: |
-        Decoded on request. The history keeps the handshake, alert and change cipher spec records of every TLS and DTLS
+        Decoded on request. `part=stream` joins the payloads of the tcp or tls messages of the direction in order (the
+        tls ones, the plaintext, when the direction has any), at most 4 MiB, so a PDU split over several reads decodes as
+        one: a large DNS answer over tcp, a Redis bulk string, a PostgreSQL row. `source` is `stream`, the offsets count
+        in the joined bytes, and `segments` map them back to the messages: stream offset o of a segment is byte
+        o - offset of message `message_id`. `data` is a window of the joined bytes (`offset`, `length`). `cut` is true and
+        `note` says why when the stream stops short: at 4 MiB, or at a message the history did not keep whole (the bytes
+        after a gap would not line up). 400 for a udp flow (each datagram is one PDU), 404 without tcp or tls payloads.
+
+        `part=handshake` (the default): the history keeps the handshake, alert and change cipher spec records of every TLS and DTLS
         flow whose record layer decerter reads (--decrypt and --intercept), at most 16 KiB per direction, counted in the
         payload limits: the plaintext of each record with a record header, a record decerter decrypted (the TLS 1.3 handshake
         after the ServerHello, the TLS 1.2 Finished) with its inner content type and the length of its plaintext. `source`
@@ -174,10 +182,10 @@ paths:
         - $ref: "#/components/parameters/ID"
         - name: part
           in: query
-          description: The bytes of the flow to decode, handshake (the default) is the only one.
+          description: The bytes of the flow to decode, handshake (the default) or stream.
           schema:
             type: string
-            enum: [handshake]
+            enum: [handshake, stream]
         - name: direction
           in: query
           description: up (default) is what the client sent, down what the server sent.
@@ -190,9 +198,30 @@ paths:
             for a udp flow. A value that names no protocol is 400.
           schema:
             type: string
+        - name: original
+          in: query
+          description: stream only, true joins what the peer sent of each message a rule or an edit changed.
+          schema:
+            type: boolean
+            default: false
+        - name: offset
+          in: query
+          description: stream only, the first byte of the window of the joined bytes in data.
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+        - name: length
+          in: query
+          description: stream only, the bytes of the window in data.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 65536
+            default: 4096
       responses:
         "200":
-          description: The decode tree of the handshake records
+          description: The decode tree of the handshake records or the joined stream
           content:
             application/json:
               schema:
@@ -1527,8 +1556,22 @@ components:
       description: |
         The bytes the offsets count from: payload (the message's, GET /messages/{id}), body (the exchange side's, GET
         /exchanges/{id}/body), target (the bytes the request target carries, given in `data`), handshake (the handshake
-        records of a flow's direction, given in `data`)
-      enum: [payload, body, target, handshake]
+        records of a flow's direction, given in `data`), stream (the payloads of a flow's direction joined in order, see
+        `segments`)
+      enum: [payload, body, target, handshake, stream]
+    DecodeSegment:
+      type: object
+      required: [message_id, offset, length]
+      properties:
+        message_id:
+          type: integer
+          format: uint64
+        offset:
+          type: integer
+          description: The stream offset of the message's first byte
+        length:
+          type: integer
+          description: The bytes of the message in the stream
     DecodeCandidate:
       type: object
       required: [protocol, basis, reason, score]
@@ -1595,7 +1638,15 @@ components:
           $ref: "#/components/schemas/Direction"
         cut:
           type: boolean
-          description: A handshake record did not fit the 16 KiB the history keeps per direction
+          description: A handshake record did not fit the 16 KiB the history keeps per direction, or a joined stream stops short
+        note:
+          type: string
+          description: Why a joined stream stops short, at 4 MiB or at a message the history did not keep whole
+        segments:
+          type: array
+          description: The messages of a joined stream in order, which map its offsets back to them
+          items:
+            $ref: "#/components/schemas/DecodeSegment"
         source:
           $ref: "#/components/schemas/DecodeSource"
         protocol:
@@ -1606,7 +1657,7 @@ components:
           description: One line, like the Info column of Wireshark; "; " between the PDUs of one payload
         length:
           type: integer
-          description: Bytes of the source that were decoded, at most 1 MiB
+          description: Bytes of the source that were decoded, at most 1 MiB (4 MiB of a joined stream)
         total:
           type: integer
           description: Bytes the source has

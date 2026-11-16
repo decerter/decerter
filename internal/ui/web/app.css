@@ -366,3 +366,20 @@ textarea {
 .char.hl {
   background: var(--highlight);
 }
+
+/* a message a stream node has bytes in */
+button.link {
+  border: none;
+  background: none;
+  padding: 0;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
+}
+
+#stream-view > summary {
+  cursor: pointer;
+  font-weight: 600;
+  margin: 0.5em 0;
+}

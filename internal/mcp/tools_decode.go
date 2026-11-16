@@ -78,19 +78,31 @@ func decodeExchangeBody(client Client) (handle sdk.ToolHandlerFor[DecodeExchange
 	return
 }
 
-// the decode tree of the handshake records of one direction of a TLS or DTLS flow, in the marker f<id>-<direction>-decode; the bytes only with data, escaped
-// in the marker f<id>-<direction>-handshake
+// the decode tree of one direction of a flow, its handshake records or its joined stream, in the marker f<id>-<direction>-decode; the bytes only with data,
+// escaped in the marker f<id>-<direction>-handshake or f<id>-<direction>-stream
 func decodeFlow(client Client) (handle sdk.ToolHandlerFor[DecodeFlowInput, any]) {
 	handle = func(ctx context.Context, request *sdk.CallToolRequest, input DecodeFlowInput) (result *sdk.CallToolResult, output any, err error) {
-		direction := input.Direction
+		direction, part := input.Direction, input.Part
 
 		if direction == "" {
 			direction = v1.UpDirection
 		}
 
-		query := decodeQuery(input.As, false)
-		query.Set("part", string(v1.HandshakeFlowPart))
+		if part == "" {
+			part = v1.HandshakeFlowPart
+		}
+
+		query := decodeQuery(input.As, input.Original && (part == v1.StreamFlowPart))
+		query.Set("part", string(part))
 		query.Set("direction", string(direction))
+
+		if part == v1.StreamFlowPart {
+			query.Set("offset", strconv.Itoa(input.Offset))
+
+			if input.Length > 0 {
+				query.Set("length", strconv.Itoa(input.Length))
+			}
+		}
 		decoded := v1.Decode{}
 		err = client.getJSON(ctx, "/flows/"+strconv.FormatUint(input.ID, 10)+"/decode", query, &decoded)
 
@@ -114,7 +126,7 @@ func decodeFlow(client Client) (handle sdk.ToolHandlerFor[DecodeFlowInput, any])
 			}
 
 			metadata.Data = new(data.metadata(input.Hex))
-			payloads = append(payloads, Wrap(id+"-handshake", data.PayloadEscaped))
+			payloads = append(payloads, Wrap(id+"-"+string(part), data.PayloadEscaped))
 		}
 
 		result, err = untrustedResult(metadata, payloads, true)
@@ -147,6 +159,8 @@ func splitDecode(decoded v1.Decode, maxNodes int) (metadata DecodeResult, tree D
 		FlowID:       decoded.FlowID,
 		Direction:    decoded.Direction,
 		HandshakeCut: decoded.Cut,
+		Note:         escapeDecoded(decoded.Note),
+		Segments:     decoded.Segments,
 		Source:       decoded.Source,
 		Protocol:     escapeDecoded(decoded.Protocol),
 		Length:       decoded.Length,

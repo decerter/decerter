@@ -62,6 +62,9 @@ func init() {
 		sniff:      dnsSniff,
 		decode:     dnsDecode,
 		fromTarget: dnsFromTarget,
+		frame:      dnsFrame,
+		pdu:        dnsPDU,
+		unit:       "message",
 	})
 }
 
@@ -188,30 +191,32 @@ func dnsDecode(tree *Tree, data []byte, context Context) {
 		return
 	}
 
-	offset := 0
+	protocol, _ := lookup(dnsProtocol)
+	decodeFramed(tree, data, context, protocol)
+}
 
-	for (offset < len(data)) && !tree.isFull {
-		if len(data)-offset < 2 {
-			root := tree.add(nil, dnsProtocol, dnsTitle, "", offset, len(data)-offset)
-			tree.fail(root, "1 byte of the 2-byte length, the rest comes in the next read")
-			tree.addSummary("DNS length continues in the next read")
-			return
-		}
-
-		length := int(binary.BigEndian.Uint16(data[offset:]))
-		end := offset + 2 + length
-		root := tree.add(nil, dnsProtocol, dnsTitle, "", offset, min(end, len(data))-offset)
-		tree.add(root, "dns.length", "Length", strconv.Itoa(length), offset, 2)
-
-		if end > len(data) {
-			tree.fail(root, fmt.Sprintf("the message continues in the next read: %d of its %d bytes are here", len(data)-offset-2, length))
-			dnsFields(tree, root, dnsMessage{data: data[offset+2:], base: offset + 2, isMulticast: false, rcode: 0})
-			return
-		}
-
-		dnsFields(tree, root, dnsMessage{data: data[offset+2 : end], base: offset + 2, isMulticast: false, rcode: 0})
-		offset = end
+// a message over tcp: its 2-byte length, then the message
+func dnsFrame(data []byte, state *streamState) (length int) {
+	if len(data) >= 2 {
+		length = 2 + int(binary.BigEndian.Uint16(data))
 	}
+
+	return
+}
+
+func dnsPDU(tree *Tree, data []byte, start int, state *streamState) (root *node) {
+	if len(data)-start < 2 {
+		root = tree.add(nil, dnsProtocol, dnsTitle, "", start, len(data)-start)
+		tree.addSummary("DNS length cut short")
+		return
+	}
+
+	length := int(binary.BigEndian.Uint16(data[start:]))
+	end := min(start+2+length, len(data))
+	root = tree.add(nil, dnsProtocol, dnsTitle, "", start, end-start)
+	tree.add(root, "dns.length", "Length", strconv.Itoa(length), start, 2)
+	dnsFields(tree, root, dnsMessage{data: data[start+2 : end], base: start + 2, isMulticast: false, rcode: 0})
+	return
 }
 
 func titleOf(isMulticast bool) (title string) {

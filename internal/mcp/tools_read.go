@@ -91,9 +91,10 @@ func addReadTools(server *sdk.Server, client Client, output Output) (err error) 
 		return
 	}
 
-	err = addTool(server, readTool("decode_flow", "Decode flow handshake", "The handshake records decerter kept of one direction of a TLS or DTLS flow (up: ClientHello; down: ServerHello, certificates, the TLS 1.3 messages decerter decrypted, alerts), decoded like decode_message: "+
-		"version, random, session id, cipher suites by IANA name, every extension (server_name, ALPN, supported_versions, supported_groups, signature_algorithms, key_share, pre_shared_key, early_data, ECH, status_request, ...), JA3, JA3S and JA4, and each certificate's subject, issuer, validity and names. "+
-		"The tree is in the marker f<id>-<direction>-decode, the offsets count in the handshake bytes, which come only with data. Not found for a flow without handshake records (plain tcp or udp, or a flow decerter did not read the records of). "+trafficText), decodeFlow(client), []integerProperty{{Name: "max_nodes", Minimum: 1, Maximum: maxDecodeNodes, Default: defaultDecodeNodes}}, []enumProperty{{Name: "direction", Values: []any{v1.UpDirection, v1.DownDirection}}})
+	err = addTool(server, readTool("decode_flow", "Decode flow", "One direction of a flow decoded like decode_message. part=handshake (default): the handshake records decerter kept of a TLS or DTLS flow (up: ClientHello; down: ServerHello, certificates, the TLS 1.3 messages decerter decrypted, alerts): "+
+		"version, random, session id, cipher suites by IANA name, every extension (server_name, ALPN, supported_versions, supported_groups, signature_algorithms, key_share, pre_shared_key, early_data, ECH, status_request, ...), JA3, JA3S and JA4, and each certificate's subject, issuer, validity and names; not found for a flow without handshake records. "+
+		"part=stream: the payloads of the tcp or tls messages of the direction joined in order (at most 4 MiB), so a message split over several reads (a large DNS answer over tcp, a Redis bulk string, a PostgreSQL row) decodes as one; segments map the stream offsets back to message ids and their offsets. "+
+		"The tree is in the marker f<id>-<direction>-decode, the offsets count in the handshake bytes or the joined stream, which come only with data. "+trafficText), decodeFlow(client), []integerProperty{{Name: "max_nodes", Minimum: 1, Maximum: maxDecodeNodes, Default: defaultDecodeNodes}, payloadBounds[0], payloadBounds[1]}, []enumProperty{{Name: "direction", Values: []any{v1.UpDirection, v1.DownDirection}}, {Name: "part", Values: []any{v1.HandshakeFlowPart, v1.StreamFlowPart}}})
 
 	if err != nil {
 		return

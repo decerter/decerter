@@ -119,12 +119,12 @@ func TestFromTargetNegative(state *testing.T) {
 	}
 
 	for name, target := range negativeCases {
-		if data, found := FromTarget(Context{Transport: BodyTransport, Layer: "", Direction: v1.UpDirection, ServerPort: 0, ALPN: "", ContentType: "", Upgrade: "", Method: "GET", Target: target, Encoding: "", Extensions: "", Handshake: false}, ""); found {
+		if data, found := FromTarget(Context{Transport: BodyTransport, Layer: "", Direction: v1.UpDirection, ServerPort: 0, ALPN: "", ContentType: "", Upgrade: "", Method: "GET", Target: target, Encoding: "", Extensions: "", Handshake: false, Joined: false}, ""); found {
 			state.Errorf("Test of decode.FromTarget failed, %s should find nothing, data: %x", name, data)
 		}
 	}
 
-	if _, found := FromTarget(Context{Transport: BodyTransport, Layer: "", Direction: v1.UpDirection, ServerPort: 0, ALPN: "", ContentType: "", Upgrade: "", Method: "GET", Target: "/q?dns=AAABAAABAAAAAAAAAAABAAEB", Encoding: "", Extensions: "", Handshake: false}, RawProtocol); found {
+	if _, found := FromTarget(Context{Transport: BodyTransport, Layer: "", Direction: v1.UpDirection, ServerPort: 0, ALPN: "", ContentType: "", Upgrade: "", Method: "GET", Target: "/q?dns=AAABAAABAAAAAAAAAAABAAEB", Encoding: "", Extensions: "", Handshake: false, Joined: false}, RawProtocol); found {
 		state.Errorf("Test of decode.FromTarget failed, as=raw should find nothing in a dns parameter")
 	}
 }

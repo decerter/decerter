@@ -27,9 +27,10 @@ const state = {
   exchangeId: null,
   exchangeSide: 'request',
   exchangeOffset: 0,
-  // the decode tree of the shown message, exchange body and flow handshake, see decodePanes
-  decodes: { message: null, exchange: null, handshake: null },
+  // the decode tree of the shown message, exchange body, flow handshake and joined stream, see decodePanes
+  decodes: { message: null, exchange: null, handshake: null, stream: null },
   handshakeDirection: 'up',
+  streamDirection: 'up',
 };
 
 // the rows live events may grow a list to: the newest flows, the first messages and exchanges of the shown flow; More reads on past them
@@ -447,6 +448,7 @@ async function selectFlow(id) {
   renderFlowInfo(flow);
   renderFlows();
   await loadHandshake(flow);
+  await loadStream(flow);
   const list = await call('GET', `/flows/${id}/messages`);
   state.messages = list.messages;
   state.messagesCursor = list.next_cursor || '';
@@ -506,6 +508,66 @@ async function loadHandshake(flow) {
   byId('handshake-bytes').replaceChildren(data ? byteSpans(bytesOfHex(data.hex), data.offset, 'hex') : '');
   byId('handshake-range').textContent = data ? `${data.total} bytes${decoded.result.cut ? ', cut at 16 KiB' : ''}` : '';
   markBytes('handshake');
+}
+
+// the payloads of one direction of a tcp flow joined, GET /flows/{id}/decode?part=stream: decoded when the pane is open; a node marks its bytes in the
+// message that has its first byte, the segments of the answer map the stream offsets to the messages
+async function loadStream(flow) {
+  const view = byId('stream-view');
+
+  if (!flow) {
+    return;
+  }
+
+  const traffic = state.streamDirection === 'down' ? flow.down : flow.up;
+  view.hidden = flow.protocol !== 'tcp' || !(flow.up.messages || flow.down.messages);
+
+  if (view.hidden || !view.open) {
+    return;
+  }
+
+  if (!traffic.messages) {
+    state.decodes.stream = { key: '', as: '', result: null, error: `no ${state.streamDirection === 'down' ? 'server' : 'client'} messages`, selected: null, nodes: new Map(), ids: new Map(), elements: new Map() };
+    renderDecode('stream');
+    byId('stream-range').textContent = '';
+    byId('stream-location').textContent = '';
+    return;
+  }
+
+  // the stream of an open flow is decoded again when it has more messages
+  const decoded = await loadDecode('stream', `${flow.id} ${state.streamDirection} ${traffic.messages}`, `/flows/${flow.id}/decode?part=stream&direction=${state.streamDirection}&length=0`);
+  const result = decoded.result;
+  byId('stream-range').textContent = result ? `${result.total} bytes of ${result.segments.length} messages${result.cut ? `, ${result.note}` : ''}` : '';
+  byId('stream-location').textContent = '';
+}
+
+// the messages and their bytes a node of the stream spans: [segment, first, end) per message, offsets of the message's payload
+function streamParts(node) {
+  const decoded = state.decodes.stream;
+  const end = node.offset + Math.max(node.length, 1);
+  return (decoded.result.segments || []).filter((segment) => segment.offset < end && node.offset < segment.offset + segment.length)
+    .map((segment) => [segment, Math.max(0, node.offset - segment.offset), Math.min(segment.length, end - segment.offset)]);
+}
+
+// the stream node's bytes: where they are, and the message with its first byte shown with them marked
+async function showStreamNode(node, isPaging) {
+  const parts = streamParts(node);
+  const location = byId('stream-location');
+  location.replaceChildren(...parts.flatMap(([segment, first, end], index) => [index ? ', ' : 'bytes in ', el('button', { type: 'button', class: 'link', onclick: action(() => openStreamPart(segment, first)) }, `message ${segment.message_id} ${first}–${end}`)]));
+
+  if (isPaging && parts.length) {
+    await openStreamPart(parts[0][0], parts[0][1]);
+  }
+}
+
+async function openStreamPart(segment, first) {
+  const start = Math.floor(first / windowLength) * windowLength;
+
+  if (state.messageId !== segment.message_id || state.offset !== start) {
+    await selectMessage(segment.message_id, start);
+  }
+
+  markBytes('stream');
 }
 
 async function moreMessages() {
@@ -579,6 +641,7 @@ const decodePanes = {
   message: { select: 'message-decode-as', summary: 'message-decode-summary', reason: 'message-decode-reason', tree: 'message-decode-tree' },
   exchange: { select: 'exchange-decode-as', summary: 'exchange-decode-summary', reason: 'exchange-decode-reason', tree: 'exchange-decode-tree' },
   handshake: { select: 'handshake-decode-as', summary: 'handshake-decode-summary', reason: 'handshake-decode-reason', tree: 'handshake-decode-tree' },
+  stream: { select: 'stream-decode-as', summary: 'stream-decode-summary', reason: 'stream-decode-reason', tree: 'stream-decode-tree' },
 };
 
 // the decode of key (the message or exchange side it is of), kept while key stays
@@ -672,6 +735,10 @@ function bytesOf(kind) {
     return byId('handshake-bytes');
   }
 
+  if (kind === 'stream') {
+    return byId('payload');
+  }
+
   const decoded = state.decodes.exchange;
   return decoded && decoded.result && decoded.result.source === 'target' ? byId('exchange-decoded') : byId('exchange-body');
 }
@@ -698,6 +765,12 @@ async function selectNode(kind, id, isPaging) {
   }
 
   row.scrollIntoView({ block: 'nearest' });
+
+  // the stream's bytes are in its messages
+  if (kind === 'stream') {
+    await showStreamNode(node, isPaging);
+    return;
+  }
 
   // the handshake shows all its bytes, scroll to the first marked one
   if (kind === 'handshake') {
@@ -737,11 +810,24 @@ function markBytes(kind) {
   }
 
   const node = decoded.nodes.get(decoded.selected);
+  let first = node.offset;
+  let end = node.offset + node.length;
+
+  // a stream node marks its bytes in the message shown
+  if (kind === 'stream') {
+    const part = streamParts(node).find(([segment]) => segment.message_id === state.messageId);
+
+    if (!part) {
+      return isShown;
+    }
+
+    [, first, end] = part;
+  }
 
   for (const span of container.querySelectorAll('[data-offset]')) {
     const offset = Number(span.dataset.offset);
 
-    if (offset >= node.offset && offset < node.offset + node.length) {
+    if (offset >= first && offset < end) {
       span.classList.add('hl');
       isShown = true;
     }
@@ -1151,6 +1237,19 @@ function start() {
     state.decodes.handshake = null;
     return loadHandshake(state.flows.get(state.flowId));
   }));
+
+  byId('stream-decode-as').addEventListener('change', action(() => {
+    state.decodes.stream = null;
+    return loadStream(state.flows.get(state.flowId));
+  }));
+  byId('stream-view').addEventListener('toggle', action(() => loadStream(state.flows.get(state.flowId))));
+
+  for (const radio of document.querySelectorAll('input[name="stream-direction"]')) {
+    radio.addEventListener('change', action(() => {
+      state.streamDirection = radio.value;
+      return loadStream(state.flows.get(state.flowId));
+    }));
+  }
 
   for (const radio of document.querySelectorAll('input[name="handshake-direction"]')) {
     radio.addEventListener('change', action(() => {

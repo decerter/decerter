@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -90,6 +91,7 @@ type testBackend struct {
 	wsFlow   uint64
 	wsUp     uint64
 	wsDown   uint64
+	dnsTCP   uint64
 	stop     func()
 	pipeline *intercept.Pipeline
 }
@@ -213,7 +215,12 @@ func TestHandlerPositive(state *testing.T) {
 		{Method: http.MethodGet, Path: fmt.Sprintf("/messages/%d/decode", test.wsUp), Status: http.StatusOK},
 		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode", test.tlsFlow), Status: http.StatusOK},
 		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode?part=handshake&direction=down&as=raw", test.tlsFlow), Status: http.StatusOK},
-		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode?part=stream", test.tlsFlow), Status: http.StatusBadRequest, IsInvalid: true},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode?part=stream", test.tlsFlow), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode?part=stream&direction=down&offset=2&length=3&original=true", test.dnsTCP), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode?part=stream", test.udpFlow), Status: http.StatusBadRequest},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode?part=stream&offset=-1", test.dnsTCP), Status: http.StatusBadRequest, IsInvalid: true},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode?part=stream&original=maybe", test.dnsTCP), Status: http.StatusBadRequest, IsInvalid: true},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode?part=other", test.tlsFlow), Status: http.StatusBadRequest, IsInvalid: true},
 		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode?direction=sideways", test.tlsFlow), Status: http.StatusBadRequest, IsInvalid: true},
 		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode?as=nosuch", test.tlsFlow), Status: http.StatusBadRequest},
 		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode", test.udpFlow), Status: http.StatusNotFound},
@@ -1088,6 +1095,22 @@ func newTestBackend(ctx context.Context) (test testBackend, err error) {
 	wsDown := test.pipeline.Message(wsFlow, tlsrecord.ServerDirection, intercept.TCPLayer, testServerFrames)
 	test.wsDown = wsDown.ID
 	backend.History.Record(wsDown, intercept.Result{Plain: testServerFrames, Verdict: intercept.ForwardVerdict, Changed: false}, intercept.RulesOrigin)
+	// DNS over tcp: the query in two reads, the answer in three
+	dnsValues := filter.Values{PID: 45, UID: 1001, GID: 1001, Comm: "dig", IPProtocol: syscall.IPPROTO_TCP, Source: netip.MustParseAddrPort("[::ffff:127.0.0.1]:40002"), Destination: netip.MustParseAddrPort("127.0.0.1:53"), TLS: filter.AbsentTLSState}
+	test.dnsTCP = backend.History.OpenFlow(10, dnsValues, [32]byte{})
+	dnsFlow := intercept.FlowOf(test.dnsTCP, 10, redirectFlow(dnsValues), dnsValues.Source, dnsValues)
+	tcpQuery := binary.BigEndian.AppendUint16(nil, uint16(len(testDNSQuery)))
+	tcpQuery = append(tcpQuery, testDNSQuery...)
+	tcpAnswer := binary.BigEndian.AppendUint16(nil, uint16(len(testDNSAnswer)))
+	tcpAnswer = append(tcpAnswer, testDNSAnswer...)
+
+	for direction, pieces := range map[tlsrecord.Direction][][]byte{tlsrecord.ClientDirection: {tcpQuery[:1], tcpQuery[1:]}, tlsrecord.ServerDirection: {tcpAnswer[:5], tcpAnswer[5:20], tcpAnswer[20:]}} {
+		for _, piece := range pieces {
+			message := test.pipeline.Message(dnsFlow, direction, intercept.TCPLayer, piece)
+			backend.History.Record(message, intercept.Result{Plain: piece, Verdict: intercept.ForwardVerdict, Changed: false}, intercept.RulesOrigin)
+		}
+	}
+
 	// an open udp flow whose TLS state was never read
 	udpValues := filter.Values{PID: 43, UID: 1001, GID: 1001, Comm: "dig", IPProtocol: syscall.IPPROTO_UDP, Source: netip.MustParseAddrPort("[::ffff:127.0.0.1]:5353"), Destination: netip.MustParseAddrPort("127.0.0.1:53"), TLS: filter.UnknownTLSState}
 	test.udpFlow = backend.History.OpenFlow(8, udpValues, [32]byte{})

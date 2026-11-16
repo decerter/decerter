@@ -172,7 +172,7 @@ func TestTransportsPositive(state *testing.T) {
 	}
 
 	// DoH POST: the content type, no port
-	doh := Context{Transport: BodyTransport, Layer: "", Direction: v1.UpDirection, ServerPort: 8443, ALPN: "h2", ContentType: "application/dns-message", Upgrade: "", Method: "POST", Target: "/dns-query", Encoding: "", Extensions: "", Handshake: false}
+	doh := Context{Transport: BodyTransport, Layer: "", Direction: v1.UpDirection, ServerPort: 8443, ALPN: "h2", ContentType: "application/dns-message", Upgrade: "", Method: "POST", Target: "/dns-query", Encoding: "", Extensions: "", Handshake: false, Joined: false}
 	result = mustDecode(state, query, doh, "")
 
 	if (result.Protocol != dnsProtocol) || (result.Candidates[0].Basis != v1.ContextDecodeBasis) || (result.Candidates[0].Reason != "content type application/dns-message is DNS over HTTPS") {
@@ -212,7 +212,7 @@ func TestTransportsPositive(state *testing.T) {
 	// Decode As raw over the port
 	result = mustDecode(state, query, udpContext, RawProtocol)
 
-	if (result.Protocol != RawProtocol) || (len(result.Tree) != 1) || (result.Tree[0].Length != len(query)) || (result.Candidates[0].Basis != v1.OverrideDecodeBasis) || !slices.Equal(result.Protocols, []string{"dns", "dtls", "grpc", "protobuf", "tls", "websocket", "raw"}) {
+	if (result.Protocol != RawProtocol) || (len(result.Tree) != 1) || (result.Tree[0].Length != len(query)) || (result.Candidates[0].Basis != v1.OverrideDecodeBasis) || !slices.Equal(result.Protocols, Protocols()) || !slices.IsSorted(result.Protocols[:len(result.Protocols)-1]) || (result.Protocols[len(result.Protocols)-1] != RawProtocol) {
 		state.Errorf("Test of Decode As raw failed, the tree should be one raw node, result: %+v", result)
 	}
 }
@@ -238,8 +238,8 @@ func TestMalformedNegative(state *testing.T) {
 	longName = append(longName, 0)
 	negativeCases := map[string]malformedCase{
 		"short header":      {data: []byte{1, 2, 3, 4, 5}, context: udpContext, message: "a DNS header has 12 bytes, the message 5"},
-		"next read":         {data: join(be16(100), make([]byte, 30)), context: tcpContext, message: "the message continues in the next read: 30 of its 100 bytes are here"},
-		"one length byte":   {data: join(be16(12), make([]byte, 12), []byte{0}), context: tcpContext, message: "1 byte of the 2-byte length"},
+		"next read":         {data: join(be16(100), make([]byte, 30)), context: tcpContext, message: "the message continues in the next read: 32 of its 102 bytes are here"},
+		"one length byte":   {data: join(be16(12), make([]byte, 12), []byte{0}), context: tcpContext, message: "the message continues in the next read, 1 bytes of it are here"},
 		"pointer loop":      {data: dnsPacket(1, 0, [4]uint16{1, 0, 0, 0}, []byte{0xc0, 0x0c}, be16(1), be16(1)), context: udpContext, message: errNameLoop.Error()},
 		"pointer chain":     {data: dnsPacket(1, 0, [4]uint16{1, 0, 0, 0}, chain, be16(1), be16(1)), context: udpContext, message: errNameLoop.Error()},
 		"long name":         {data: dnsPacket(1, 0, [4]uint16{1, 0, 0, 0}, longName, be16(1), be16(1)), context: udpContext, message: errNameLong.Error()},
@@ -274,7 +274,7 @@ func TestMalformedNegative(state *testing.T) {
 func TestDecodeNegative(state *testing.T) {
 	_, err := Decode([]byte{1}, udpContext, "nosuch")
 
-	if (err == nil) || !strings.Contains(err.Error(), `as "nosuch", valid values: dns, dtls, grpc, protobuf, tls, websocket, raw`) {
+	if (err == nil) || !strings.Contains(err.Error(), `as "nosuch", valid values: `+strings.Join(Protocols(), ", ")) || !strings.HasSuffix(err.Error(), ", websocket, raw") {
 		state.Errorf("Test of decode.Decode failed, an unknown as should be an error, error: %v", err)
 	}
 

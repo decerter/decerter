@@ -7,10 +7,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strings"
 
 	v1 "github.com/decerter/decerter/api"
 	"github.com/decerter/decerter/internal/decode"
+	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/tlsrecord"
 )
 
@@ -55,6 +57,7 @@ func decodeMessage(backend *Backend, writer http.ResponseWriter, request *http.R
 		Encoding:    "",
 		Extensions:  "",
 		Handshake:   false,
+		Joined:      false,
 	}
 
 	if (message.Layer == v1.TCPLayer) || (message.Layer == v1.TLSLayer) {
@@ -145,6 +148,7 @@ func decodeExchangeBody(backend *Backend, writer http.ResponseWriter, request *h
 		Encoding:    "",
 		Extensions:  "",
 		Handshake:   false,
+		Joined:      false,
 	}
 	head := exchange.Request
 
@@ -227,8 +231,8 @@ func upgradeOf(backend *Backend, message v1.Message) (upgrade string, extensions
 	return
 }
 
-// the handshake records the history kept of one direction of a TLS or DTLS flow as a tree: the offsets are bytes of data, which has them,
-// since no other operation does; part=handshake (the default) is the only part so far
+// one direction of a flow as a tree: part=handshake (the default) the handshake records the history kept of a TLS or DTLS flow, the offsets are bytes of
+// data, which has them, since no other operation does; part=stream the payloads of its tcp or tls messages joined in order, see decodeStream
 func decodeFlow(backend *Backend, writer http.ResponseWriter, request *http.Request, logger *slog.Logger) {
 	id, err := pathID(request)
 
@@ -238,13 +242,15 @@ func decodeFlow(backend *Backend, writer http.ResponseWriter, request *http.Requ
 	}
 
 	query := request.URL.Query()
+	part := v1.FlowPart(query.Get("part"))
 
-	switch part := v1.FlowPart(query.Get("part")); part {
+	switch part {
 	case
 		"",
-		v1.HandshakeFlowPart:
+		v1.HandshakeFlowPart,
+		v1.StreamFlowPart:
 	default:
-		writeError(writer, http.StatusBadRequest, fmt.Errorf("%w: part %q, valid values: handshake", ErrBadRequest, part), logger)
+		writeError(writer, http.StatusBadRequest, fmt.Errorf("%w: part %q, valid values: handshake, stream", ErrBadRequest, part), logger)
 		return
 	}
 
@@ -278,6 +284,11 @@ func decodeFlow(backend *Backend, writer http.ResponseWriter, request *http.Requ
 		return
 	}
 
+	if part == v1.StreamFlowPart {
+		decodeStream(backend, writer, request, flow, direction, recordDirection, as, logger)
+		return
+	}
+
 	data, isCut, _ := backend.History.Handshake(id, recordDirection)
 
 	if len(data) == 0 {
@@ -298,6 +309,7 @@ func decodeFlow(backend *Backend, writer http.ResponseWriter, request *http.Requ
 		Encoding:    "",
 		Extensions:  "",
 		Handshake:   true,
+		Joined:      false,
 	}
 
 	if flow.Protocol == "udp" {
@@ -324,6 +336,125 @@ func decodeFlow(backend *Backend, writer http.ResponseWriter, request *http.Requ
 	result.Source = v1.HandshakeDecodeSource
 	result.Data = &window
 	writeJSON(writer, http.StatusOK, result, logger)
+}
+
+// the payloads of the tcp or tls messages of one direction of a flow joined in order, at most decode.MaxStreamBytes, as a tree: a PDU split over reads
+// decodes as one; the offsets count in the joined bytes, segments map them back to the messages; offset and length give a window of the bytes in data
+// original=true joins what the peer sent of each changed message
+func decodeStream(backend *Backend, writer http.ResponseWriter, request *http.Request, flow v1.Flow, direction v1.Direction, recordDirection tlsrecord.Direction, as string, logger *slog.Logger) {
+	isOriginal, err := queryBool(request, "original")
+
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err, logger)
+		return
+	}
+
+	offset, err := queryNumber(request, "offset", 0, 0, maxPayloadOffset)
+
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err, logger)
+		return
+	}
+
+	length, err := queryNumber(request, "length", defaultPayloadLength, 0, maxPayloadLength)
+
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err, logger)
+		return
+	}
+
+	if flow.Protocol == "udp" {
+		writeError(writer, http.StatusBadRequest, fmt.Errorf("%w: flow %d is udp, each datagram is one PDU, decode its messages", ErrBadRequest, flow.ID), logger)
+		return
+	}
+
+	messages, _ := backend.History.DirectionMessages(flow.ID, recordDirection)
+	data, segments, layer, note := joinStream(messages, isOriginal)
+
+	if len(segments) == 0 {
+		writeError(writer, http.StatusNotFound, fmt.Errorf("%w: no tcp or tls payload of flow %d going %s", ErrNotFound, flow.ID, direction), logger)
+		return
+	}
+
+	context := decode.Context{
+		Transport:   decode.StreamTransport,
+		Layer:       layer,
+		Direction:   direction,
+		ServerPort:  portOf(flow.Destination),
+		ALPN:        "",
+		ContentType: "",
+		Upgrade:     "",
+		Method:      "",
+		Target:      "",
+		Encoding:    "",
+		Extensions:  "",
+		Handshake:   false,
+		Joined:      true,
+	}
+
+	if flow.TLS != nil {
+		context.ALPN = flow.TLS.ALPN
+	}
+
+	result, err := decode.Decode(data, context, as)
+
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, fmt.Errorf("%w: %w", ErrBadRequest, err), logger)
+		return
+	}
+
+	if result.Error != "" {
+		logger.Warn("Could not decode flow stream", "error", result.Error, "flowID", flow.ID, "direction", direction)
+	}
+
+	window := payloadWindow(data, offset, length)
+	result.FlowID, result.Direction = flow.ID, direction
+	result.Cut, result.Note = note != "", note
+	result.Segments = segments
+	result.Source = v1.StreamDecodeSource
+	result.Data = &window
+	writeJSON(writer, http.StatusOK, result, logger)
+}
+
+// the payloads of messages joined in order: the tls ones when there are any (the plaintext of a TLS flow), else the tcp ones; at most
+// decode.MaxStreamBytes, and only up to the first message the history did not keep whole, since the bytes after a gap would not line up; note says
+// why the stream stops short, empty when it is whole
+func joinStream(messages []history.StreamMessage, isOriginal bool) (data []byte, segments []v1.DecodeSegment, layer v1.Layer, note string) {
+	layer = v1.TCPLayer
+
+	if slices.ContainsFunc(messages, func(message history.StreamMessage) bool { return message.Message.Layer == v1.TLSLayer }) {
+		layer = v1.TLSLayer
+	}
+
+	for _, message := range messages {
+		if message.Message.Layer != layer {
+			continue
+		}
+
+		payload, length := message.Payload, message.Message.Length
+
+		if isOriginal && message.Message.Edited {
+			payload, length = message.Original, message.Message.OriginalLength
+		}
+
+		kept := payload[:min(len(payload), decode.MaxStreamBytes-len(data))]
+
+		if len(kept) > 0 {
+			segments = append(segments, v1.DecodeSegment{MessageID: message.Message.ID, Offset: len(data), Length: len(kept)})
+			data = append(data, kept...)
+		}
+
+		switch {
+		case len(kept) < len(payload):
+			note = fmt.Sprintf("the stream is cut at %d bytes, in message %d", decode.MaxStreamBytes, message.Message.ID)
+			return
+		case len(payload) < length:
+			note = fmt.Sprintf("the history did not keep %d bytes of message %d, the stream stops there", length-len(payload), message.Message.ID)
+			return
+		}
+	}
+
+	return
 }
 
 // the port of a flow's destination address:port, 0 when it has none
