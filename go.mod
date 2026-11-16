@@ -17,6 +17,7 @@ require github.com/ulikunitz/xz v0.5.17
 require (
 	github.com/getkin/kin-openapi v0.153.0
 	github.com/google/jsonschema-go v0.4.3
+	github.com/jackc/pgx/v5 v5.12.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/pion/rtcp v1.2.20
 	github.com/pion/rtp v1.10.6
