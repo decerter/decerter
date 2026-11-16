@@ -539,18 +539,39 @@ func TestServeTCPNegative(state *testing.T) {
 	}
 
 	// both ends wait for the other, the proxy shutdown ends the flow in its opening read
+	// the server's accept can come before the proxy's dial returns: a shutdown then cancels the dial, the proxy resets the client as it should, and
+	// the case is run again, it is about the opening read
+	for attempt := 1; ; attempt++ {
+		received, serverResult, output, logs, err := silentTCPFlow(state)
+
+		if strings.Contains(logs, "Could not dial original destination") && (attempt < silentFlowAttempts) {
+			continue
+		}
+
+		if (err != nil) || (len(received) != 0) || (serverResult.err != nil) || (len(serverResult.received) != 0) || !strings.Contains(output, " up=0B down=0B ") {
+			state.Errorf("Test of proxy.ServeTCP function failed, a silent flow should end with the proxy, attempt: %d, received: %q, error: %v, server: %v, output: %q, logs: %s", attempt, received, err, serverResult.err, output, logs)
+		}
+
+		return
+	}
+}
+
+// the tries of the silent flow case before a shutdown that cancelled the dial each time counts as a failure
+const silentFlowAttempts = 10
+
+// one silent flow: the client and the server both wait, the proxy is stopped once the server has accepted the proxy's upstream connection
+func silentTCPFlow(state *testing.T) (received []byte, serverResult tcpEndResult, output string, logs string, err error) {
 	acceptedChannel := make(chan struct{})
-	serverAddress, serverChannel := startServer(state, func(connection *net.TCPConn) (received []byte, err error) {
+	serverAddress, serverChannel := startServer(state, func(connection *net.TCPConn) (serverReceived []byte, serverErr error) {
 		close(acceptedChannel)
-		received, err = io.ReadAll(connection)
+		serverReceived, serverErr = io.ReadAll(connection)
 		return
 	})
 	flow := testFlow
 	flow.OriginalDestination = serverAddress
 	useFlows(state, fixedFlow(flow))
-	logger, _ := bufferLogger()
-	var received []byte
-	output := captureStdout(state, func() {
+	logger, logBuffer := bufferLogger()
+	output = captureStdout(state, func() {
 		address, stop := startTCPProxy(state, nil, nil, nil, nil, history.New(history.DefaultLimits(), nil), logger)
 		connection, dialErr := net.DialTCP("tcp", nil, net.TCPAddrFromAddrPort(address))
 
@@ -565,12 +586,9 @@ func TestServeTCPNegative(state *testing.T) {
 		received, err = io.ReadAll(connection)
 		err = errors.Join(err, connection.Close())
 	})
-	serverResult := <-serverChannel
-
-	if (err != nil) || (len(received) != 0) || (serverResult.err != nil) || (len(serverResult.received) != 0) || !strings.Contains(output, " up=0B down=0B ") {
-		state.Errorf("Test of proxy.ServeTCP function failed, a silent flow should end with the proxy, received: %q, error: %v, server: %v, output: %q", received, err, serverResult.err, output)
-		return
-	}
+	serverResult = <-serverChannel
+	logs = logBuffer.String()
+	return
 }
 
 // Test if proxy.pipeTCP returns with the expected errors: an opening that can't be written, an observed write to a server that is gone
