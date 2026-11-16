@@ -12,6 +12,7 @@
   --danger: #b42318;
   --up: #1f6fb2;
   --down: #2f7d32;
+  --highlight: #ffd36b;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -26,6 +27,7 @@
     --danger: #f0776c;
     --up: #6aaee8;
     --down: #7cc47f;
+    --highlight: #7a5a12;
   }
 }
 
@@ -266,4 +268,95 @@ textarea {
 
 [hidden] {
   display: none !important;
+}
+
+/* the decode tree next to the bytes it decodes, the tree goes above them when the pane is narrow */
+.decode-split {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6em;
+  align-items: flex-start;
+}
+
+.decode {
+  flex: 1 1 18em;
+  min-width: 0;
+  margin-top: 0.5em;
+  padding: 0.4em 0.6em;
+  background: var(--panel);
+  border-radius: 4px;
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.decode-bytes {
+  flex: 2 1 36em;
+  min-width: 0;
+}
+
+.decode-summary {
+  margin: 0.3em 0;
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.decode p {
+  margin: 0.2em 0;
+}
+
+.tree,
+.tree ul {
+  list-style: none;
+  margin: 0;
+  padding-left: 1.1em;
+}
+
+.tree {
+  padding-left: 0;
+  font-family: ui-monospace, monospace;
+  font-size: 0.85em;
+}
+
+.tree .node {
+  display: flex;
+  gap: 0.3em;
+  padding: 0 0.2em;
+  border-radius: 3px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.tree .node:hover {
+  background: var(--selected);
+}
+
+.tree .node.selected {
+  background: var(--highlight);
+}
+
+.tree .twisty {
+  flex: none;
+  width: 1.2em;
+  padding: 0;
+  border: none;
+  background: none;
+}
+
+.tree .leaf {
+  flex: none;
+  width: 1.2em;
+}
+
+.node-error {
+  color: var(--danger);
+}
+
+.byte,
+.char {
+  cursor: pointer;
+}
+
+.byte.hl,
+.char.hl {
+  background: var(--highlight);
 }

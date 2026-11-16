@@ -27,6 +27,8 @@ const state = {
   exchangeId: null,
   exchangeSide: 'request',
   exchangeOffset: 0,
+  // the decode tree of the shown message and exchange body, see decodePanes
+  decodes: { message: null, exchange: null },
 };
 
 // the rows live events may grow a list to: the newest flows, the first messages and exchanges of the shown flow; More reads on past them
@@ -225,20 +227,37 @@ function hexLines(bytes) {
   return lines.join('\n');
 }
 
-// offset, 16 bytes in hex and the printable ones
-function hexDump(bytes, offset) {
-  const lines = [];
+// a window as spans of one byte each, data-offset its offset in the payload, so the decode tree can mark bytes and a click on one finds its node:
+// the hex dump (offset, 16 bytes, the printable ones), or the escaped text
+function byteSpans(bytes, offset, view) {
+  const fragment = document.createDocumentFragment();
+  const span = (kind, index, text) => {
+    const node = el('span', { class: kind }, text);
+    node.dataset.offset = String(offset + index);
+    return node;
+  };
+
+  if (view !== 'hex') {
+    bytes.forEach((byte, index) => {
+      fragment.append(span('char', index, escapeBytes(bytes.subarray(index, index + 1))));
+    });
+    return fragment;
+  }
 
   for (let start = 0; start < bytes.length; start += 16) {
     const row = bytes.subarray(start, start + 16);
-    const hex = Array.from(row, (byte) => byte.toString(16).padStart(2, '0'));
-    const left = hex.slice(0, 8).join(' ');
-    const right = hex.slice(8).join(' ');
-    const text = Array.from(row, (byte) => (byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : '.')).join('');
-    lines.push(`${(offset + start).toString(16).padStart(8, '0')}  ${left.padEnd(23)}  ${right.padEnd(23)}  |${text}|`);
+    fragment.append(`${start > 0 ? '\n' : ''}${(offset + start).toString(16).padStart(8, '0')}  `);
+    row.forEach((byte, index) => {
+      fragment.append(span('byte', start + index, byte.toString(16).padStart(2, '0')), index === 7 ? '  ' : ' ');
+    });
+    fragment.append(' '.repeat((16 - row.length) * 3 + (row.length <= 8 ? 1 : 0)), ' |');
+    row.forEach((byte, index) => {
+      fragment.append(span('char', start + index, byte >= 0x20 && byte < 0x7f ? String.fromCharCode(byte) : '.'));
+    });
+    fragment.append('|');
   }
 
-  return lines.join('\n');
+  return fragment;
 }
 
 function formatBytes(count) {
@@ -501,6 +520,9 @@ async function selectMessage(id, offset) {
   state.detail = detail;
   renderMessages();
   renderPayload();
+  const isOriginal = byId('original').checked && detail.original ? 'true' : 'false';
+  await loadDecode('message', `${id} ${isOriginal}`, `/messages/${id}/decode?original=${isOriginal}`);
+  markBytes('message');
 }
 
 function renderPayload() {
@@ -514,7 +536,199 @@ function renderPayload() {
   byId('window-range').textContent = payload.total === 0 ? 'empty' : `bytes ${payload.offset}–${payload.offset + payload.length} of ${payload.total}`;
   byId('previous-window').disabled = payload.offset === 0;
   byId('next-window').disabled = payload.offset + payload.length >= Math.max(detail.payload.total, detail.original ? detail.original.total : 0);
-  byId('payload').textContent = state.view === 'hex' ? hexDump(bytes, payload.offset) : escapeBytes(bytes);
+  byId('payload').replaceChildren(byteSpans(bytes, payload.offset, state.view));
+  markBytes('message');
+}
+
+// the decode trees: GET /messages/{id}/decode and GET /exchanges/{id}/decode, decoded when a message, side, original or Decode As changes, not per window;
+// a click on a node marks its bytes (and pages to them), a click on a byte selects the deepest node that has it
+const decodePanes = {
+  message: { select: 'message-decode-as', summary: 'message-decode-summary', reason: 'message-decode-reason', tree: 'message-decode-tree' },
+  exchange: { select: 'exchange-decode-as', summary: 'exchange-decode-summary', reason: 'exchange-decode-reason', tree: 'exchange-decode-tree' },
+};
+
+// the decode of key (the message or exchange side it is of), kept while key stays
+async function loadDecode(kind, key, path) {
+  const known = state.decodes[kind];
+
+  if (known && known.key === key) {
+    return known;
+  }
+
+  const as = byId(decodePanes[kind].select).value;
+  const decoded = { key, as, result: null, error: '', selected: null, nodes: new Map(), ids: new Map(), elements: new Map() };
+  state.decodes[kind] = decoded;
+
+  try {
+    decoded.result = await call('GET', `${path}${as ? `&as=${encodeURIComponent(as)}` : ''}`);
+  } catch (error) {
+    decoded.error = String(error.message || error);
+  }
+
+  renderDecode(kind);
+  return decoded;
+}
+
+function nodeText(node) {
+  return node.value ? `${node.label}: ${node.value}` : node.label;
+}
+
+function renderDecode(kind) {
+  const decoded = state.decodes[kind];
+  const pane = decodePanes[kind];
+  const select = byId(pane.select);
+  const result = decoded.result;
+  const protocols = result ? result.protocols || [] : [];
+  select.replaceChildren(el('option', { value: '' }, 'auto'), ...protocols.map((protocol) => el('option', { value: protocol }, protocol)));
+  select.value = protocols.includes(decoded.as) ? decoded.as : '';
+  decoded.nodes = new Map();
+  decoded.ids = new Map();
+  decoded.elements = new Map();
+
+  if (!result) {
+    byId(pane.summary).textContent = '';
+    byId(pane.reason).textContent = decoded.error ? `could not decode: ${decoded.error}` : '';
+    byId(pane.tree).replaceChildren();
+    return;
+  }
+
+  const chosen = (result.candidates || [])[0];
+  const others = (result.candidates || []).filter((candidate) => candidate.protocol !== result.protocol).map((candidate) => `${candidate.protocol} (${candidate.reason})`);
+  byId(pane.summary).textContent = result.summary || result.protocol;
+  byId(pane.reason).textContent = [chosen ? `${result.protocol}: ${chosen.reason}` : result.protocol, others.length ? `also: ${others.join(', ')}` : '', result.truncated ? `only the first ${result.length} of ${result.total} bytes` : '', result.error || ''].filter(Boolean).join('; ');
+  let count = 0;
+
+  // a node and its children; the roots and their children are open
+  const item = (node, depth) => {
+    const id = count++;
+    const hasChildren = (node.children || []).length > 0;
+    const children = hasChildren ? el('ul', { hidden: depth > 0 }, ...node.children.map((child) => item(child, depth + 1))) : null;
+    const twisty = hasChildren ? el('button', { type: 'button', class: 'twisty', ariaLabel: 'open or close' }, depth > 0 ? '▸' : '▾') : el('span', { class: 'leaf' }, '');
+    const row = el('div', { class: 'node', title: `${node.name}, bytes ${node.offset}–${node.offset + node.length}${node.mask ? `, mask 0x${node.mask.toString(16)}` : ''}` }, twisty, el('span', {}, nodeText(node)));
+
+    if (node.error) {
+      row.append(el('span', { class: 'node-error' }, ` [${node.error}]`));
+    }
+
+    if (hasChildren) {
+      twisty.addEventListener('click', (event) => {
+        event.stopPropagation();
+        children.hidden = !children.hidden;
+        twisty.textContent = children.hidden ? '▸' : '▾';
+      });
+    }
+
+    row.addEventListener('click', action(() => selectNode(kind, id, true)));
+    decoded.nodes.set(id, node);
+    decoded.ids.set(node, id);
+    decoded.elements.set(id, row);
+    return el('li', {}, row, ...(children ? [children] : []));
+  };
+
+  byId(pane.tree).replaceChildren(...(result.tree || []).map((node) => item(node, 0)));
+}
+
+// the pre whose spans the offsets of kind's tree count in: the payload, the body, or the bytes of a request target
+function bytesOf(kind) {
+  if (kind === 'message') {
+    return byId('payload');
+  }
+
+  const decoded = state.decodes.exchange;
+  return decoded && decoded.result && decoded.result.source === 'target' ? byId('exchange-decoded') : byId('exchange-body');
+}
+
+// select a node of the tree; isPaging loads the window with its first byte when the window shown has none of them
+async function selectNode(kind, id, isPaging) {
+  const decoded = state.decodes[kind];
+
+  if (decoded.selected !== null && decoded.elements.has(decoded.selected)) {
+    decoded.elements.get(decoded.selected).classList.remove('selected');
+  }
+
+  decoded.selected = id;
+  const row = decoded.elements.get(id);
+  const node = decoded.nodes.get(id);
+  row.classList.add('selected');
+
+  // open the branches above it
+  for (let list = row.parentElement.parentElement; list && list.id !== decodePanes[kind].tree; list = list.parentElement.parentElement) {
+    if (list.hidden) {
+      list.hidden = false;
+      list.parentElement.querySelector(':scope > .node > .twisty').textContent = '▾';
+    }
+  }
+
+  row.scrollIntoView({ block: 'nearest' });
+
+  if (isPaging && node.length > 0 && !markBytes(kind)) {
+    const start = Math.floor(node.offset / windowLength) * windowLength;
+
+    if (kind === 'message' && start !== state.offset) {
+      await selectMessage(state.messageId, start);
+    } else if (kind === 'exchange' && decoded.result.source !== 'target' && start !== state.exchangeOffset) {
+      await selectExchange(state.exchangeId, start);
+    }
+  }
+}
+
+// mark the bytes of the selected node in the window shown, false when none of them is in it
+function markBytes(kind) {
+  const decoded = state.decodes[kind];
+  const container = bytesOf(kind);
+  let isShown = false;
+
+  for (const span of container.querySelectorAll('.hl')) {
+    span.classList.remove('hl');
+  }
+
+  if (!decoded || decoded.selected === null || !decoded.nodes.has(decoded.selected)) {
+    return isShown;
+  }
+
+  const node = decoded.nodes.get(decoded.selected);
+
+  for (const span of container.querySelectorAll('[data-offset]')) {
+    const offset = Number(span.dataset.offset);
+
+    if (offset >= node.offset && offset < node.offset + node.length) {
+      span.classList.add('hl');
+      isShown = true;
+    }
+  }
+
+  return isShown;
+}
+
+// the deepest node with the byte at offset, the first one at each level (the flags before their bits' siblings, like Wireshark)
+function deepestNode(kind, offset) {
+  const decoded = state.decodes[kind];
+  const has = (node) => node.length > 0 && offset >= node.offset && offset < node.offset + node.length;
+  let found = null;
+  let nodes = decoded.result.tree || [];
+
+  for (let node = nodes.find(has); node; node = nodes.find(has)) {
+    found = decoded.ids.get(node);
+    nodes = node.children || [];
+  }
+
+  return found === undefined ? null : found;
+}
+
+function onByteClick(kind, event) {
+  const span = event.target.closest('[data-offset]');
+  const decoded = state.decodes[kind];
+
+  if (!span || !decoded || !decoded.result) {
+    return;
+  }
+
+  const id = deepestNode(kind, Number(span.dataset.offset));
+
+  if (id !== null) {
+    selectNode(kind, id, false).catch(showError);
+    markBytes(kind);
+  }
 }
 
 // the HTTP exchanges of the shown flow: request line, status, body lengths; a click shows the heads and a window of a body
@@ -648,6 +862,10 @@ async function selectExchange(id, offset) {
     byId('exchange-head').textContent = `No ${state.exchangeSide} yet.`;
     byId('exchange-body').textContent = '';
     byId('exchange-range').textContent = '';
+    byId('exchange-decoded').hidden = true;
+    byId('exchange-decoded-note').hidden = true;
+    state.decodes.exchange = { key: '', as: '', result: null, error: '', selected: null, nodes: new Map(), ids: new Map(), elements: new Map() };
+    renderDecode('exchange');
     return;
   }
 
@@ -683,10 +901,26 @@ async function selectExchange(id, offset) {
 
   if (state.view === 'hex') {
     const starts = messages.filter((grpc) => grpc.offset >= payload.offset && grpc.offset < payload.offset + payload.length).map((grpc) => `${grpc.offset} (${grpc.length} bytes)`);
-    byId('exchange-body').textContent = (starts.length ? `gRPC messages at body offsets ${starts.join(', ')}\n` : '') + hexDump(bytes, payload.offset);
+    byId('exchange-body').replaceChildren(starts.length ? `gRPC messages at body offsets ${starts.join(', ')}\n` : '', byteSpans(bytes, payload.offset, 'hex'));
+  } else if (messages.length) {
+    byId('exchange-body').textContent = grpcText(bytes, payload.offset, messages);
   } else {
-    byId('exchange-body').textContent = messages.length ? grpcText(bytes, payload.offset, messages) : escapeBytes(bytes);
+    byId('exchange-body').replaceChildren(byteSpans(bytes, payload.offset, 'text'));
   }
+
+  const isOriginal = showOriginal ? 'true' : 'false';
+  // a body still coming in is decoded again when an exchange event shows it grew
+  const decoded = await loadDecode('exchange', `${id} ${state.exchangeSide} ${isOriginal} ${message.body_length} ${message.state}`, `/exchanges/${id}/decode?side=${state.exchangeSide}&original=${isOriginal}`);
+  const data = decoded.result && decoded.result.source === 'target' ? decoded.result.data : null;
+  byId('exchange-decoded').hidden = !data;
+  byId('exchange-decoded-note').hidden = !data;
+
+  if (data) {
+    byId('exchange-decoded-note').textContent = `decoded from the request target, ${data.total} bytes:`;
+    byId('exchange-decoded').replaceChildren(byteSpans(bytesOfHex(data.hex), data.offset, state.view));
+  }
+
+  markBytes('exchange');
 }
 
 // held messages
@@ -854,7 +1088,18 @@ function start() {
     });
   }
 
-  byId('original').addEventListener('change', renderPayload);
+  byId('original').addEventListener('change', action(() => selectMessage(state.messageId, state.offset)));
+  byId('message-decode-as').addEventListener('change', action(() => {
+    state.decodes.message = null;
+    return selectMessage(state.messageId, state.offset);
+  }));
+  byId('exchange-decode-as').addEventListener('change', action(() => {
+    state.decodes.exchange = null;
+    return selectExchange(state.exchangeId, state.exchangeOffset);
+  }));
+  byId('payload').addEventListener('click', (event) => onByteClick('message', event));
+  byId('exchange-body').addEventListener('click', (event) => onByteClick('exchange', event));
+  byId('exchange-decoded').addEventListener('click', (event) => onByteClick('exchange', event));
 
   for (const radio of document.querySelectorAll('input[name="side"]')) {
     radio.addEventListener('change', action(() => {

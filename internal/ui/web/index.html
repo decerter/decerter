@@ -53,7 +53,21 @@
         <button id="exchange-next" type="button">next &rsaquo;</button>
       </div>
       <pre id="exchange-head" class="payload"></pre>
-      <pre id="exchange-body" class="payload"></pre>
+      <div class="decode-split">
+        <div id="exchange-decode" class="decode">
+          <div class="row">
+            <label>decode as <select id="exchange-decode-as" aria-label="decode the body as"><option value="">auto</option></select></label>
+          </div>
+          <p id="exchange-decode-summary" class="decode-summary"></p>
+          <p id="exchange-decode-reason" class="muted"></p>
+          <ul id="exchange-decode-tree" class="tree" aria-label="decode tree of the body"></ul>
+        </div>
+        <div class="decode-bytes">
+          <p id="exchange-decoded-note" class="muted" hidden></p>
+          <pre id="exchange-decoded" class="payload" hidden></pre>
+          <pre id="exchange-body" class="payload"></pre>
+        </div>
+      </div>
     </div>
     <div id="message-view" hidden>
       <div class="row toolbar">
@@ -65,7 +79,19 @@
         <span id="window-range" class="muted"></span>
         <button id="next-window" type="button">next &rsaquo;</button>
       </div>
-      <pre id="payload" class="payload"></pre>
+      <div class="decode-split">
+        <div id="message-decode" class="decode">
+          <div class="row">
+            <label>decode as <select id="message-decode-as" aria-label="decode the payload as"><option value="">auto</option></select></label>
+          </div>
+          <p id="message-decode-summary" class="decode-summary"></p>
+          <p id="message-decode-reason" class="muted"></p>
+          <ul id="message-decode-tree" class="tree" aria-label="decode tree of the payload"></ul>
+        </div>
+        <div class="decode-bytes">
+          <pre id="payload" class="payload"></pre>
+        </div>
+      </div>
     </div>
   </section>
 
