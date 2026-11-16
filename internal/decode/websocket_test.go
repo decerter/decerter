@@ -192,6 +192,20 @@ func TestWebSocketNegative(state *testing.T) {
 		}
 	}
 
+	// a binary message is another protocol only from sniffThreshold on, protobuf from its clean score: a CBOR array is no RTP, a protobuf message of 64 bytes
+	// no NTP
+	for name, testCase := range map[string]struct {
+		payload  []byte
+		expected string
+	}{
+		"cbor":     {payload: join([]byte{0x84}, bytes.Repeat(join([]byte{0x66}, []byte("abcdef")), 4)), expected: "WebSocket, 1 frame: Binary 29 bytes"},
+		"protobuf": {payload: bytes.Repeat(join([]byte{0x0a, 0x0e}, bytes.Repeat([]byte{0xff}, 14)), 4), expected: "WebSocket, 1 frame: Binary 64 bytes (protobuf)"},
+	} {
+		if result := mustDecode(state, websocketFrameOf(true, 0, binaryOpcode, nil, testCase.payload), websocketDown, ""); result.Summary != testCase.expected {
+			state.Errorf("Test of decode.Decode failed, the %s message should be %q, summary: %q", name, testCase.expected, result.Summary)
+		}
+	}
+
 	// an orphan continuation and a message that never ended leave nothing in front of the next reassembled message, its pieces are its own frames
 	for name, data := range map[string][]byte{
 		"orphan":     join(websocketFrameOf(true, 0, continuationOpcode, nil, []byte("orphan")), websocketFrameOf(false, 0, textOpcode, nil, []byte("hel")), websocketFrameOf(true, 0, continuationOpcode, nil, []byte("lo"))),
@@ -217,6 +231,7 @@ func FuzzWebSocket(fuzz *testing.F) {
 	fuzz.Add(websocketFrameOf(true, 0, binaryOpcode, testMask, bytes.Repeat([]byte{1}, 300)))
 	fuzz.Add(join(websocketFrameOf(true, 0, continuationOpcode, nil, []byte("orphan")), websocketFrameOf(false, 0, textOpcode, nil, []byte("hel")), websocketFrameOf(true, 0, continuationOpcode, nil, []byte("lo"))))
 	fuzz.Add(bytes.Repeat(websocketFrameOf(true, rsv1Bit, binaryOpcode, nil, deflated(fuzz, make([]byte, 1<<16))), 3))
+	fuzz.Add(websocketFrameOf(true, 0, binaryOpcode, nil, join([]byte{0x84}, bytes.Repeat(join([]byte{0x66}, []byte("abcdef")), 4))))
 
 	fuzz.Fuzz(func(state *testing.T, data []byte) {
 		for _, context := range []Context{websocketUp, websocketDown, websocketDeflate, websocketBody} {

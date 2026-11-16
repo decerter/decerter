@@ -104,7 +104,7 @@ A context or port candidate needs a sniff score above 0, so a port that carries 
   - STUN: the header, or a ChannelData message with its padding
 - One loop walks the bytes with `frame` and decodes each whole PDU as a root, so several PDUs in one read become several roots. The protocol's state goes along from PDU to PDU: the MQTT version of CONNECT, the place in a MySQL result set, mail data after DATA.
 - A PDU that goes on past the bytes is decoded as far as it goes and gets an error. In one read: "the message continues in the next read: 32 of its 102 bytes are here". In a joined stream: "the stream ends inside the message: …".
-- After STARTTLS (SMTP, IMAP), STLS (POP3), an SSLRequest the server took (PostgreSQL), an SSL request (MySQL) or the StartTLS extended operation (LDAP), the rest of the stream, once a TLS handshake record starts, is one `<protocol>.tls` root with the TLS records in it. decerter does not decrypt TLS that starts after plaintext.
+- After STARTTLS (SMTP, IMAP), STLS (POP3), an SSLRequest the server took (PostgreSQL, also after it refused a GSSENCRequest), an SSL request (MySQL; on the server's side a greeting that offers SSL) or the StartTLS extended operation (LDAP), the rest of the stream, once a TLS handshake record starts, is one `<protocol>.tls` root with the TLS records in it. decerter does not decrypt TLS that starts after plaintext.
 
 ## Limits
 Every decode reads untrusted bytes, so each one is bounded:
@@ -113,6 +113,7 @@ Every decode reads untrusted bytes, so each one is bounded:
 - One string of a node (name, label, value or error) is at most 8 KiB; a longer one is cut before an escape it would split and ends with `...`.
 - A value written as hex or base64 (a signature, unknown rdata) shows its first 256 bytes, but the node still spans the whole field. The summary is at most 32 lines (one per PDU), then `; N more`, and each line at most 512 bytes, cut the same way.
 - DNS names: at most 32 compression pointers per name (a pointer loop is an error, not a hang) and 255 bytes on the wire. Reserved label types are an error.
+- A size the traffic gives as text (an IMAP literal `{n}`, a RESP bulk length) or as a number is checked against the bytes left before any offset is computed from it: a size past them is a PDU cut short.
 - A panic in a decoder or a sniff function is recovered. It gives the raw tree and an `error`, and decerter logs a warning.
 - Every string of the tree is escaped: printable ASCII stays as it is, and every other byte becomes `\xNN`. A DNS label also writes a dot, a space and a backslash inside the label as `\x2e`, `\x20` and `\\`. Text from the traffic, such as a TXT string, is escaped like the payloads: `\\`, `\n`, `\r`, `\t` and `\xNN`. `decerter mcp` escapes each string again and turns a `<` that would open or close its marker into `\x3c`.
 
@@ -171,7 +172,7 @@ The same decoder also takes TLS records as they go over tcp (a flow to port 443 
 ## WebSocket
 - The reads of a tcp or tls flow after an HTTP/1.1 `Upgrade: websocket` (the flow's last exchange is a 101 whose request came before the message; the read of the 101 can carry the first frames, its head is a `websocket.http_head` node), and the bodies of an HTTP/2 extended CONNECT whose `:protocol` is `websocket`.
 - Each frame: FIN, RSV1-3, opcode, mask, payload length (with the 16- or 64-bit extended length), masking key, and the payload unmasked; close frames with their status code and reason, ping and pong.
-- A text message as text; a binary one as the protocol its bytes sniff as (protobuf counts from its clean score), else hex. A message in several frames is put together into a `websocket.message` root after its last frame, control frames between them stay where they are. A continuation without its start, and what a message that never ended left, are not part of the next message.
+- A text message as text; a binary one as the protocol its bytes sniff as (protobuf counts from its clean score, every other protocol needs the 50 of sniffing alone, so a msgpack or CBOR message is no RTP and a protobuf message no NTP), else hex. A message in several frames is put together into a `websocket.message` root after its last frame, control frames between them stay where they are. A continuation without its start, and what a message that never ended left, are not part of the next message.
 - permessage-deflate (when the 101's `Sec-WebSocket-Extensions` has it): a message with RSV1 is inflated alone, at most 1 MiB; one that uses the window of earlier messages (context takeover) can't be inflated alone and gets an error that says so.
 - Errors for what RFC 6455 forbids: a client frame without a mask or a server frame with one, reserved bits without an extension, reserved opcodes, a fragmented or long control frame, a continuation without its start, text that is not UTF-8.
 - A frame that goes on in the next read says how many of its bytes are there; frames are not joined across reads.
@@ -224,12 +225,13 @@ The same decoder also takes TLS records as they go over tcp (a flow to port 443 
 ## SMTP, IMAP and POP3
 - SMTP (RFC 5321) on tcp 25 and 587 and tls 465 and 587: commands with their parameters, replies of several lines as one PDU, the mail data after DATA up to its lone dot with its header fields (RFC 5322), and BDAT chunks (RFC 3030).
 - IMAP (RFC 9051) on tcp 143 and tls 993: tagged commands, untagged and tagged responses and continuations, with the literals `{n}` and `{n+}` kept inside their line.
-- POP3 (RFC 1939) on tcp 110 and tls 995: commands, `+OK` and `-ERR`, and the responses of several lines up to their dot.
+- POP3 (RFC 1939) on tcp 110 and tls 995: commands, `+OK` and `-ERR`, and the responses of several lines up to their dot. A `+OK` line that ends a read is a whole response (a greeting, the answer to USER, PASS, DELE or QUIT); lines after it without their dot go on in the next read.
+- Sniffing knows the greetings and the common commands. Any other line of text (an SMTP MAIL, RCPT or DATA, mail data, an IMAP tagged response, a `+` continuation, an APPEND) sniffs as 10: below the 50 that sniffing alone needs, enough for the port to take it.
 - STARTTLS (RFC 3207, RFC 9051) and STLS (RFC 2595): the TLS records after them are a `smtp.tls`, `imap.tls` or `pop.tls` root.
 
 ## PostgreSQL
 - The frontend/backend protocol 3.0 and 3.2 on tcp 5432 and tls 5432 (TLS ALPN `postgresql` of the direct TLS of PostgreSQL 17).
-- The untyped first messages: StartupMessage with its parameters, SSLRequest, GSSENCRequest, CancelRequest. The server's one-byte answer: `S` (TLS follows), `G` (GSSAPI encryption follows, shown as encrypted data) or `N`.
+- The untyped first messages: StartupMessage with its parameters, SSLRequest, GSSENCRequest, CancelRequest. The server's one-byte answer: `S` (TLS follows), `G` (GSSAPI encryption follows, shown as encrypted data) or `N`. After an `N` another answer may follow, since libpq asks for GSSAPI encryption first and then for SSL.
 - The typed messages of both sides:
   - Query, Parse, Bind (formats and parameter values, NULL), Execute, Describe, Close, Sync, Flush, Terminate, the password and SASL messages, copy
   - Authentication (the SASL mechanisms, the MD5 salt), BackendKeyData, ParameterStatus, ReadyForQuery with its status
@@ -242,9 +244,9 @@ The same decoder also takes TLS records as they go over tcp (a flow to port 443 
   - the 3-byte length and the sequence id
   - the initial handshake v10 with version, thread id, salt, capabilities and auth plugin
   - the handshake response 41 with user, auth response, schema, plugin and connection attributes
-  - the SSL request (TLS follows), and the command packets (Query, Use Database, Prepare, Execute, Close, Ping, Quit and the others by name)
+  - the SSL request (TLS follows on both sides: the server's TLS records come after its greeting when it offers SSL), and the command packets (Query, Use Database, Prepare, Execute, Close, Ping, Quit and the others by name)
   - OK, ERR with its SQL state, EOF, auth switch and auth more data, LOCAL INFILE
-- Text result sets: the column count, column definitions 41, and the rows with their length-encoded values, with or without EOF packets (CLIENT_DEPRECATE_EOF). The stream keeps its place in the result set from packet to packet.
+- Text result sets: the column count, column definitions 41, and the rows with their length-encoded values, with or without EOF packets (CLIENT_DEPRECATE_EOF). The stream keeps its place in the result set from packet to packet. Inside the rows a value `def` is a value; outside them a packet that starts with the catalog `def` is a column definition.
 - A read decoded alone has no stream before it. A row whose result set started in an earlier read isn't known as a row. It is shown as the packet its first byte looks like: a response, or auth more data for 0x01. The stream view has the whole result set.
 
 ## ASN.1 BER, LDAP and Kerberos
@@ -254,6 +256,7 @@ The same decoder also takes TLS records as they go over tcp (a flow to port 443 
   - contents nested 24 deep and 10000 elements at most
   - universal types with their values: BOOLEAN, INTEGER of any size, ENUMERATED, BIT STRING, OCTET STRING, NULL, OBJECT IDENTIFIER in dotted form, the strings and times
   - other classes as `[APPLICATION n]`, `[n]` and `[PRIVATE n]`
+  - an element whose identifier or length is wrong has an error and no contents; an indefinite element with a child cut short is a PDU that goes on (or ends with the stream), one with a broken child is no element
 - `as=ber` shows any bytes as this generic TLV tree; sniffing gives it 25 at most, so it never wins alone.
 - LDAP (RFC 4511) on tcp 389 and 3268, tls 636 and 3269, and CLDAP on udp 389:
   - the LDAPMessage with its message ID, the operation by name and the controls

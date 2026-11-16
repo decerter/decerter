@@ -114,7 +114,7 @@ func (tree *Tree) addBitsAt(parent *node, place placement, name string, label st
 
 // the fields of data from offset to end under parent
 func newCursor(tree *Tree, parent *node, data []byte, offset int, end int, place placement) (reader *cursor) {
-	reader = &cursor{tree: tree, parent: parent, data: data, offset: offset, end: min(end, len(data)), place: place, isShort: false}
+	reader = &cursor{tree: tree, parent: parent, data: data, offset: offset, end: min(end, len(data)), place: place, isShort: false, last: tree.sink}
 	return
 }
 
@@ -155,8 +155,10 @@ func (reader *cursor) left() (count int) {
 	return
 }
 
+// a node of the cursor's fields; a decoder that adds bits under a field takes it from last, never from its parent's children (the sink has none)
 func (reader *cursor) add(name string, label string, value string, start int, length int) (child *node) {
 	child = reader.tree.addAt(reader.parent, reader.place, name, label, value, start, length)
+	reader.last = child
 	return
 }
 
@@ -292,15 +294,22 @@ func isText(data []byte) (isReadable bool) {
 	return
 }
 
-// the decoder of data among the registry but except by its sniff score from minimum on, the best one; its roots go under parent placed by place
-// protocol is empty when none scores enough; the nested context is a datagram of the outer one's direction
-func decodeNested(tree *Tree, parent *node, data []byte, place placement, context Context, except string, minimum int) (protocol string, summary []string) {
+// the decoder of data among the registry but except by its sniff score, the best one; its roots go under parent placed by place
+// a protocol needs sniffThreshold, protobuf only protobufMinimum (a WebSocket binary message is protobuf more often than not); protocol is empty when
+// none scores enough; the nested context is a datagram of the outer one's direction
+func decodeNested(tree *Tree, parent *node, data []byte, place placement, context Context, except string, protobufMinimum int) (protocol string, summary []string) {
 	nested := Context{Transport: DatagramTransport, Layer: "", Direction: context.Direction, ServerPort: 0, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false, Joined: false}
 	best, bestScore := decoder{}, 0
 
 	for _, known := range registry {
 		if (known.Protocol == except) || (known.Protocol == websocketProtocol) {
 			continue
+		}
+
+		minimum := sniffThreshold
+
+		if known.Protocol == protobufProtocol {
+			minimum = protobufMinimum
 		}
 
 		if score := known.sniff(data, nested); (score >= minimum) && (score > bestScore) {

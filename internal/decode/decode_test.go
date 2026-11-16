@@ -299,3 +299,36 @@ func TestDecodeBoundsPositive(state *testing.T) {
 		}
 	}
 }
+
+// Test if the decoders that add bits under a field take the field's own node at every fill level of the tree: none fails, and every bit node of an MQTT
+// CONNECT, a DHCP message and a STUN message is under its field, never under another node (the sink has no children to take one from).
+func TestSinkFieldsPositive(state *testing.T) {
+	connect := mqttPacket(0x10, join(mqttText("MQTT"), []byte{4, 0xc2}, be16(60), mqttText("client"), mqttText("user"), mqttText("pass")))
+	dhcp := dhcpPacket(1, [4]byte{}, []byte{53, 1, 1, 255})
+	stun := join(be16(0x0001), be16(0), be32(stunCookie), bytes.Repeat([]byte{7}, 12))
+	parents := map[string]string{"mqtt.conflag.uname": "mqtt.conflags", "mqtt.conflag.qos": "mqtt.conflags", "dhcp.flags.bc": "dhcp.flags", "stun.type.method": "stun.type", "stun.type.class": "stun.type"}
+
+	for left := range 40 {
+		for name, decode := range map[string]func(tree *Tree){
+			"mqtt": func(tree *Tree) {
+				mqttPDU(tree, connect, 0, &streamState{context: streamContext(1883, v1.UpDirection, false), index: 0, isTLS: false, mode: "", waiting: 0, columns: 0, sequence: 0, command: 0})
+			},
+			"dhcp": func(tree *Tree) { dhcpDecode(tree, dhcp, dhcpUDP) },
+			"stun": func(tree *Tree) {
+				stunPDU(tree, stun, 0, &streamState{context: otherUDP, index: 0, isTLS: false, mode: "", waiting: 0, columns: 0, sequence: 0, command: 0})
+			},
+		} {
+			tree := newTree()
+			tree.count = MaxNodes - left
+			decode(tree)
+
+			for _, root := range tree.view() {
+				for child, parent := range parents {
+					if found := findNode([]v1.DecodeNode{root}, child); (found != nil) && (findNode(findAll([]v1.DecodeNode{root}, parent), child) == nil) {
+						state.Errorf("Test of the %s fields failed, %d nodes left: %s should be under %s", name, left, child, parent)
+					}
+				}
+			}
+		}
+	}
+}

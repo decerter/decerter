@@ -121,12 +121,13 @@ func respValueLength(data []byte, offset int, depth int) (length int) {
 	case '$', '!', '=':
 		size, err := strconv.Atoi(header)
 
+		// a size from the traffic is checked against the bytes left before it is added to an offset
 		switch {
 		case err != nil:
 			length = -1
 		case size < 0:
 			length = line
-		case offset+line+size+2 > len(data):
+		case size > len(data)-offset-line-2:
 			length = 0
 		default:
 			length = line + size + 2
@@ -264,7 +265,7 @@ func respValue(tree *Tree, parent *node, data []byte, offset int, depth int) (en
 			return
 		}
 
-		body := data[offset+line : min(len(data), offset+line+size)]
+		body := data[offset+line : offset+line+min(size, len(data)-offset-line)]
 
 		if len(body) < size {
 			tree.fail(valueNode, fmt.Sprintf("the string goes on past the bytes: %d of its %d bytes are there", len(body), size))
@@ -283,7 +284,7 @@ func respValue(tree *Tree, parent *node, data []byte, offset int, depth int) (en
 			tree.setLabel(dataNode, "Data ("+output.Escape(body[:3])+")")
 		}
 
-		if (offset+line+size+2 <= len(data)) && !bytes.Equal(data[offset+line+size:offset+line+size+2], []byte("\r\n")) {
+		if (size <= len(data)-offset-line-2) && !bytes.Equal(data[offset+line+size:offset+line+size+2], []byte("\r\n")) {
 			tree.fail(valueNode, "the string does not end with CRLF")
 		}
 

@@ -113,7 +113,7 @@ func dhcpDecode(tree *Tree, data []byte, context Context) {
 	flags, ok := reader.number("dhcp.flags", "Bootp flags", 2, func(value uint32) (text string) { text = fmt.Sprintf("0x%04x", value); return })
 
 	if ok {
-		flagsNode := root.children[len(root.children)-1]
+		flagsNode := reader.last
 		tree.addBits(flagsNode, "dhcp.flags.bc", "Broadcast flag", yesNo(flags&0x8000 != 0), 10, 2, 0x8000)
 	}
 

@@ -240,6 +240,64 @@ func TestMailNegative(state *testing.T) {
 	}
 }
 
+// Test if decode.Decode returns with the expected output for the second review of the text protocols: an IMAP literal and RESP lengths near MaxInt64 are
+// cut short, not a panic; a lone +OK of a read is a whole POP3 line; SMTP and IMAP lines without a word the sniff knows are taken by their port.
+func TestTextReviewPositive(state *testing.T) {
+	huge := []struct {
+		data     []byte
+		port     uint16
+		protocol string
+	}{
+		{data: []byte("a1 APPEND inbox {9223372036854775807}\r\nabc\r\n"), port: 143, protocol: imapProtocol},
+		{data: []byte("* 1 FETCH (BODY[] {9223372036854775800}\r\nabc)\r\n"), port: 143, protocol: imapProtocol},
+		{data: []byte("*2\r\n$9223372036854775780\r\nabc\r\n"), port: 6379, protocol: respProtocol},
+		{data: []byte("$9223372036854775800\r\nabc\r\n"), port: 6379, protocol: respProtocol},
+	}
+
+	for _, testCase := range huge {
+		for _, isJoined := range []bool{false, true} {
+			for _, as := range []string{"", testCase.protocol} {
+				result := mustDecode(state, testCase.data, streamContext(testCase.port, v1.UpDirection, isJoined), as)
+				errors := strings.Join(errorsOf(result.Tree), "; ")
+				isShort := strings.Contains(errors, "inside the") || strings.Contains(errors, "continues in the next read") || strings.Contains(errors, "goes on past the bytes")
+
+				if (result.Error != "") || (result.Protocol != testCase.protocol) || !isShort {
+					state.Errorf("Test of the huge sizes failed, %q should be %s cut short, protocol: %s, error: %s, errors: %v", testCase.data, testCase.protocol, result.Protocol, result.Error, errorsOf(result.Tree))
+				}
+			}
+		}
+	}
+
+	for _, line := range []string{"+OK POP3 server ready\r\n", "+OK\r\n", "+OK bye\r\n"} {
+		if result := mustDecode(state, []byte(line), streamContext(110, v1.DownDirection, false), ""); (result.Protocol != popProtocol) || (len(errorsOf(result.Tree)) != 0) {
+			state.Errorf("Test of POP3 failed, a lone %q should be a whole line, protocol: %s, errors: %v", line, result.Protocol, errorsOf(result.Tree))
+		}
+	}
+
+	// lines after the +OK without their dot are a response that goes on
+	if result := mustDecode(state, []byte("+OK 2 messages\r\n1 120\r\n"), streamContext(110, v1.DownDirection, false), ""); !strings.Contains(strings.Join(errorsOf(result.Tree), "; "), "continues in the next read") {
+		state.Errorf("Test of POP3 failed, a listing without its dot should go on in the next read, errors: %v", errorsOf(result.Tree))
+	}
+
+	for _, testCase := range []struct {
+		data      string
+		port      uint16
+		direction v1.Direction
+		protocol  string
+	}{
+		{data: "MAIL FROM:<a@example.com>\r\n", port: 25, direction: v1.UpDirection, protocol: smtpProtocol},
+		{data: "QUIT\r\n", port: 587, direction: v1.UpDirection, protocol: smtpProtocol},
+		{data: "Subject: hello\r\n\r\nbody\r\n", port: 25, direction: v1.UpDirection, protocol: smtpProtocol},
+		{data: "a1 OK LOGIN completed\r\n", port: 143, direction: v1.DownDirection, protocol: imapProtocol},
+		{data: "+ ready for literal data\r\n", port: 143, direction: v1.DownDirection, protocol: imapProtocol},
+		{data: "a2 APPEND inbox {3}\r\nabc\r\n", port: 143, direction: v1.UpDirection, protocol: imapProtocol},
+	} {
+		if result := mustDecode(state, []byte(testCase.data), streamContext(testCase.port, testCase.direction, false), ""); (result.Protocol != testCase.protocol) || (result.Candidates[0].Basis != v1.PortDecodeBasis) {
+			state.Errorf("Test of the line sniffs failed, %q on port %d should be %s by the port, candidates: %+v", testCase.data, testCase.port, testCase.protocol, result.Candidates)
+		}
+	}
+}
+
 // Fuzz if decode.Decode never fails on any bytes as RESP, MQTT, SMTP, IMAP and POP3, over a read and a joined stream each way.
 func FuzzText(fuzz *testing.F) {
 	fuzz.Add(join(respCommand("SET", "k", "v"), []byte("+OK\r\n%1\r\n+a\r\n*1\r\n$1\r\nb\r\n")))
@@ -247,11 +305,14 @@ func FuzzText(fuzz *testing.F) {
 	fuzz.Add([]byte("EHLO a\r\nDATA\r\nx: y\r\n\r\nz\r\n.\r\nBDAT 3 LAST\r\nabcQUIT\r\n"))
 	fuzz.Add([]byte("* 1 FETCH (BODY[] {3}\r\nabc)\r\na OK\r\n"))
 	fuzz.Add([]byte("+OK\r\na\r\n.\r\n-ERR x\r\n"))
+	fuzz.Add([]byte("a1 APPEND inbox {9223372036854775807}\r\nabc\r\n"))
+	fuzz.Add([]byte("*2\r\n$9223372036854775780\r\nabc\r\n"))
+	fuzz.Add(mqttPacket(0x10, join(mqttText("MQTT"), []byte{4, 0xc2}, be16(60), mqttText("client"), mqttText("user"), mqttText("pass"))))
 	contexts := []Context{}
 
 	for _, direction := range []v1.Direction{v1.UpDirection, v1.DownDirection} {
 		for _, isJoined := range []bool{false, true} {
-			contexts = append(contexts, streamContext(1883, direction, isJoined), streamContext(25, direction, isJoined))
+			contexts = append(contexts, streamContext(1883, direction, isJoined), streamContext(25, direction, isJoined), streamContext(143, direction, isJoined), streamContext(110, direction, isJoined))
 		}
 	}
 

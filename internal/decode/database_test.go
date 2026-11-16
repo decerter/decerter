@@ -235,12 +235,53 @@ func TestMySQLNegative(state *testing.T) {
 	}
 }
 
+// Test if decode.Decode returns with the expected output for the second review of the databases: a MySQL row whose first value is "def" is a row and the
+// EOF after it ends the result set, a MySQL server that offers SSL goes on in TLS after its greeting, and a PostgreSQL server that refuses GSSAPI and
+// takes SSL goes on in TLS.
+func TestDatabaseReviewPositive(state *testing.T) {
+	server := join(mysqlPacket(1, []byte{2}), mysqlColumnPacket(2, "catalog"), mysqlColumnPacket(3, "name"), mysqlPacket(4, []byte{0xfe, 0, 0, 0x22, 0}), mysqlPacket(5, join(mysqlText("def"), mysqlText("x"))),
+		mysqlPacket(6, []byte{0xfe, 0, 0, 0x22, 0}), mysqlPacket(1, []byte{0, 0, 0, 2, 0, 0, 0}))
+	result := mustDecode(state, server, streamContext(3306, v1.DownDirection, true), "")
+	expected := `MySQL result set, 2 columns; MySQL column shop.items.catalog VAR_STRING; MySQL column shop.items.name VAR_STRING; MySQL EOF; MySQL row "def" "x"; ` +
+		`MySQL EOF, the end of the result set; MySQL OK, 0 rows`
+
+	if (result.Summary != expected) || (len(errorsOf(result.Tree)) != 0) {
+		state.Errorf("Test of MySQL failed, the row \"def\" should be a row, summary: %s, errors: %v", result.Summary, errorsOf(result.Tree))
+	}
+
+	hello := tlsRecord(22, 0x0303, handshakeMessage(2, make([]byte, 40)))
+	capabilities := uint32(0x000fa68d | mysqlSSL | mysqlSecure)
+	greeting := mysqlPacket(0, join([]byte{10}, []byte("8.4.3\x00"), little32(77), []byte("abcdefgh"), []byte{0}, little16(uint16(capabilities)), []byte{255}, little16(2), little16(uint16(capabilities>>16)), []byte{21}, make([]byte, 10), []byte("ijklmnopqrst\x00")))
+
+	if result = mustDecode(state, join(greeting, hello), streamContext(3306, v1.DownDirection, true), ""); (len(result.Tree) != 2) || (result.Tree[1].Name != "mysql.tls") || !strings.HasSuffix(result.Summary, "; TLS") {
+		state.Errorf("Test of MySQL failed, the server's TLS should follow a greeting that offers SSL, result: %+v", result)
+	}
+
+	// a packet after the greeting: the stream stays MySQL, an auth more data too
+	if result = mustDecode(state, join(greeting, mysqlPacket(2, []byte{1, 3})), streamContext(3306, v1.DownDirection, true), ""); !strings.HasSuffix(result.Summary, "; MySQL auth more data") {
+		state.Errorf("Test of MySQL failed, a packet after the greeting should stay MySQL, summary: %s", result.Summary)
+	}
+
+	if result = mustDecode(state, join([]byte("NS"), hello), streamContext(5432, v1.DownDirection, true), ""); (len(result.Tree) != 3) || (result.Tree[2].Name != "pgsql.tls") ||
+		(result.Summary != "PostgreSQL encryption refused; PostgreSQL encryption SSL accepted; TLS") {
+		state.Errorf("Test of PostgreSQL failed, the S after a refused GSSENCRequest should be followed by TLS, summary: %s", result.Summary)
+	}
+
+	// after a typed message an S is a ParameterStatus again
+	if result = mustDecode(state, join([]byte("N"), []byte{'Z', 0, 0, 0, 5, 'I'}, []byte{'S', 0, 0, 0, 8, 'a', 0, 'b', 0}), streamContext(5432, v1.DownDirection, true), ""); !strings.HasSuffix(result.Summary, `; PostgreSQL Parameter status "a"="b"`) {
+		state.Errorf("Test of PostgreSQL failed, an S after a typed message should be a ParameterStatus, summary: %s", result.Summary)
+	}
+}
+
 // Fuzz if decode.Decode never fails on any bytes as PostgreSQL and MySQL, over a read and a joined stream each way.
 func FuzzDatabase(fuzz *testing.F) {
 	fuzz.Add(join(be32(8), be32(postgresSSLCode), []byte("S"), []byte{'Q', 0, 0, 0, 9, 'a', 'b', 'c', 0}))
 	fuzz.Add(join([]byte{'D', 0, 0, 0, 16}, be16(2), be32(2), []byte("ab"), be32(0xffffffff), []byte{'E', 0, 0, 0, 9, 'S', 'x', 0, 0}))
 	fuzz.Add(join(mysqlPacket(0, join([]byte{10}, []byte("8.0\x00"), make([]byte, 40))), mysqlPacket(1, []byte{1}), mysqlColumnPacket(2, "a"), mysqlPacket(3, []byte{0xfe, 0, 0, 0, 0}), mysqlPacket(4, []byte{1, 'x'})))
 	fuzz.Add(mysqlPacket(1, join(little32(0x3fffff), little32(0), []byte{0}, make([]byte, 23), []byte("u\x00"), []byte{0}, []byte("d\x00p\x00"), []byte{4, 1, 'a', 1, 'b'})))
+	fuzz.Add(join(mysqlPacket(1, []byte{1}), mysqlColumnPacket(2, "a"), mysqlPacket(3, []byte{0xfe, 0, 0, 0, 0}), mysqlPacket(4, mysqlText("def")), mysqlPacket(5, []byte{0xfe, 0, 0, 0, 0})))
+	fuzz.Add(join(mysqlPacket(0, join([]byte{10}, []byte("8.0\x00"), make([]byte, 9), []byte{0, 0x08}, make([]byte, 30))), tlsRecord(22, 0x0303, handshakeMessage(2, make([]byte, 40)))))
+	fuzz.Add(join([]byte("NS"), tlsRecord(22, 0x0303, handshakeMessage(2, make([]byte, 40)))))
 	contexts := []Context{}
 
 	for _, direction := range []v1.Direction{v1.UpDirection, v1.DownDirection} {

@@ -33,6 +33,8 @@ const (
 	// the header fields of a mail the DATA node shows, and the lines of an IMAP or SMTP PDU it shows one by one
 	maxMailHeaders int = 32
 	maxLines       int = 256
+	// the score of a line of text a line protocol has no word for: above 0 so its port takes it, far below sniffThreshold
+	textLineScore int = 10
 )
 
 func init() {
@@ -102,7 +104,8 @@ func firstLine(data []byte) (line string, isLine bool) {
 	return
 }
 
-// a server greeting 220 that names SMTP, or a client's EHLO or HELO, is certain; a reply line only possible
+// a server greeting 220 that names SMTP, or a client's EHLO or HELO, is certain; a reply line only possible; any other line of text a little, so the
+// port takes a command or mail data of a read alone
 func smtpSniff(data []byte, context Context) (score int) {
 	line, isLine := firstLine(data)
 
@@ -119,6 +122,8 @@ func smtpSniff(data []byte, context Context) (score int) {
 		score = 90
 	case isReplyLine(line):
 		score = 20
+	case isText([]byte(line)):
+		score = textLineScore
 	}
 
 	return
@@ -334,7 +339,8 @@ func mailData(tree *Tree, root *node, data []byte, start int, end int) {
 	}
 }
 
-// an untagged OK greeting that names IMAP is certain; a tagged command possible
+// an untagged OK greeting that names IMAP is certain; a tagged command possible; any other line of text (a tagged response, a continuation, another
+// command) a little, so the port takes it
 func imapSniff(data []byte, context Context) (score int) {
 	line, isLine := firstLine(data)
 
@@ -352,6 +358,8 @@ func imapSniff(data []byte, context Context) (score int) {
 		score = 40
 	case strings.HasPrefix(upper, "* "):
 		score = 20
+	case isText([]byte(line)):
+		score = textLineScore
 	}
 
 	return
@@ -376,7 +384,8 @@ func imapFrame(data []byte, state *streamState) (length int) {
 			return
 		}
 
-		if offset+size > len(data) {
+		// a size from the traffic is checked against the bytes left before it is added to an offset
+		if size > len(data)-offset {
 			return
 		}
 
@@ -451,7 +460,7 @@ func imapPDU(tree *Tree, data []byte, start int, state *streamState) (root *node
 		offset += line
 
 		if isLiteral {
-			literal := data[offset:min(len(data), offset+size)]
+			literal := data[offset : offset+min(size, len(data)-offset)]
 			tree.add(root, "imap.literal", fmt.Sprintf("Literal of %d bytes", size), textValue(literal), offset, len(literal))
 			offset += len(literal)
 		}
@@ -479,7 +488,7 @@ func popSniff(data []byte, context Context) (score int) {
 	switch {
 	case strings.HasPrefix(upper, "+OK ") && (strings.Contains(upper, "POP") || strings.Contains(upper, "READY")):
 		score = 90
-	case strings.HasPrefix(upper, "+OK ") || strings.HasPrefix(upper, "-ERR"):
+	case (upper == "+OK") || strings.HasPrefix(upper, "+OK ") || strings.HasPrefix(upper, "-ERR"):
 		score = 40
 	case slices.Contains([]string{"USER", "PASS", "STAT", "LIST", "RETR", "DELE", "UIDL", "TOP", "CAPA", "STLS", "APOP", "QUIT", "NOOP", "RSET"}, command):
 		score = 30
@@ -522,8 +531,9 @@ func popFrame(data []byte, state *streamState) (length int) {
 		offset += line
 	}
 
-	// the stream ends after the line: it is a line alone
-	if state.context.Joined {
+	// the stream ends after the line, or the read ends with it (a greeting, the answer to USER, PASS, DELE or QUIT): it is a line alone; lines after it
+	// without their dot go on in the next read
+	if state.context.Joined || (first == len(data)) {
 		length = first
 	}
 

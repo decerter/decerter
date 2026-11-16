@@ -24,8 +24,9 @@ const (
 	postgresCancelCode uint32 = 80877102
 	// a message longer than this is no PostgreSQL message in practice (the server's limit is 1 GiB)
 	postgresMaxLength int = 1 << 30
-	// streamState.mode after an accepted GSSENCRequest: the rest is GSSAPI wrapped
-	gssMode string = "gss"
+	// streamState.mode after an accepted GSSENCRequest: the rest is GSSAPI wrapped; after a refused one: the answer to an SSLRequest may follow
+	gssMode     string = "gss"
+	refusedMode string = "refused"
 	// the bytes of a query the summary shows
 	postgresSummaryQuery int = 80
 )
@@ -110,8 +111,14 @@ func postgresSniff(data []byte, context Context) (score int) {
 		return
 	}
 
-	// the server's answer to an SSLRequest, alone or before its TLS records
-	if (context.Direction == v1.DownDirection) && ((data[0] == 'S') || (data[0] == 'G')) && isTLSStart(data[1:]) {
+	// the server's answer to an SSLRequest, alone or before its TLS records, after the refusals of a GSSENCRequest
+	answers := data
+
+	for (len(answers) > 1) && (answers[0] == 'N') && (answers[1] != 0) {
+		answers = answers[1:]
+	}
+
+	if (context.Direction == v1.DownDirection) && ((answers[0] == 'S') || (answers[0] == 'G')) && isTLSStart(answers[1:]) {
 		score = 80
 		return
 	}
@@ -162,9 +169,10 @@ func postgresType(kind byte, direction v1.Direction) (isFrontend bool, name stri
 	return
 }
 
-// the one-byte answer to an SSLRequest or a GSSENCRequest, at the start of the server's stream: S, G or N, not followed by a typed message's length
+// the one-byte answer to an SSLRequest or a GSSENCRequest, at the start of the server's stream or after a refusal (libpq asks for GSSAPI, then SSL):
+// S, G or N, not followed by a typed message's length
 func isPostgresAnswer(data []byte, state *streamState) (isAnswer bool) {
-	isAnswer = (state.index == 0) && (state.context.Direction == v1.DownDirection) && (strings.IndexByte("SGN", data[0]) >= 0) && ((len(data) == 1) || (data[1] != 0))
+	isAnswer = ((state.index == 0) || (state.mode == refusedMode)) && (state.context.Direction == v1.DownDirection) && (strings.IndexByte("SGN", data[0]) >= 0) && ((len(data) == 1) || (data[1] != 0))
 	return
 }
 
@@ -221,6 +229,8 @@ func postgresPDU(tree *Tree, data []byte, start int, state *streamState) (root *
 			state.mode = starttlsMode
 		case 'G':
 			state.mode = gssMode
+		case 'N':
+			state.mode = refusedMode
 		}
 
 		tree.addSummary("PostgreSQL encryption " + answer)
@@ -229,6 +239,11 @@ func postgresPDU(tree *Tree, data []byte, start int, state *streamState) (root *
 		root = tree.add(nil, postgresProtocol, postgresTitle, "", start, len(data)-start)
 		postgresUntyped(tree, root, data, start, state)
 		return
+	}
+
+	// a typed message ends the answers
+	if state.mode == refusedMode {
+		state.mode = ""
 	}
 
 	isFrontend, name := postgresType(kind, state.context.Direction)

@@ -138,25 +138,26 @@ func stunPDU(tree *Tree, data []byte, start int, state *streamState) (root *node
 	end := min(len(data), start+stunHeaderBytes+length)
 	root = tree.add(nil, stunProtocol, stunTitle, "", start, end-start)
 	reader := fieldsOf(tree, root, data, start, end)
-	messageType, _ := reader.number("stun.type", "Message Type", 2, func(value uint32) (text string) { text = fmt.Sprintf("0x%04x", value); return })
+	messageType, isType := reader.number("stun.type", "Message Type", 2, func(value uint32) (text string) { text = fmt.Sprintf("0x%04x", value); return })
 	method := (messageType & 0x000f) | ((messageType >> 1) & 0x0070) | ((messageType >> 2) & 0x0f80)
 	class := ((messageType >> 7) & 2) | ((messageType >> 4) & 1)
 
-	if len(root.children) > 0 {
-		typeNode := root.children[0]
+	if isType {
+		typeNode := reader.last
 		tree.setValue(typeNode, typeNode.value+" "+shortName(stunMethods, uint16(method))+" "+shortName(stunClasses, uint16(class)))
 		tree.addBits(typeNode, "stun.type.method", "Method", hexNameOf(stunMethods, uint16(method)), start, 2, 0x3eef)
 		tree.addBits(typeNode, "stun.type.class", "Class", nameOf(stunClasses, uint16(class)), start, 2, 0x0110)
 	}
 
 	reader.number("stun.length", "Message Length", 2, nil)
-	cookie, _ := reader.number("stun.cookie", "Magic Cookie", 4, func(value uint32) (text string) { text = fmt.Sprintf("0x%08x", value); return })
+	cookie, isCookie := reader.number("stun.cookie", "Magic Cookie", 4, func(value uint32) (text string) { text = fmt.Sprintf("0x%08x", value); return })
+	cookieNode := reader.last
 	transaction, _ := reader.bytesField("stun.id", "Transaction ID", 12)
 	summary := fmt.Sprintf("%s %s", shortName(stunMethods, uint16(method)), shortName(stunClasses, uint16(class)))
 	tree.setLabel(root, stunTitle+" "+summary)
 
-	if (len(root.children) > 2) && (cookie != stunCookie) {
-		tree.fail(root.children[2], fmt.Sprintf("the magic cookie of RFC 8489 is 0x%08x, so this is a classic RFC 3489 message", stunCookie))
+	if isCookie && (cookie != stunCookie) {
+		tree.fail(cookieNode, fmt.Sprintf("the magic cookie of RFC 8489 is 0x%08x, so this is a classic RFC 3489 message", stunCookie))
 	}
 
 	if length%4 != 0 {

@@ -290,7 +290,7 @@ func mqttConnect(tree *Tree, root *node, reader *cursor, state *streamState) (su
 	flags, ok := reader.number("mqtt.conflags", "Connect Flags", 1, func(value uint32) (text string) { text = fmt.Sprintf("0x%02x", value); return })
 
 	if ok {
-		flagsNode := root.children[len(root.children)-1]
+		flagsNode := reader.last
 		start := flagsNode.offset
 
 		for _, flag := range []struct {

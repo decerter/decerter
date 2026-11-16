@@ -253,6 +253,12 @@ func mysqlPDU(tree *Tree, data []byte, start int, state *streamState) (root *nod
 	sequence, _ := reader.little("mysql.packet_number", "Packet Number", 1, nil)
 	state.sequence = int(sequence)
 	payload := data[reader.offset:]
+
+	// TLS comes right after the SSL request or the greeting that offers it: a packet in its place means the stream stays MySQL
+	if state.mode == starttlsMode {
+		state.mode = ""
+	}
+
 	kind, summary := "", ""
 
 	switch {
@@ -393,7 +399,14 @@ func mysqlServer(tree *Tree, root *node, reader *cursor, payload []byte, state *
 
 	switch {
 	case (state.sequence == 0) && (first == 10) && (state.index == 0):
-		kind, summary = mysqlGreeting(reader)
+		capabilities := uint64(0)
+		kind, summary, capabilities = mysqlGreeting(reader)
+
+		// a server that can do SSL: the client's SSL request switches both directions to TLS, the server's bytes after the greeting are its TLS records
+		if capabilities&mysqlSSL != 0 {
+			state.mode = starttlsMode
+		}
+
 		return
 	case first == 0xff:
 		kind = "error"
@@ -430,9 +443,6 @@ func mysqlServer(tree *Tree, root *node, reader *cursor, payload []byte, state *
 
 		summary = "MySQL " + kind
 		return
-	case bytes.HasPrefix(payload, []byte("\x03def")):
-		kind, summary = mysqlColumn(reader, state)
-		return
 	case state.mode == mysqlRowsMode:
 		kind = "row"
 		values := []string{}
@@ -450,6 +460,10 @@ func mysqlServer(tree *Tree, root *node, reader *cursor, payload []byte, state *
 		}
 
 		summary = "MySQL row " + text
+		return
+	// a column definition by its catalog "def"; in the rows a value "def" is a row
+	case bytes.HasPrefix(payload, []byte("\x03def")):
+		kind, summary = mysqlColumn(reader, state)
 		return
 	case first == 0x00:
 		kind = "OK"
@@ -502,7 +516,7 @@ func mysqlServer(tree *Tree, root *node, reader *cursor, payload []byte, state *
 }
 
 // the initial handshake packet v10
-func mysqlGreeting(reader *cursor) (kind string, summary string) {
+func mysqlGreeting(reader *cursor) (kind string, summary string, capabilities uint64) {
 	kind = "server greeting"
 	reader.little("mysql.protocol", "Protocol", 1, nil)
 	version, _ := reader.cString("mysql.version", "Version")
@@ -515,7 +529,7 @@ func mysqlGreeting(reader *cursor) (kind string, summary string) {
 	upper, _ := reader.little("mysql.extcaps.server", "Extended Server Capabilities", 2, func(value uint64) (text string) { text = mysqlCapabilityText(value << 16); return })
 	authLength, _ := reader.little("mysql.auth_plugin.length", "Authentication Plugin Length", 1, nil)
 	reader.bytesField("mysql.unused", "Unused", 10)
-	capabilities := upper<<16 | lower
+	capabilities = upper<<16 | lower
 
 	if capabilities&mysqlSecure != 0 {
 		reader.bytesField("mysql.salt2", "Salt", min(reader.left(), max(13, int(authLength)-8)))

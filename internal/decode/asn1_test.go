@@ -108,6 +108,39 @@ func TestBERNegative(state *testing.T) {
 	}
 }
 
+// Test if the BER reader returns with the expected errors of the second review: an element whose header fails has no contents (never the bytes before
+// it), and an indefinite element with a child cut short or malformed is no whole PDU.
+func TestBERReviewNegative(state *testing.T) {
+	data := []byte{0x30, 0x03, 0x04, 0x85, 0x01}
+	element := (&berReader{data: data, elements: 0}).read(0, len(data), 0)
+
+	if (len(element.children) != 1) || (element.children[0].err == "") || (len(element.children[0].contents(data)) != 0) {
+		state.Errorf("Test of berReader.read failed, a child with a broken header should have no contents, element: %+v", element)
+	}
+
+	for name, testCase := range map[string]struct {
+		data     []byte
+		expected int
+	}{
+		"child cut short": {data: []byte{0x30, 0x80, 0x04, 0x05, 'a', 'b'}, expected: 0},
+		"child length":    {data: []byte{0x30, 0x80, 0x04, 0x85, 1, 1, 1, 1, 1}, expected: -1},
+		"whole":           {data: []byte{0x30, 0x80, 0x04, 0x01, 'a', 0, 0}, expected: 7},
+	} {
+		if length := berFrame(testCase.data, &streamState{context: streamContext(389, v1.UpDirection, false), index: 0, isTLS: false, mode: "", waiting: 0, columns: 0, sequence: 0, command: 0}); length != testCase.expected {
+			state.Errorf("Test of decode.berFrame failed, %s should frame as %d, length: %d", name, testCase.expected, length)
+		}
+	}
+
+	// an LDAP result after another PDU: the broken matchedDN shows nothing of the PDU before it
+	first := sequence(state, der(state, 1), tagged(state, 0x40, 2))
+	broken := []byte{0x30, 0x0b, 0x02, 0x01, 0x02, 0x61, 0x06, 0x0a, 0x01, 0x00, 0x04, 0x85, 0x01}
+	result := mustDecode(state, join(first, broken), streamContext(389, v1.DownDirection, true), ldapProtocol)
+
+	if result.Summary != "LDAP unknown operation(1); LDAP bindResponse(2) success" {
+		state.Errorf("Test of LDAP failed, the summary should show nothing of the PDU before, summary: %s", result.Summary)
+	}
+}
+
 // Test if decode.Decode returns with the expected output for LDAP: a bind, a search and an unbind by sniffing, the server's answers with result codes,
 // StartTLS that switches both directions to TLS, and a search entry of 100 KiB in a joined stream.
 func TestLDAPPositive(state *testing.T) {
@@ -225,6 +258,8 @@ func FuzzASN1(fuzz *testing.F) {
 	fuzz.Add([]byte{0x30, 0x0c, 0x02, 0x01, 0x01, 0x60, 0x07, 0x02, 0x01, 0x03, 0x04, 0x00, 0x80, 0x00})
 	fuzz.Add([]byte{0x00, 0x00, 0x00, 0x0c, 0x6a, 0x0a, 0x30, 0x08, 0xa1, 0x03, 0x02, 0x01, 0x05, 0xa2, 0x01, 0x0a})
 	fuzz.Add([]byte{0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b})
+	fuzz.Add([]byte{0x30, 0x80, 0x04, 0x05, 'a', 'b'})
+	fuzz.Add([]byte{0x30, 0x05, 0x02, 0x01, 0x01, 0x22, 0x00, 0x30, 0x0b, 0x02, 0x01, 0x02, 0x61, 0x06, 0x0a, 0x01, 0x00, 0x04, 0x85, 0x01})
 	udp := Context{Transport: DatagramTransport, Layer: v1.UDPLayer, Direction: v1.UpDirection, ServerPort: 88, ALPN: "", ContentType: "", Upgrade: "", Method: "", Target: "", Encoding: "", Extensions: "", Handshake: false, Joined: false}
 	contexts := []Context{udp, streamContext(389, v1.UpDirection, false), streamContext(88, v1.DownDirection, true), streamContext(389, v1.DownDirection, true)}
 

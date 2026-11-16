@@ -197,7 +197,7 @@ type placement struct {
 }
 
 // fields read in order from data: offset is the next byte, end the end of the fields; place puts them into the source
-// isShort is set by the first field that does not fit, the fields after it are left out
+// isShort is set by the first field that does not fit, the fields after it are left out; last is the node of the last field, the sink once the tree is full
 type cursor struct {
 	tree    *Tree
 	parent  *node
@@ -206,6 +206,7 @@ type cursor struct {
 	end     int
 	place   placement
 	isShort bool
+	last    *node
 }
 
 // what the extensions of a hello may hold

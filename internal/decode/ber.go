@@ -176,10 +176,11 @@ func berFrame(data []byte, state *streamState) (length int) {
 		reader := &berReader{data: data, elements: 0}
 		element := reader.read(0, len(data), 0)
 
-		switch {
-		case element.err == "":
+		// an error of a child counts too: a child cut short leaves its parent without an error and the end at the end of the bytes
+		switch reason := element.firstError(); {
+		case reason == "":
 			length = element.end
-		case strings.Contains(element.err, "cut short") || strings.Contains(element.err, "past") || strings.Contains(element.err, "end-of-contents"):
+		case strings.Contains(reason, "cut short") || strings.Contains(reason, "past") || strings.Contains(reason, "end-of-contents"):
 			length = 0
 		default:
 			length = -1
@@ -196,18 +197,21 @@ func (reader *berReader) read(offset int, end int, depth int) (element *berEleme
 	element = &berElement{class: 0, tag: 0, isConstructed: false, isIndefinite: false, start: offset, contentStart: offset, contentEnd: end, end: end, children: nil, err: ""}
 	reader.elements++
 
+	// an element without its header has no contents of its own: they are empty at its start, never the bytes before it
 	if reader.elements > berMaxElements {
-		element.err = fmt.Sprintf("more than %d elements", berMaxElements)
+		element.err, element.contentEnd = fmt.Sprintf("more than %d elements", berMaxElements), offset
 		return
 	}
 
 	class, tag, isConstructed, contentStart, length, reason := berHeader(reader.data, offset, end)
-	element.class, element.tag, element.isConstructed, element.contentStart = class, tag, isConstructed, contentStart
+	element.class, element.tag, element.isConstructed = class, tag, isConstructed
 
 	if reason != "" {
-		element.err = reason
+		element.err, element.contentEnd = reason, offset
 		return
 	}
+
+	element.contentStart = contentStart
 
 	switch {
 	case length < 0:
@@ -257,16 +261,20 @@ func (reader *berReader) read(offset int, end int, depth int) (element *berEleme
 
 // whether the element or one below it has an error
 func (element *berElement) hasError() (hasError bool) {
-	if element.err != "" {
-		hasError = true
-		return
-	}
+	hasError = element.firstError() != ""
+	return
+}
+
+// the error of the element, else the first one below it, depth first
+func (element *berElement) firstError() (reason string) {
+	reason = element.err
 
 	for _, child := range element.children {
-		if child.hasError() {
-			hasError = true
+		if reason != "" {
 			return
 		}
+
+		reason = child.firstError()
 	}
 
 	return
