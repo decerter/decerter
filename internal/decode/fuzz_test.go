@@ -87,14 +87,8 @@ func FuzzDNS(fuzz *testing.F) {
 	})
 }
 
-// dnsmessage's reading of data; x/net v0.53's SVCB parser panics on rdata that runs past the message (fixed in v0.62), that is no reading
+// dnsmessage's reading of data; x/net v0.62 checks the SVCB rdata against the message (v0.53 panicked on it, so the oracle recovered then)
 func oracleUnpack(data []byte) (message dnsmessage.Message, isRead bool) {
-	defer func() {
-		if recovered := recover(); recovered != nil {
-			isRead = false
-		}
-	}()
-
 	isRead = message.Unpack(data) == nil
 	return
 }
