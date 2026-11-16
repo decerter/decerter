@@ -29,12 +29,13 @@ The host in the URL is `decerter`, `localhost` or a loopback address (with or wi
 | `GET /flows` | listFlows | flows of the history, newest first; `filter`, `limit`, `cursor` |
 | `GET /flows/{id}` | getFlow | one flow: process, addresses, TLS fields, counters |
 | `GET /flows/{id}/messages` | listMessages | a flow's messages without payloads |
+| `GET /flows/{id}/decode` | decodeFlow | the handshake records kept of one direction of a TLS or DTLS flow as a tree of fields: hellos with every extension, JA3/JA3S/JA4, certificates; `part=handshake`, `direction`, `as` ([decoders](decode.md#tls-handshake)) |
 | `GET /messages/{id}` | getMessage | one message with a window of its payload (`offset`, `length`), as hex and escaped text, and the original when it was edited |
 | `GET /messages/{id}/decode` | decodeMessage | the payload decoded into a tree of fields ([decoders](decode.md)); `as`, `original` |
 | `GET /flows/{id}/exchanges` | listExchanges | a flow's HTTP exchanges without bodies ([HTTP layer](http.md)) |
 | `GET /exchanges/{id}` | getExchange | one exchange with its heads |
 | `GET /exchanges/{id}/body` | getExchangeBody | a window of the request or response body |
-| `GET /exchanges/{id}/decode` | decodeExchangeBody | a body decoded into a tree of fields, DoH by its content type or a GET's `dns` parameter; `side`, `as`, `original` |
+| `GET /exchanges/{id}/decode` | decodeExchangeBody | a body decoded into a tree of fields: DoH, gRPC and protobuf by their content type, a GET's `dns` parameter, WebSocket by an extended CONNECT's `:protocol`; `side`, `as`, `original` |
 | `GET /events` | streamEvents | server-sent events: flows opened and closed, messages, exchanges, holds, rules, intercept changes; no payloads |
 | `PUT /intercept` | setIntercept | turn holding on or off, with a filter, a direction and a layer |
 | `GET /holds` | listHolds | held messages with their payloads, or with `offset` and `length` a window of each |

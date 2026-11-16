@@ -1,7 +1,7 @@
 # decerter
 An eBPF intercepting proxy that reads and edits the live TCP, UDP, TLS and DTLS traffic of selected local processes, with no CA certificate and no change to the app.
 
-decerter picks the sockets of one user, one process or one Android app with eBPF cgroup hooks and sends them through a proxy on `lo`, while a uprobe on the app's TLS library reads the session keys. With those keys decerter decrypts every TLS record and, when you edit one, encrypts it again with the same keys, so the app keeps talking to the real server over the real certificate. It runs as root on Linux 6.6 or newer and on rooted Android 15 or newer, and comes with a capture mode for Wireshark, a control API, a minimal web UI, an MCP server and packet decoders that show a payload as a tree of fields (DNS so far).
+decerter picks the sockets of one user, one process or one Android app with eBPF cgroup hooks and sends them through a proxy on `lo`, while a uprobe on the app's TLS library reads the session keys. With those keys decerter decrypts every TLS record and, when you edit one, encrypts it again with the same keys, so the app keeps talking to the real server over the real certificate. It runs as root on Linux 6.6 or newer and on rooted Android 15 or newer, and comes with a capture mode for Wireshark, a control API, a minimal web UI, an MCP server and packet decoders that show a payload as a tree of fields (DNS, gRPC and protobuf, the TLS handshake with JA3 and JA4, WebSocket).
 
 **Docs:** [filter language](docs/filter.md) · [control API](docs/api.md) · [HTTP layer](docs/http.md) · [capture](docs/capture.md) · [decoders](docs/decode.md) · [web UI](docs/ui.md) · [MCP](docs/mcp.md) · [Android](docs/android.md) · [building and testing](docs/development.md)
 
@@ -123,7 +123,7 @@ For an arm64 phone, put the arm64 binary next to the amd64 one, where setup look
 - **Redirect:** a selected socket's destination is rewritten to decerter's proxy on `lo` (port 15001, one TCP listener and one UDP socket); `getpeername()` and `recvmsg()` still show the real server. The kernel builds every packet on both sides, so nothing rewrites checksums or sequence numbers, and no interface, VPN or iptables rule is added.
 - **Keys:** a uprobe on the TLS library (OpenSSL 3 and 4 on Linux; Conscrypt, Flutter's and Chrome's BoringSSL on Android) copies the session secrets into a BPF map keyed by the ClientHello's random, the model of `SSLKEYLOGFILE`. The handshake goes on untouched.
 - **Edit:** the proxy decrypts each record with those keys, runs it through the rules, the hold queue and the HTTP/1.1 and HTTP/2 layer, and seals it again with the same keys and the right sequence number.
-- **Decode:** on request, the API, the web UI and the MCP tools decode a payload or an HTTP body into a tree of fields with byte offsets, chosen by Decode As, the context (content type, ALPN), the port or the bytes; DNS over UDP, TCP, TLS and HTTPS so far ([decoders](docs/decode.md)).
+- **Decode:** on request, the API, the web UI and the MCP tools decode a payload or an HTTP body into a tree of fields with byte offsets, chosen by Decode As, the context (content type, ALPN, Upgrade), the port or the bytes: DNS over UDP, TCP, TLS and HTTPS, gRPC and gRPC-Web with schema-less protobuf, WebSocket frames, and the TLS and DTLS handshake decerter keeps of each flow it decrypts (hellos with every extension, JA3/JA3S/JA4, certificates) ([decoders](docs/decode.md)).
 - **Capture:** `decerter capture` redirects nothing; `cgroup_skb` programs copy the selected sockets' packets to a ring buffer, written as pcapng with a Decryption Secrets Block per session.
 - On Android netd holds the cgroup hooks exclusively; decerter shares them while it runs and puts them back on exit.
 
@@ -171,8 +171,9 @@ What decerter adds: editing TLS traffic without a CA, by sealing changed records
 | DTLS 1.0 and 1.3 | unsupported |
 | HTTP/1.1 (and 1.0): view, rules, holds, edit with Content-Length and chunking fixed | tested |
 | HTTP/2 over TLS (`h2`) and h2c with prior knowledge: view, rules, holds, edit with HPACK and flow control kept consistent | tested (curl, Go client and server); Chrome's HTTP/2 seen in the Android quickstart |
-| gRPC over HTTP/2 | message boundaries listed, not decoded; edits are raw bytes |
-| WebSocket, h2c by `Upgrade`, CONNECT tunnels | not read: the HTTP layer stops at `101` and at a `2xx` answer to CONNECT (a refused CONNECT is read on), the bytes still go through record rules |
+| gRPC over HTTP/2 | message boundaries listed; decoded on request with schema-less protobuf (tested: curl over TLS 1.2 and 1.3); edits are raw bytes |
+| WebSocket | decoded on request after an HTTP/1.1 `Upgrade` (tested: a Go client and server) and in an HTTP/2 extended CONNECT body (unit tests only); the HTTP layer stops at `101`, the frames go through record rules as bytes |
+| h2c by `Upgrade`, CONNECT tunnels | not read: the HTTP layer stops at `101` and at a `2xx` answer to CONNECT (a refused CONNECT is read on), the bytes still go through record rules |
 | QUIC / HTTP/3 | unsupported: relayed without decryption; `--block-quic` makes clients fall back to TCP (tested) |
 | STARTTLS | `decerter capture`: tested (SMTP); `decerter run`: not decrypted, TLS has to start with the client's first bytes |
 

@@ -12,6 +12,7 @@ The page (HTML, CSS and vanilla JS embedded in the binary, no build step):
 - a flow with its messages and its HTTP exchanges (HTTP/2 stream, method, URL, status, body lengths, edits and notes);
 - a message as escaped text or a hex dump, 4 KiB at a time, and as the peer sent it when it was changed; an exchange with its heads and a window of either body; a gRPC body with a line in front of each message;
 - the [decode tree](decode.md) of a message or a body next to its bytes, with "decode as": a click on a node marks its bytes, a click on a byte selects its field;
+- the TLS or DTLS handshake decerter kept of a flow, client or server, as a tree next to its bytes;
 - intercept on and off with a filter, a direction and the layer (every record layer, one of tcp, tls, udp and dtls, or whole HTTP messages);
 - the held messages, to edit as escaped text (`\r`, `\n`, `\t`, `\\`, `\xNN`; line breaks are only layout) or as hex, and to forward or drop.
 
