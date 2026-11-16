@@ -39,6 +39,10 @@ const (
 	shrunkBody   string = "ten bytes!"
 	// /shrink answers this many bytes
 	shrinkBytes int = 300 << 10
+	// the upload cases: the held request's body comes after the free one sent its whole stream window, the server's default of 1 MiB
+	heldUploadBytes    int = 256 << 10
+	freeUploadBytes    int = 2 << 20
+	serverStreamWindow int = 1 << 20
 )
 
 // what a peer's GODEBUG=http2debug=2 log may not say
@@ -83,6 +87,17 @@ func answerEdit(writer http.ResponseWriter, request *http.Request) {
 		answer = "GROW"
 	case "/shrink":
 		answer = strings.Repeat("z", shrinkBytes)
+	case
+		"/up/held",
+		"/up/free":
+		length, err := io.Copy(io.Discard, request.Body)
+
+		if err != nil {
+			http.Error(writer, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		answer = fmt.Sprintf("%s %d", request.URL.Path, length)
 	default:
 	}
 
@@ -130,6 +145,99 @@ func getEdits(ctx context.Context, client *http.Client, target string) (output s
 	waitGroup.Wait()
 	slices.Sort(lines)
 	output = strings.Join(lines, "\n")
+	return
+}
+
+// what a logged Go client printed, its log and how it ended
+type loggedResult struct {
+	output string
+	log    string
+	err    error
+}
+
+// a reader that tells once count bytes were read from it
+type tellingReader struct {
+	reader io.Reader
+	read   int
+	count  int
+	told   chan struct{}
+}
+
+func (reader *tellingReader) Read(buffer []byte) (count int, err error) {
+	count, err = reader.reader.Read(buffer)
+	reader.read += count
+
+	if (reader.read >= reader.count) && (reader.told != nil) {
+		close(reader.told)
+		reader.told = nil
+	}
+
+	return
+}
+
+// the Go client of the upload cases on one connection: POST /up/held opens first, its body comes only after POST /up/free sent its stream window,
+// which is all of the client's connection window too; one line per path with the length the server read, sorted
+func postUploads(ctx context.Context, client *http.Client, target string) (output string, err error) {
+	heldBody, heldWriter := io.Pipe()
+	told := make(chan struct{})
+	free := &tellingReader{reader: bytes.NewReader(bytes.Repeat([]byte("f"), freeUploadBytes)), read: 0, count: serverStreamWindow, told: told}
+	lines := []string{}
+	mutex := &sync.Mutex{}
+	waitGroup := sync.WaitGroup{}
+	post := func(path string, body io.Reader) {
+		answer, postErr := postBody(ctx, client, target+path, body)
+		mutex.Lock()
+		defer mutex.Unlock()
+		err = errors.Join(err, postErr)
+		lines = append(lines, answer)
+	}
+
+	// the held request opens its stream first
+	waitGroup.Go(func() {
+		post("up/held", heldBody)
+	})
+
+	time.Sleep(200 * time.Millisecond)
+
+	// the free request fills the windows
+	waitGroup.Go(func() {
+		post("up/free", free)
+	})
+
+	// the held body once the free one went
+	select {
+	case <-told:
+	case <-ctx.Done():
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	_, writeErr := heldWriter.Write(bytes.Repeat([]byte("h"), heldUploadBytes))
+	err = errors.Join(err, writeErr, heldWriter.Close())
+	waitGroup.Wait()
+	slices.Sort(lines)
+	output = strings.Join(lines, "\n")
+	return
+}
+
+func postBody(ctx context.Context, client *http.Client, target string, body io.Reader) (answer string, err error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, body)
+
+	if err != nil {
+		return
+	}
+
+	response, err := client.Do(request)
+
+	if err != nil {
+		return
+	}
+
+	defer func() {
+		err = errors.Join(err, response.Body.Close())
+	}()
+
+	data, err := io.ReadAll(response.Body)
+	answer = string(data)
 	return
 }
 
@@ -336,6 +444,48 @@ func TestHTTP2HoldPositive(state *testing.T) {
 				return
 			}
 		}
+	}
+}
+
+// Test if a hold of layer http takes an HTTP/2 request whose body comes after a later stream's upload filled the windows: a Go h2c client and server with
+// GODEBUG=http2debug=2 and the server's default windows of 1 MiB, the held request comes whole within --assembly-timeout, both uploads arrive after
+// the forward, and no protocol error is logged.
+func TestHTTP2HoldUploadPositive(state *testing.T) {
+	client := startAPIDecerter(state, InterceptDecerterMode, []intercept.Rule{intercept.IdentityRule{}})
+	status, err := client.call(state.Context(), http.MethodPut, "/intercept", v1.InterceptRequest{Enabled: true, Filter: `http.request.uri contains "/up/held"`, Direction: v1.UpDirection, Layer: v1.HTTPLayer}, nil)
+
+	if (err != nil) || (status != http.StatusOK) {
+		state.Fatalf("Test of http/2 upload holds failed, cannot hold http messages, status: %d, error: %v", status, err)
+	}
+
+	target, serverLog, stop := startGoServer(state)
+	resultChannel := make(chan loggedResult, 1)
+
+	// the client waits for the forward
+	go func() {
+		output, clientLog, runErr := runGoClientLogged(state.Context(), copyClient(state), "upload", target)
+		resultChannel <- loggedResult{output: output, log: clientLog, err: runErr}
+	}()
+
+	held, err := client.waitHeld(state.Context())
+	body := []byte(nil)
+
+	if err == nil {
+		body, err = hex.DecodeString(held.Payload.Hex)
+	}
+
+	if err == nil {
+		_, err = client.call(state.Context(), http.MethodPost, fmt.Sprintf("/holds/%d/forward", held.ID), nil, nil)
+	}
+
+	result := <-resultChannel
+	err = errors.Join(err, result.err, stop())
+	output := result.output
+	logs := result.log + serverLog.String()
+	expected := fmt.Sprintf("/up/free %d\n/up/held %d", freeUploadBytes, heldUploadBytes)
+
+	if (err != nil) || !bytes.HasSuffix(body, append([]byte("\r\n\r\n"), bytes.Repeat([]byte("h"), heldUploadBytes)...)) || (output != expected) || protocolErrorPattern.MatchString(logs) {
+		state.Errorf("Test of http/2 upload holds failed, the held upload should come whole and both arrive, held: %d bytes, output: %q, errors in the logs: %q, error: %v", len(body), output, protocolErrorPattern.FindAllString(logs, 5), err)
 	}
 }
 

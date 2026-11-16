@@ -19,6 +19,10 @@ const (
 	maxIncrement int64 = 1<<31 - 1
 	// the streams an editor follows at once, the frames of another stream go on as they came
 	DefaultEditStreams int = 10000
+	// the DATA a sender may have waiting in decerter on its streams that wait to open behind a kept one; DATA over it refuses its stream
+	MaxGatedData int64 = 4 << 20
+	// the refused streams of a side whose later frames are dropped, the lowest goes when another one comes
+	maxRefused int = 1000
 )
 
 // an editor that follows at most maxStreams streams at once, 0 or less is DefaultEditStreams
@@ -37,6 +41,7 @@ func NewEditor(maxStreams int) (editor *Editor) {
 		isStopped:  false,
 		framed:     framed,
 		framer:     http2.NewFramer(framed, nil),
+		refused:    nil,
 		err:        nil,
 	}
 	return
@@ -63,6 +68,7 @@ func newEditSide(peer Peer) (side *editSide) {
 		window:         defaultWindow,
 		excess:         0,
 		openings:       nil,
+		refused:        map[uint32]bool{},
 	}
 	return
 }
@@ -97,6 +103,14 @@ func (editor *Editor) Output(peer Peer) (output []byte) {
 	side := editor.sides[peer]
 	output = side.output
 	side.output = nil
+	return
+}
+
+// the streams the editor refused since the last call: they waited to open behind a kept one and had more than MaxGatedData waiting, their sender got
+// RST_STREAM with REFUSED_STREAM and their receiver never heard of them
+func (editor *Editor) Refused() (streams []uint32) {
+	streams = editor.refused
+	editor.refused = nil
 	return
 }
 
@@ -322,6 +336,7 @@ func (editor *Editor) Stop() {
 
 			if current.message != nil {
 				current.held = append(current.message.units, current.held...)
+				current.heldData += dataNeed(current.message.units)
 				current.message = nil
 			}
 
@@ -356,6 +371,7 @@ func (editor *Editor) kept(peer Peer, streamID uint32) (stream *editStream, mess
 func (editor *Editor) resume(side *editSide, stream *editStream, units []unit) {
 	current := stream.sides[side.peer]
 	current.held = append(units, current.held...)
+	current.heldData += dataNeed(units)
 	editor.drain(side, stream)
 	editor.openNext(side)
 }
@@ -432,12 +448,20 @@ func (editor *Editor) blockPassed(side *editSide, block *Block) {
 }
 
 // a frame in frame mode
+// the frames of a stream the editor refused don't go on, the receiver never heard of it; its DATA gives the sender its connection window back
 func (editor *Editor) take(side *editSide, frame *Frame, raw []byte) {
+	isRefused := side.refused[frame.StreamID]
+
 	switch frame.Type {
 	case http2.FrameData:
 		length := int64(frame.Length)
 		taken := unit{kind: dataUnit, streamID: frame.StreamID, raw: raw, payload: frame.Data, need: length, endStream: frame.Flags.Has(http2.FlagDataEndStream), block: nil, seq: -1, isPart: true}
 		side.excess += length
+
+		if isRefused {
+			return
+		}
+
 		stream := editor.streams[frame.StreamID]
 
 		if stream == nil {
@@ -462,10 +486,23 @@ func (editor *Editor) take(side *editSide, frame *Frame, raw []byte) {
 		taken := unit{kind: blockUnit, streamID: frame.Block.StreamID, raw: side.blockRaw, payload: nil, need: 0, endStream: frame.Block.EndStream, block: frame.Block, seq: side.blocks, isPart: true}
 		side.blockRaw = nil
 		side.blocks++
+
+		if side.refused[frame.Block.StreamID] {
+			return
+		}
+
 		editor.takeBlock(side, taken)
 	case http2.FrameWindowUpdate:
+		if isRefused {
+			return
+		}
+
 		editor.takeWindowUpdate(side, frame, raw)
 	case http2.FrameRSTStream:
+		if isRefused {
+			return
+		}
+
 		stream := editor.streams[frame.StreamID]
 
 		if stream == nil {
@@ -488,7 +525,9 @@ func (editor *Editor) take(side *editSide, frame *Frame, raw []byte) {
 		}
 	default:
 		// PING, GOAWAY, PRIORITY and the rest go on at once
-		side.write(raw)
+		if !isRefused {
+			side.write(raw)
+		}
 	}
 }
 
@@ -570,7 +609,14 @@ func (editor *Editor) route(side *editSide, stream *editStream, taken unit) {
 		current.message.units = append(current.message.units, taken)
 		current.message.isComplete = taken.endStream
 	case (current.message != nil) || (len(current.held) > 0) || editor.isGated(side, stream):
+		// DATA that would have more than MaxGatedData wait in decerter behind the streams that wait to open refuses its stream
+		if (taken.kind == dataUnit) && (current.message == nil) && editor.isGated(side, stream) && (editor.gatedData(side)+taken.need > MaxGatedData) {
+			editor.refuse(side, stream)
+			return
+		}
+
 		current.held = append(current.held, taken)
+		current.heldData += dataNeed([]unit{taken})
 	default:
 		editor.commit(side, stream, taken)
 	}
@@ -794,14 +840,14 @@ func (editor *Editor) build(write func(framer *http2.Framer) error) (data []byte
 }
 
 // the sender of a side gets back the window of what it sent and the receiver did not count: on the connection, and on each stream it still sends on that does not only wait to open
-// the DATA held on streams that wait to open keeps its connection window until it goes on or its stream is reset, so the sender can't have more than
-// the connection window waiting in decerter behind a held stream
+// the DATA held on streams that wait to open gives its connection window back too, so the body of a kept stream before them never waits for it;
+// what they hold stays within their stream windows, which don't grow while they wait, and within MaxGatedData
 func (editor *Editor) topUp(side *editSide) {
 	other := editor.sides[otherPeer(side.peer)]
 
-	if returned := side.excess - editor.gatedData(side); returned > 0 {
-		other.write(editor.windowUpdate(0, returned))
-		side.excess -= returned
+	if side.excess > 0 {
+		other.write(editor.windowUpdate(0, side.excess))
+		side.excess = 0
 	}
 
 	for _, id := range slices.Sorted(maps.Keys(editor.streams)) {
@@ -822,15 +868,36 @@ func (editor *Editor) topUp(side *editSide) {
 
 // the DATA bytes held on the streams of a side that wait to open
 func (editor *Editor) gatedData(side *editSide) (gated int64) {
-	for _, stream := range editor.streams {
-		if !editor.isGated(side, stream) {
-			continue
+	for _, id := range side.openings {
+		if stream := editor.streams[id]; (stream != nil) && editor.isGated(side, stream) {
+			gated += stream.sides[side.peer].heldData
 		}
+	}
 
-		for _, held := range stream.sides[side.peer].held {
-			if held.kind == dataUnit {
-				gated += held.need
-			}
+	return
+}
+
+// a stream that waits to open ends for both peers: its sender gets RST_STREAM with REFUSED_STREAM, so it may send it again, its receiver never heard of it
+// the DATA it held gives the sender its connection window back, its later frames don't go on
+func (editor *Editor) refuse(side *editSide, stream *editStream) {
+	editor.reset(stream)
+	editor.sides[otherPeer(side.peer)].write(editor.build(func(framer *http2.Framer) error {
+		return framer.WriteRSTStream(stream.id, http2.ErrCodeRefusedStream)
+	}))
+
+	if len(side.refused) >= maxRefused {
+		delete(side.refused, slices.Min(slices.Collect(maps.Keys(side.refused))))
+	}
+
+	side.refused[stream.id] = true
+	editor.refused = append(editor.refused, stream.id)
+}
+
+// the DATA bytes of units, what they take of the windows
+func dataNeed(units []unit) (need int64) {
+	for _, current := range units {
+		if current.kind == dataUnit {
+			need += current.need
 		}
 	}
 
@@ -867,6 +934,7 @@ func (editor *Editor) drain(side *editSide, stream *editStream) {
 	for (current.message == nil) && (len(current.held) > 0) && !editor.isGated(side, stream) {
 		next := current.held[0]
 		current.held = current.held[1:]
+		current.heldData -= dataNeed([]unit{next})
 		editor.commit(side, stream, next)
 	}
 
@@ -920,7 +988,7 @@ func (editor *Editor) open(initiator Peer, id uint32) (stream *editStream) {
 	stream = &editStream{id: id, sides: [2]*streamSide{}}
 
 	for _, side := range editor.sides {
-		stream.sides[side.peer] = &streamSide{isOpened: side.peer != initiator, isEnded: false, window: side.initialWindow, excess: 0, message: nil, held: nil, queue: nil}
+		stream.sides[side.peer] = &streamSide{isOpened: side.peer != initiator, isEnded: false, window: side.initialWindow, excess: 0, message: nil, held: nil, heldData: 0, queue: nil}
 	}
 
 	editor.streams[id] = stream
@@ -945,6 +1013,7 @@ func (editor *Editor) reset(stream *editStream) {
 		}
 
 		current.message, current.held, current.queue = nil, nil, nil
+		current.heldData = 0
 		current.isEnded = true
 		current.excess = 0
 		side.openings = slices.DeleteFunc(side.openings, func(id uint32) bool {

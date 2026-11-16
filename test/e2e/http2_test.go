@@ -255,6 +255,8 @@ func runClient(mode string, arguments []string) (code int) {
 		output, err = callGRPC(ctx, client, target)
 	case "edit":
 		output, err = getEdits(ctx, client, target)
+	case "upload":
+		output, err = postUploads(ctx, client, target)
 	default:
 		err = fmt.Errorf("unknown client mode %q", mode)
 	}

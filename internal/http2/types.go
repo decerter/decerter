@@ -302,7 +302,7 @@ type keptMessage struct {
 // one side of a stream in the editor, the frames its peer sends on it
 // isOpened is true once the receiver knows the stream (it opened it, or decerter sent its first HEADERS or its PUSH_PROMISE), isEnded once the sender ended or a peer reset it
 // window is what the receiver granted decerter on the stream, excess what the sender sent and the receiver did not get counted against it (below 0: got more)
-// message is kept back for the rules, held are the later frames behind it or behind the opening of an earlier stream, queue what waits for the window
+// message is kept back for the rules, held are the later frames behind it or behind the opening of an earlier stream (heldData their DATA bytes), queue what waits for the window
 type streamSide struct {
 	isOpened bool
 	isEnded  bool
@@ -310,6 +310,7 @@ type streamSide struct {
 	excess   int64
 	message  *keptMessage
 	held     []unit
+	heldData int64
 	queue    []unit
 }
 
@@ -324,6 +325,7 @@ type editStream struct {
 // output goes on next, later waits until output is at a frame boundary again; blocks counts the header blocks, sentBlocks the ones that went on as they came in their order
 // encoder (table size 0) writes every block once one did not go on in its order; maxFrameSize and initialWindow are the receiver's settings for this side
 // window and excess are the connection's, as on a stream; openings are the streams this peer opened that the receiver does not know yet, in order
+// refused are the streams of this peer the editor refused, their later frames are dropped
 type editSide struct {
 	peer           Peer
 	buffer         []byte
@@ -344,11 +346,13 @@ type editSide struct {
 	window         int64
 	excess         int64
 	openings       []uint32
+	refused        map[uint32]bool
 }
 
 // the frames of both peers of a conn on their way through decerter, so whole HTTP/2 messages can be kept back, edited or dropped
 // it reads no frames itself: the caller gives it the bytes (Take or Pass) and the frame events of a Conn with EmitFrames, then decides on the heads (Keep) and messages (Release, Replace, Drop)
-// isTouched is true once a message was kept, the frames of the conn go on whole from then on; it is not safe for concurrent use
+// isTouched is true once a message was kept, the frames of the conn go on whole from then on; refused are the streams it refused since Refused was called
+// it is not safe for concurrent use
 type Editor struct {
 	sides      [2]*editSide
 	streams    map[uint32]*editStream
@@ -358,6 +362,7 @@ type Editor struct {
 	isStopped  bool
 	framed     *bytes.Buffer
 	framer     *http2.Framer
+	refused    []uint32
 	err        error
 }
 

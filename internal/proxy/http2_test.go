@@ -24,6 +24,7 @@ import (
 	"github.com/decerter/decerter/api"
 	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/history"
+	decerterhttp2 "github.com/decerter/decerter/internal/http2"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/tlsrecord"
 )
@@ -413,5 +414,72 @@ func TestInterceptHTTP2Negative(state *testing.T) {
 	if (err != nil) || deadline.IsZero() || !bytes.Equal(all, serverData) || (string(bodies[3]) != "part and the end") || (len(exchanges) != 2) ||
 		!strings.Contains(exchanges[0].Response.Note, "the edit is no HTTP/2 message") || exchanges[0].Response.Edited || !strings.Contains(exchanges[1].Response.Note, "not whole after 100ms") || !flowHTTP.deadline(tlsrecord.ServerDirection).IsZero() {
 		state.Errorf("Test of the http/2 layer of proxy.interceptTCP failed, the slow response should go on as it came, responses: %v, exchanges: %+v, error: %v", responses, exchanges, err)
+	}
+}
+
+// Test if the HTTP layer of the proxy returns with the expected output for HTTP/2 uploads behind a held request: they wait, and the one whose DATA would have
+// more than http2.MaxGatedData wait in decerter is refused with REFUSED_STREAM and ends in the history with a note.
+func TestInterceptHTTP2GatedPositive(state *testing.T) {
+	holds := intercept.NewHoldQueue(5*time.Second, nil)
+	scope, err := filter.Parse("http2.streamid == 1")
+
+	if err != nil {
+		state.Fatalf("Could not parse the filter, error: %s", err.Error())
+	}
+
+	holds.Set(true, &scope, intercept.UpDirections, intercept.HTTPLayer)
+	recorder := history.New(history.DefaultLimits(), nil)
+	recorder.OpenFlow(1, filter.Values{}, [32]byte{})
+	flowHTTP := newHTTPFlow(1, recorder, HTTPLayer{Pipeline: intercept.New(nil, nil, nil).Derive([]intercept.Rule{holds}), Timeout: 5 * time.Second})
+	flow := intercept.Flow{ID: 1, Destination: netip.MustParseAddrPort("127.0.0.1:443"), Session: tlsrecord.Session{Version: tls.VersionTLS13, Protocol: "h2"}}
+	client, server := newHTTP2Writer(), newHTTP2Writer()
+	client.buffer.WriteString(http2.ClientPreface)
+	client.err = errors.Join(client.err, client.framer.WriteSettings(), client.framer.WriteSettingsAck())
+	client.headers(1, true, ":method", "GET", ":scheme", "https", ":authority", "hold.test", ":path", "/held")
+	server.err = errors.Join(server.err, server.framer.WriteSettings(), server.framer.WriteSettingsAck())
+	pieces := []http2Piece{{Direction: tlsrecord.ServerDirection, Data: server.take(), IsClose: false}, {Direction: tlsrecord.ClientDirection, Data: client.take(), IsClose: false}}
+	last := uint32(1 + 2*(decerterhttp2.MaxGatedData/65535+1))
+
+	for id := uint32(3); id <= last; id += 2 {
+		client.headers(id, false, ":method", "POST", ":scheme", "https", ":authority", "hold.test", ":path", fmt.Sprintf("/%d", id))
+
+		for range 4 {
+			client.err = errors.Join(client.err, client.framer.WriteData(id, false, bytes.Repeat([]byte("u"), 16383)))
+		}
+
+		client.err = errors.Join(client.err, client.framer.WriteData(id, false, []byte("uuu")))
+		pieces = append(pieces, http2Piece{Direction: tlsrecord.ClientDirection, Data: client.take(), IsClose: false})
+	}
+
+	outputs, _ := relayHTTP2(flowHTTP, flow, pieces)
+	resets := []uint32{}
+	framer := http2.NewFramer(nil, bytes.NewReader(outputs[tlsrecord.ServerDirection]))
+
+	for frame, readErr := framer.ReadFrame(); readErr == nil; frame, readErr = framer.ReadFrame() {
+		if reset, isReset := frame.(*http2.RSTStreamFrame); isReset && (reset.ErrCode == http2.ErrCodeRefusedStream) {
+			resets = append(resets, reset.StreamID)
+		}
+	}
+
+	exchanges, _, _ := recorder.Exchanges(1, 0, 1000)
+	refused := (*api.Exchange)(nil)
+
+	for index := range exchanges {
+		if exchanges[index].StreamID == last {
+			refused = &exchanges[index]
+		}
+	}
+
+	requests, _, readErr := readHTTP2(outputs[tlsrecord.ClientDirection])
+	held := holds.List()
+
+	// the hold queue takes the message on its own goroutine
+	for start := time.Now(); (len(held) == 0) && (time.Since(start) < 5*time.Second); held = holds.List() {
+		time.Sleep(time.Millisecond)
+	}
+
+	if err = errors.Join(client.err, server.err, readErr); (err != nil) || !slices.Equal(resets, []uint32{last}) || (len(requests) != 0) || (refused == nil) ||
+		(refused.Request.State != api.IncompleteHTTPState) || !strings.Contains(refused.Request.Note, "decerter refused the stream") || (len(held) != 1) {
+		state.Errorf("Test of the http/2 layer of proxy.interceptTCP failed, the last upload should be refused, resets: %v, requests: %v, exchange: %+v, error: %v", resets, requests, refused, err)
 	}
 }

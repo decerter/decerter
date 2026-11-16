@@ -34,6 +34,9 @@ const (
 	http2DropNote string = "a rule or hold of layer http dropped a message of the stream, both peers that knew it got RST_STREAM (CANCEL)"
 )
 
+// the note of the request of a stream the editor refused
+var http2RefusedNote = fmt.Sprintf("decerter refused the stream: it waited to open behind a kept message with more than %d bytes of DATA waiting, the client got RST_STREAM (REFUSED_STREAM) and may send it again", http2.MaxGatedData)
+
 // which protocol the HTTP layer reads on a flow: decided by the ALPN of a TLS session, or by the client's first bytes (the HTTP/2 preface or not) without one
 type httpVersion string
 
@@ -349,6 +352,13 @@ func (http2Flow *http2Flow) handle(ctx context.Context, flow intercept.Flow, dir
 			if http2Flow.editor != nil {
 				http2Flow.editor.Stop()
 			}
+		}
+	}
+
+	// the streams the editor refused end in the history too
+	if http2Flow.editor != nil {
+		for _, id := range http2Flow.editor.Refused() {
+			http2Flow.handle(ctx, flow, direction, http2Flow.conn.Abort(id, http2RefusedNote), false, logger)
 		}
 	}
 }
