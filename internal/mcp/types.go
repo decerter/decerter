@@ -50,6 +50,8 @@ const (
 	maxEventLineBytes int = 1 << 20
 	// one line on stdin, the limit of the SDK's own stdio transport
 	maxLineBytes int = sdk.DefaultMaxLineLength
+	// a decode candidate's reason that is not in the words of decerter's decoders
+	withheldReason string = "withheld by decerter mcp: not in the words of decerter's decoders"
 	// a JSON call gets this long, a download (a capture is at most 1 GiB) this long; the event tail runs as long as its own bound
 	callTimeout     time.Duration = 30 * time.Second
 	downloadTimeout time.Duration = 5 * time.Minute

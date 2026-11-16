@@ -5,11 +5,18 @@ package mcp
 import (
 	"context"
 	"net/url"
+	"regexp"
 	"strconv"
 
 	v1 "github.com/decerter/decerter/api"
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+// the reasons decerter's decoders give for a candidate: Decode As, the port, the bytes, a content type, an ALPN, an Upgrade or the kept handshake records
+// decerter mcp shows them outside the untrusted marker, so a reason in any other words is withheld
+var reasonPattern = regexp.MustCompile(`^(?:Decode As [a-z0-9-]{1,32}|no decoder took the bytes|(?:tcp|tls|udp|dtls) port [0-9]{1,5} is [A-Za-z0-9 .-]{1,64}|the bytes read as [A-Za-z0-9 .-]{1,64}|` +
+	`content type [a-z0-9.+/-]{1,64} is [A-Za-z0-9 .-]{1,64}|TLS ALPN [a-z0-9.-]{1,32} is [A-Za-z0-9 .-]{1,64}|the dns parameter of the GET is DNS over HTTPS|` +
+	`the flow switched to WebSocket with an HTTP Upgrade|the :protocol websocket of the HTTP/2 extended CONNECT|the handshake records decerter kept of the (?:TLS|DTLS) flow)$`)
 
 // the decode tree of a message's payload: decerter's fields as metadata, the summary and the tree as JSON in the marker m<id>-decode
 func decodeMessage(client Client) (handle sdk.ToolHandlerFor[DecodeMessageInput, any]) {
@@ -175,7 +182,7 @@ func splitDecode(decoded v1.Decode, maxNodes int) (metadata DecodeResult, tree D
 	}
 
 	for _, candidate := range decoded.Candidates {
-		metadata.Candidates = append(metadata.Candidates, v1.DecodeCandidate{Protocol: escapeDecoded(candidate.Protocol), Basis: v1.DecodeBasis(escapeDecoded(string(candidate.Basis))), Reason: escapeDecoded(candidate.Reason), Score: candidate.Score})
+		metadata.Candidates = append(metadata.Candidates, v1.DecodeCandidate{Protocol: escapeDecoded(candidate.Protocol), Basis: v1.DecodeBasis(escapeDecoded(string(candidate.Basis))), Reason: ownReason(candidate.Reason), Score: candidate.Score})
 	}
 
 	for _, protocol := range decoded.Protocols {
@@ -225,5 +232,16 @@ func decodePayloads(id string, tree DecodeTree) (payloads []string, err error) {
 	}
 
 	payloads = []string{Wrap(id+"-decode", text)}
+	return
+}
+
+// a candidate's reason as decerter's decoders word it, or that it was withheld
+func ownReason(reason string) (kept string) {
+	kept = withheldReason
+
+	if reasonPattern.MatchString(reason) {
+		kept = reason
+	}
+
 	return
 }

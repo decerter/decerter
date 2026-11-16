@@ -5,6 +5,8 @@ package ui
 import (
 	"sync"
 	"time"
+
+	v1 "github.com/decerter/decerter/api"
 )
 
 const (
@@ -59,5 +61,16 @@ type Credentials struct {
 
 func (target Target) String() (text string) {
 	text = string(target.Network) + ":" + target.Address
+	return
+}
+
+// the Host of the requests to target: decerter on a unix socket, the loopback ip:port over TCP, where the api refuses decerter because DNS can resolve it
+func (target Target) Host() (host string) {
+	host = v1.HostName
+
+	if target.Network == TCPNetwork {
+		host = target.Address
+	}
+
 	return
 }

@@ -7,6 +7,7 @@ package decode
 import (
 	"cmp"
 	"fmt"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -99,10 +100,10 @@ func Decode(data []byte, context Context, as string) (result v1.Decode, err erro
 	// the decoders read untrusted bytes: a bug in one ends this decode with the raw tree, never decerter; protocol is empty while the decoders sniff
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			result.Error = sanitize(fmt.Sprintf("the %s decoder failed: %v", protocol, recovered))
+			result.Error = sanitize(fmt.Sprintf("the %s decoder failed: %s", protocol, panicText(recovered)))
 
 			if protocol == "" {
-				result.Error = sanitize(fmt.Sprintf("sniffing failed: %v", recovered))
+				result.Error = sanitize("sniffing failed: " + panicText(recovered))
 			}
 
 			setRaw(&result, input, "the decoder failed")
@@ -240,4 +241,16 @@ func setRaw(result *v1.Decode, data []byte, reason string) {
 	result.Protocol = RawProtocol
 	result.Summary = fmt.Sprintf("%d bytes, %s", len(data), reason)
 	result.Tree = []v1.DecodeNode{{Name: RawProtocol, Label: "Data", Value: fmt.Sprintf("%d bytes", len(data)), Offset: 0, Length: len(data), Mask: 0, Error: "", Children: nil}}
+}
+
+// what a panic says in decerter's own words: a runtime error's message (bounds, nil, division), only the type of any other value, which might carry traffic text
+// Error goes outside the untrusted marker of decerter mcp
+func panicText(recovered any) (text string) {
+	text = fmt.Sprintf("a panic of type %T", recovered)
+
+	if runtimeErr, isRuntime := recovered.(runtime.Error); isRuntime {
+		text = runtimeErr.Error()
+	}
+
+	return
 }

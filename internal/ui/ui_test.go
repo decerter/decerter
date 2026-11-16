@@ -25,6 +25,8 @@ import (
 	"time"
 
 	v1 "github.com/decerter/decerter/api"
+	"github.com/decerter/decerter/internal/api"
+	"github.com/decerter/decerter/internal/history"
 )
 
 const (
@@ -1023,4 +1025,31 @@ func closedPort(state *testing.T) (address string) {
 	}
 
 	return
+}
+
+// Test if decerter ui returns with the expected output for an api over TCP, as adb forward has it: the start check and the proxy send the loopback ip:port as Host,
+// which the api takes there, not decerter, which it takes only on its socket.
+func TestTCPHostPositive(state *testing.T) {
+	backend := api.NewBackend(api.Info{Mode: v1.RunMode}, history.DefaultLimits(), nil)
+	server := httptest.NewServer(api.Handler(backend, slog.New(slog.DiscardHandler)))
+	defer server.Close()
+	target, err := ParseTarget(strings.TrimPrefix(server.URL, "http://"))
+
+	if err != nil {
+		state.Fatalf("Could not parse the target, error: %s", err.Error())
+	}
+
+	status, err := Check(state.Context(), target)
+
+	if (err != nil) || (status.Mode != v1.RunMode) || (target.Host() != target.Address) || (Target{Network: UnixNetwork, Address: "/run/decerter/api.sock"}.Host() != v1.HostName) {
+		state.Errorf("Test of ui.Check failed, the api over TCP should answer, host: %q, status: %+v, error: %v", target.Host(), status, err)
+		return
+	}
+
+	recorder := httptest.NewRecorder()
+	newProxy(target, slog.New(slog.DiscardHandler)).ServeHTTP(recorder, httptest.NewRequestWithContext(state.Context(), http.MethodGet, "http://127.0.0.1:1/api/v1/status", http.NoBody))
+
+	if (recorder.Code != http.StatusOK) || !strings.Contains(recorder.Body.String(), `"mode":"run"`) {
+		state.Errorf("Test of the ui proxy failed, the api over TCP should answer, status: %d, body: %s", recorder.Code, recorder.Body.String())
+	}
 }

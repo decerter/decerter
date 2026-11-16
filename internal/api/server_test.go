@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -108,6 +109,134 @@ func getStatusOver(ctx context.Context, socketPath string) (status v1.Status, er
 
 	err = json.NewDecoder(response.Body).Decode(&status)
 	return
+}
+
+// GET /status over the socket with a Host, its status code
+func statusWithHost(ctx context.Context, socketPath string, host string) (status int, err error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+v1.HostName+v1.BasePath+"/status", nil)
+
+	if err != nil {
+		return
+	}
+
+	request.Host = host
+	response, err := socketClient(socketPath).Do(request)
+
+	if err != nil {
+		return
+	}
+
+	defer func() {
+		err = errors.Join(err, response.Body.Close())
+	}()
+
+	status = response.StatusCode
+	_, err = io.Copy(io.Discard, response.Body)
+	return
+}
+
+// Test if api.Server.Serve returns with the expected errors for a request adb forward brought from TCP on Android, a peer named adbd: Host decerter is refused
+// with 403, localhost and a loopback address are served; a peer of another name, or on Linux, is served with Host decerter.
+func TestForwardedNegative(state *testing.T) {
+	setSocketGroup(state, "")
+	logger := slog.New(slog.DiscardHandler)
+	backend := NewBackend(Info{Mode: v1.RunMode}, history.DefaultLimits(), nil)
+	previous := procDirectory
+	state.Cleanup(func() {
+		procDirectory = previous
+	})
+	negativeCases := []struct {
+		Name     string
+		Platform platform.Type
+		Comm     string
+		Expected map[string]int
+	}{
+		{Name: "adbd", Platform: platform.AndroidType, Comm: "adbd\n", Expected: map[string]int{v1.HostName: http.StatusForbidden, "DECERTER:80": http.StatusForbidden, "localhost": http.StatusOK, "127.0.0.1:8080": http.StatusOK, "[::1]:8080": http.StatusOK}},
+		{Name: "unreadable", Platform: platform.AndroidType, Comm: "", Expected: map[string]int{v1.HostName: http.StatusForbidden, "127.0.0.1:8080": http.StatusOK}},
+		{Name: "curl", Platform: platform.AndroidType, Comm: "curl\n", Expected: map[string]int{v1.HostName: http.StatusOK, "localhost": http.StatusOK}},
+		{Name: "linux", Platform: platform.LinuxType, Comm: "adbd\n", Expected: map[string]int{v1.HostName: http.StatusOK, "127.0.0.1:8080": http.StatusOK}},
+	}
+
+	for _, negative := range negativeCases {
+		// the peer is this process, named as the case says
+		procDirectory = state.TempDir()
+
+		if negative.Comm != "" {
+			processDirectory := filepath.Join(procDirectory, strconv.Itoa(os.Getpid()))
+
+			if err := errors.Join(os.Mkdir(processDirectory, 0o700), os.WriteFile(filepath.Join(processDirectory, "comm"), []byte(negative.Comm), 0o600)); err != nil {
+				state.Fatalf("Could not name the peer, error: %s", err.Error())
+			}
+		}
+
+		socketPath := filepath.Join(state.TempDir(), "api.sock")
+		server, err := Listen(socketPath, platform.Platform{Type: negative.Platform, SDK: 0, Release: "", DataDirectory: "", APISocket: socketPath}, logger)
+
+		if err != nil {
+			state.Fatalf("Test of api.Listen failed, cannot listen, error: %s", err.Error())
+		}
+
+		ctx, cancel := context.WithCancel(state.Context())
+		doneChannel := make(chan struct{})
+
+		// api server
+		go func() {
+			defer close(doneChannel)
+			server.Serve(ctx, backend, logger)
+		}()
+
+		for host, expected := range negative.Expected {
+			status, statusErr := statusWithHost(state.Context(), socketPath, host)
+
+			if (statusErr != nil) || (status != expected) {
+				state.Errorf("Test of api.Server.Serve failed, case %s, the host %q should answer %d, status: %d, error: %v", negative.Name, host, expected, status, statusErr)
+			}
+		}
+
+		cancel()
+		<-doneChannel
+	}
+}
+
+// Test if api.isForwarder returns with the expected output for real processes: a process named adbd is, this test and others are not, a process that is gone counts as one.
+func TestIsForwarderPositive(state *testing.T) {
+	sleepPath, err := exec.LookPath("sleep")
+
+	if err != nil {
+		state.Skipf("Could not find sleep, error: %s", err.Error())
+	}
+
+	data, err := os.ReadFile(sleepPath)
+
+	if err != nil {
+		state.Fatalf("Could not read sleep, error: %s", err.Error())
+	}
+
+	adbdPath := filepath.Join(state.TempDir(), forwarderName)
+	err = os.WriteFile(adbdPath, data, 0o700)
+
+	if err != nil {
+		state.Fatalf("Could not copy sleep, error: %s", err.Error())
+	}
+
+	command := exec.CommandContext(state.Context(), adbdPath, "30")
+	err = command.Start()
+
+	if err != nil {
+		state.Fatalf("Could not start the fake adbd, error: %s", err.Error())
+	}
+
+	defer func() {
+		if killErr := command.Process.Kill(); killErr != nil {
+			state.Errorf("Could not stop the fake adbd, error: %s", killErr.Error())
+		}
+
+		_ = command.Wait()
+	}()
+
+	if !isForwarder(int32(command.Process.Pid)) || isForwarder(int32(os.Getpid())) || !isForwarder(-1) {
+		state.Errorf("Test of api.isForwarder failed, adbd should be a forwarder, this test not, a process that is gone one, adbd: %t, test: %t, gone: %t", isForwarder(int32(command.Process.Pid)), isForwarder(int32(os.Getpid())), isForwarder(-1))
+	}
 }
 
 // Test if api.Server.Serve returns with the expected output: the API answers on the socket file until the context is cancelled, the file is removed then and a second Close changes nothing.

@@ -21,6 +21,6 @@ var (
 	ErrNoSecrets      = errors.New("decerter has no tls secrets, the secrets uprobe is not loaded")
 	// the client
 	ErrBrowser    = errors.New("the control api refuses requests from a browser, it takes no Origin or Sec-Fetch-Site header: use decerter ui")
-	ErrHost       = errors.New("the control api takes only the host decerter, localhost or a loopback address, with or without a port")
+	ErrHost       = errors.New("the control api takes only the host localhost or a loopback address, with or without a port, and decerter on its unix socket but not through adb forward")
 	ErrNoCaptures = errors.New("this decerter captures no packets, captures, the capture stream and format=dsb need the capture programs: GET /api/v1/flows/pcap?format=plaintext exports the history")
 )

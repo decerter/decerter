@@ -104,7 +104,7 @@ func Check(ctx context.Context, target Target) (status v1.Status, err error) {
 		return
 	}
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+v1.HostName+v1.BasePath+"/status", http.NoBody)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+target.Host()+v1.BasePath+"/status", http.NoBody)
 
 	if err != nil {
 		return
@@ -178,8 +178,8 @@ func newProxy(target Target, logger *slog.Logger) (handler http.Handler) {
 	reverseProxy := &httputil.ReverseProxy{
 		Rewrite: func(proxyRequest *httputil.ProxyRequest) {
 			proxyRequest.Out.URL.Scheme = "http"
-			proxyRequest.Out.URL.Host = v1.HostName
-			proxyRequest.Out.Host = v1.HostName
+			proxyRequest.Out.URL.Host = target.Host()
+			proxyRequest.Out.Host = target.Host()
 
 			// the api refuses a request with Origin or Sec-Fetch-Site, which only a browser sends
 			for _, name := range []string{"Cookie", "Origin", "Referer", "Authorization", "Sec-Fetch-Site", "Sec-Fetch-Mode", "Sec-Fetch-Dest", "Sec-Fetch-User"} {

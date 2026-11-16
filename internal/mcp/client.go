@@ -64,7 +64,7 @@ func (client Client) sendJSON(ctx context.Context, method string, path string, b
 		reader = bytes.NewReader(encoded)
 	}
 
-	address := url.URL{Scheme: "http", Host: v1.HostName, Path: v1.BasePath + path}
+	address := url.URL{Scheme: "http", Host: client.target.Host(), Path: v1.BasePath + path}
 	request, err := http.NewRequestWithContext(ctx, method, address.String(), reader)
 
 	if err != nil {
@@ -210,7 +210,7 @@ func (client Client) events(ctx context.Context, handle func(event v1.Event) (is
 
 // one GET to the api; an answer other than 200 with mediaType is an error with the api's message, its body is closed then
 func (client Client) get(ctx context.Context, path string, query url.Values, mediaType string) (response *http.Response, err error) {
-	address := url.URL{Scheme: "http", Host: v1.HostName, Path: v1.BasePath + path, RawQuery: query.Encode()}
+	address := url.URL{Scheme: "http", Host: client.target.Host(), Path: v1.BasePath + path, RawQuery: query.Encode()}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, address.String(), http.NoBody)
 
 	if err != nil {

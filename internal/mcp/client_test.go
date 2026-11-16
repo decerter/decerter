@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -18,6 +19,8 @@ import (
 	"testing"
 
 	v1 "github.com/decerter/decerter/api"
+	"github.com/decerter/decerter/internal/api"
+	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/ui"
 )
 
@@ -283,5 +286,25 @@ func TestEventsNegative(state *testing.T) {
 			state.Errorf("Test of mcp.Client.events function failed, %s, error should be %v, closed: %v, error: %v", negative.Name, negative.Expected, isClosed, err)
 			return
 		}
+	}
+}
+
+// Test if mcp.Client returns with the expected output for an api over TCP, as adb forward has it: it sends the loopback ip:port as Host, which the api takes
+// there, not decerter, which it takes only on its socket.
+func TestTCPHostPositive(state *testing.T) {
+	backend := api.NewBackend(api.Info{Mode: v1.CaptureMode}, history.DefaultLimits(), nil)
+	server := httptest.NewServer(api.Handler(backend, slog.New(slog.DiscardHandler)))
+	defer server.Close()
+	target, err := ui.ParseTarget(strings.TrimPrefix(server.URL, "http://"))
+
+	if err != nil {
+		state.Fatalf("Could not parse the target, error: %s", err.Error())
+	}
+
+	status := v1.Status{}
+	err = NewClient(target).getJSON(state.Context(), "/status", nil, &status)
+
+	if (err != nil) || (status.Mode != v1.CaptureMode) {
+		state.Errorf("Test of mcp.Client failed, the api over TCP should answer, status: %+v, error: %v", status, err)
 	}
 }

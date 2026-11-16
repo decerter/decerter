@@ -30,6 +30,9 @@ import (
 // the lookup in the group database of the host, the tests replace it: a host with the group and one without it must test the same
 var lookupSocketGroup = user.LookupGroup
 
+// the directory with a directory per process, its comm the process's name; the tests give a peer the name adbd with one of their own
+var procDirectory = "/proc"
+
 // the backend of one run: holds and rules only when the proxy intercepts, every hold event goes on the bus
 func NewBackend(info Info, limits history.Limits, keyLog func(clientRandom [32]byte) (keyLog string, found bool, err error)) (backend *Backend) {
 	bus := NewBus()
@@ -129,6 +132,7 @@ func Handler(backend *Backend, logger *slog.Logger) (handler http.Handler) {
 
 // nil for a request that is no browser's: adb forward puts the api on host TCP loopback, where every web page of the host's browser could reach it
 // Origin and Sec-Fetch-Site come only from a browser (decerter ui drops them, curl and decerter mcp never send them); another Host is a name rebound to 127.0.0.1
+// decerter is a name DNS can resolve too, so it is taken only on the unix socket, never from TCP: a listener of its own or adb forward
 func checkClient(request *http.Request) (err error) {
 	if request.Header.Get("Origin") != "" {
 		err = fmt.Errorf("%w: Origin %q", ErrBrowser, request.Header.Get("Origin"))
@@ -140,15 +144,23 @@ func checkClient(request *http.Request) (err error) {
 		return
 	}
 
-	if !isLocalHost(request.Host) {
+	if !isLocalHost(request.Host, !isOverTCP(request)) {
 		err = fmt.Errorf("%w: %q", ErrHost, request.Host)
 	}
 
 	return
 }
 
-// decerter, localhost or a loopback address, each with or without a port
-func isLocalHost(hostField string) (isLocal bool) {
+// whether the request came over TCP: on a TCP listener, or on the socket by adb forward; a request served without a listener (a test) did not
+func isOverTCP(request *http.Request) (isTCP bool) {
+	isForwarded, _ := request.Context().Value(forwardedKey{}).(bool)
+	address, isFound := request.Context().Value(http.LocalAddrContextKey).(net.Addr)
+	isTCP = isForwarded || (isFound && (address.Network() != "unix"))
+	return
+}
+
+// localhost or a loopback address, each with or without a port; decerter too when isDecerterTaken
+func isLocalHost(hostField string, isDecerterTaken bool) (isLocal bool) {
 	host := hostField
 	splitHost, port, splitErr := net.SplitHostPort(hostField)
 
@@ -164,7 +176,7 @@ func isLocalHost(hostField string) (isLocal bool) {
 		host = hostField[1 : len(hostField)-1]
 	}
 
-	if strings.EqualFold(host, v1.HostName) || strings.EqualFold(host, "localhost") {
+	if (isDecerterTaken && strings.EqualFold(host, v1.HostName)) || strings.EqualFold(host, "localhost") {
 		isLocal = true
 		return
 	}
@@ -262,10 +274,19 @@ func accessPolicyOf(socketPath string, platformType platform.Type, groupID int64
 		gid:       groupID,
 	}
 
+	// adb forward connects as adbd, from TCP on the host
 	if platformType == platform.AndroidType {
 		policy.uids = append(policy.uids, androidShellUID)
+		policy.isForwardChecked = true
 	}
 
+	return
+}
+
+// whether the peer is adbd, which connects for adb forward; a peer whose name can't be read counts as adbd
+func isForwarder(pid int32) (isForwarded bool) {
+	name, err := os.ReadFile(filepath.Join(procDirectory, strconv.Itoa(int(pid)), "comm"))
+	isForwarded = (err != nil) || (strings.TrimSpace(string(name)) == forwarderName)
 	return
 }
 
@@ -391,7 +412,9 @@ func (listener peerListener) Accept() (connection net.Conn, err error) {
 		uid, gid, pid, credentialsErr := peerCredentials(connection)
 
 		if credentialsErr == nil && isPeerAllowed(uid, gid, listener.policy) {
-			listener.logger.Debug("Api client connected", "uid", uid, "gid", gid, "pid", pid)
+			isForwarded := listener.policy.isForwardChecked && isForwarder(pid)
+			listener.logger.Debug("Api client connected", "uid", uid, "gid", gid, "pid", pid, "forwarded", isForwarded)
+			connection = peerConnection{Conn: connection, isForwarded: isForwarded}
 			return
 		}
 
@@ -442,6 +465,14 @@ func (server *Server) Serve(ctx context.Context, backend *Backend, logger *slog.
 		// the event streams end with ctx
 		BaseContext: func(listener net.Listener) context.Context {
 			return ctx
+		},
+		// the requests of a connection adb forward brought from TCP
+		ConnContext: func(connectionCtx context.Context, connection net.Conn) context.Context {
+			if peer, isPeer := connection.(peerConnection); isPeer && peer.isForwarded {
+				connectionCtx = context.WithValue(connectionCtx, forwardedKey{}, true)
+			}
+
+			return connectionCtx
 		},
 	}
 	serveErrChannel := make(chan error, 1)

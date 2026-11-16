@@ -74,11 +74,11 @@ A DNS query of a UDP flow to port 53 (the tree is cut after the flags):
 
 - `source` names the bytes that `offset` and `length` count in. `payload` is the message's payload, the same offsets as the `offset` of a `GET /messages/{id}` window. `body` is the exchange body, as in `GET /exchanges/{id}/body`. `target` is the bytes decerter took from the request target, because the request had no body (the `dns` parameter of a DoH GET). `handshake` is the handshake records of a flow's direction (`flow_id`, `direction`, and `cut` when a record did not fit). `stream` is the joined payloads of a flow's direction (`flow_id`, `direction`, `segments`, and `cut` with a `note` when the stream stops early). For `handshake` and `stream` the bytes are in `data`, a payload window with hex and escaped text, and the offsets count from their first byte.
 - A node has a filter-style `name` (`dns.qry.name`), a `label`, a `value` (empty for a branch), `offset` and `length`, a `mask` for a field smaller than its bytes (a flag bit), an `error` when that part is malformed or cut short, and `children`. The names follow Wireshark's where one exists, so they look familiar; they are not fields of [decerter's filter language](filter.md).
-- `summary` is one line, like Wireshark's info column. `error` is set when the decoder failed (a panic, which decerter catches): the tree is then the raw node.
+- `summary` is one line, like Wireshark's info column. `error` is set when the decoder failed (a panic, which decerter catches): the tree is then the raw node. It names the decoder and the runtime error (`index out of range [5] with length 3`), or only the type of any other panic value, since that value could carry text from the traffic.
 - `length` is the number of bytes decoded and `total` the payload's length. `truncated` is true when the input was cut at 1 MiB or the tree reached a limit (nodes, depth, bytes of strings, or the bytes one decode inflates); its last root is then a `decode.truncated` node that names the limits.
 
 ## How decerter chooses
-The candidates are listed in this order, each with its reason. The first one with a score above 0 is taken. Sniffing alone needs a score of 50.
+The candidates are listed in this order, each with its reason. A reason is in decerter's own words and carries no text from the traffic: a content type is named by decerter's media type (`content type application/grpc is gRPC`), never by the peer's header with its parameters. The first one with a score above 0 is taken. Sniffing alone needs a score of 50.
 1. `override`: `as=` names the protocol. It is always taken, and the decoder then reports what doesn't fit as node errors.
 2. `context`: something outside the bytes names the protocol. Examples are an HTTP body's `Content-Type` (`application/dns-message`, `application/grpc`, `application/x-protobuf`), the `dns` parameter of a GET, a TLS ALPN `dot`, the `Upgrade: websocket` of a 101 the flow's last exchange switched with (or the `:protocol` of an HTTP/2 extended CONNECT), and the handshake records of `GET /flows/{id}/decode`. The handshake records are always TLS or DTLS records, so for them only the `tls` or `dtls` context candidate is listed: the flow's ALPN (`mqtt`, `dot`, `imap`) and its port name what comes after the handshake, not the records.
 3. `port`: the flow's server port on its layer, such as udp 53, tcp 53, udp 5353 (mDNS), udp 5355 (LLMNR), tls 853, dtls 853 and tcp 443 (TLS records of a flow decerter only relays). HTTP bodies have no port candidate.
@@ -277,7 +277,7 @@ The same decoder also takes TLS records as they go over tcp (a flow to port 443 
 A protocol is one new file in `internal/decode` whose `init()` calls `register(decoder{...})` with these fields:
 - its name and title
 - its ports per layer
-- `hint`, the context reasons, such as a content type, an ALPN or an Upgrade header
+- `hint`, the context reasons, such as a content type, an ALPN or an Upgrade header. A reason uses only decerter's words (its own constants, never a value from the context), and a new kind of reason needs a template in `reasonPattern` of `internal/mcp`, or `decerter mcp` withholds it; `TestReasonPatternPositive` checks that
 - `sniff`, a score of the bytes
 - `decode`, which adds nodes with `tree.add`, `tree.fail` and `tree.addSummary`
 - `fromTarget` when a request target can carry the PDU

@@ -95,6 +95,13 @@ func TestRewritePositive(state *testing.T) {
 		state.Errorf("Test of the rewrite failed, a deleted rule should change nothing, error: %s", err.Error())
 	}
 
+	// a page that rebinds the name decerter to the forward's port is refused, the forward's own address is served
+	for host, expected := range map[string]int{v1.HostName: http.StatusForbidden, "decerter:" + client.port: http.StatusForbidden, "127.0.0.1:" + client.port: http.StatusOK, "localhost:" + client.port: http.StatusOK} {
+		if status, err = client.statusWithHost(state.Context(), host); (err != nil) || (status != expected) {
+			state.Errorf("Test of the api over adb forward failed, the host %q should answer %d, status: %d, error: %v", host, expected, status, err)
+		}
+	}
+
 	checkAPIClient(state, decerter)
 	stopDeviceDecerter(state, decerter, true)
 }
@@ -242,7 +249,7 @@ func forwardAPI(state *testing.T) (client apiClient) {
 	return
 }
 
-// adbd connects to the abstract socket as root after adb root, as shell otherwise, and decerter let it in
+// adbd connects to the abstract socket as root after adb root, as shell otherwise, and decerter let it in as a connection adb forward brought from TCP
 func checkAPIClient(state *testing.T, decerter deviceDecerter) {
 	log, err := decerter.log(state.Context())
 
@@ -253,9 +260,33 @@ func checkAPIClient(state *testing.T, decerter deviceDecerter) {
 	isRoot := strings.Contains(log, apiClientLog+`,"uid":0,`)
 	isShell := strings.Contains(log, apiClientLog+`,"uid":2000,`)
 
-	if (!isRoot && !isShell) || strings.Contains(log, `"msg":"Refused api client"`) {
-		state.Errorf("adb forward should connect as root or shell and be let in, log:\n%s", log)
+	if (!isRoot && !isShell) || strings.Contains(log, `"msg":"Refused api client"`) || !strings.Contains(log, `"forwarded":true`) || strings.Contains(log, `"forwarded":false`) {
+		state.Errorf("adb forward should connect as root or shell, be let in and be seen as forwarded, log:\n%s", log)
 	}
+}
+
+// the status code of GET /status through adb forward with a Host: decerter is a name DNS can resolve, so the api takes it only on its socket, not from TCP
+func (client apiClient) statusWithHost(ctx context.Context, host string) (status int, err error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+net.JoinHostPort("127.0.0.1", client.port)+v1.BasePath+"/status", http.NoBody)
+
+	if err != nil {
+		return
+	}
+
+	request.Host = host
+	response, err := client.client.Do(request)
+
+	if err != nil {
+		return
+	}
+
+	defer func() {
+		err = errors.Join(err, response.Body.Close())
+	}()
+
+	status = response.StatusCode
+	_, err = io.Copy(io.Discard, response.Body)
+	return
 }
 
 // one request with a JSON body, nil sends none; result nil reads no answer

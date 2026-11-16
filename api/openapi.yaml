@@ -12,9 +12,11 @@ info:
     url: https://opensource.org/license/mit
   description: |
     HTTP/1.1 on a unix socket, there is no TCP listener. The host in the URL is `decerter`, `localhost` or a loopback
-    address, with or without a port:
+    address, with or without a port; through `adb forward` (TCP on the host) only `localhost` or a loopback address,
+    since `decerter` is a name DNS can resolve too:
 
         curl --unix-socket /run/decerter/api.sock http://decerter/api/v1/status
+        curl http://127.0.0.1:8080/api/v1/status
 
     The API is not for browsers: `adb forward` puts it on TCP 127.0.0.1 of the host, where any web page could send to
     it, so a request with an `Origin` or `Sec-Fetch-Site` header, or another host (a name a web page rebound to
@@ -954,7 +956,7 @@ components:
     Forbidden:
       description: |
         A request from a browser: it has an Origin or Sec-Fetch-Site header, or a Host other than decerter, localhost or a
-        loopback address
+        loopback address (over adb forward decerter too)
       content:
         application/json:
           schema:

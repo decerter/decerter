@@ -22,6 +22,8 @@ const (
 	socketGroup string = "decerter"
 	// Android's AID_SHELL, adbd runs as it without adb root and connects for adb forward localabstract:
 	androidShellUID uint32 = 2000
+	// the name of adbd's process: a connection of it came from TCP on the host by adb forward; procDirectory has the names of the processes
+	forwarderName string = "adbd"
 	// the default window of a payload and the largest one a request may ask for
 	defaultPayloadLength int = 4096
 	maxPayloadLength     int = 64 << 10
@@ -105,10 +107,20 @@ type Server struct {
 
 // who may connect: isChecked is false for a socket file, its mode and group decide; an abstract socket has neither, so the peer's uid or primary gid is checked, gid -1 is no group
 type accessPolicy struct {
-	isChecked bool
-	uids      []uint32
-	gid       int64
+	isChecked        bool
+	uids             []uint32
+	gid              int64
+	isForwardChecked bool
 }
+
+// a connection of the api socket; isForwarded is true when its peer is adbd, so adb forward brought it from TCP on the host
+type peerConnection struct {
+	net.Conn
+	isForwarded bool
+}
+
+// the context key of the requests of a connection adb forward brought from TCP
+type forwardedKey struct{}
 
 // a listener that refuses the connections of peers the policy does not allow
 type peerListener struct {

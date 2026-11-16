@@ -43,11 +43,14 @@ func init() {
 }
 
 // application/grpc, application/grpc+proto, application/grpc-web and application/grpc-web+proto; grpc-web-text is base64 and not taken
+// the reason names decerter's own media type, never the peer's content type: it goes outside the untrusted marker of decerter mcp
 func grpcHint(context Context) (reason string) {
-	mediaType := grpcMediaTypeOf(context)
-
-	if (mediaType == grpcMediaType) || (mediaType == grpcWebMediaType) {
-		reason = "content type " + strings.ToLower(context.ContentType) + " is " + map[bool]string{false: "gRPC", true: "gRPC-Web"}[mediaType == grpcWebMediaType]
+	switch grpcMediaTypeOf(context) {
+	case grpcMediaType:
+		reason = "content type " + grpcMediaType + " is gRPC"
+	case grpcWebMediaType:
+		reason = "content type " + grpcWebMediaType + " is gRPC-Web"
+	default:
 	}
 
 	return

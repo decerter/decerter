@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
@@ -380,7 +381,8 @@ func TestHandlerNegative(state *testing.T) {
 	}
 }
 
-// Test if api.Handler serves the clients that are no browser: curl and decerter mcp on the socket (host decerter or localhost) and on the adb forward (a loopback address with its port), and a JSON body with parameters in its Content-Type.
+// Test if api.Handler serves the clients that are no browser: curl and decerter mcp on the socket (host decerter, localhost or a loopback address) and over TCP
+// (localhost or a loopback address with its port, as adb forward has it), and a JSON body with parameters in its Content-Type.
 func TestHandlerClientPositive(state *testing.T) {
 	test, err := newTestBackend(state.Context())
 
@@ -391,8 +393,9 @@ func TestHandlerClientPositive(state *testing.T) {
 	defer test.stop()
 	server := httptest.NewServer(Handler(test.backend, slog.New(slog.DiscardHandler)))
 	defer server.Close()
+	loopbackHosts := []string{"localhost", "LocalHost:8080", "127.0.0.1", "127.0.0.1:8080", "127.1.2.3:80", "[::1]", "[::1]:8080"}
 
-	for _, host := range []string{v1.HostName, "DECERTER", "decerter:80", "localhost", "LocalHost:8080", "127.0.0.1", "127.0.0.1:8080", "127.1.2.3:80", "[::1]", "[::1]:8080"} {
+	for _, host := range loopbackHosts {
 		request, requestErr := http.NewRequestWithContext(state.Context(), http.MethodGet, server.URL+v1.BasePath+"/status", http.NoBody)
 
 		if requestErr != nil {
@@ -403,7 +406,39 @@ func TestHandlerClientPositive(state *testing.T) {
 		status, body, sendErr := sendRequest(server, request)
 
 		if (sendErr != nil) || (status != http.StatusOK) {
-			state.Errorf("Test of api.Handler failed, the host %q should be served, status: %d, body: %s, error: %v", host, status, body, sendErr)
+			state.Errorf("Test of api.Handler failed, the host %q should be served over TCP, status: %d, body: %s, error: %v", host, status, body, sendErr)
+			return
+		}
+	}
+
+	// the unix socket takes decerter too
+	socketPath := filepath.Join(state.TempDir(), "api.sock")
+	listener, err := net.Listen("unix", socketPath)
+
+	if err != nil {
+		state.Fatalf("Could not listen on the socket, error: %s", err.Error())
+	}
+
+	socketServer := &http.Server{Handler: Handler(test.backend, slog.New(slog.DiscardHandler)), ReadHeaderTimeout: readHeaderTimeout}
+
+	// the socket's server
+	go func() {
+		if serveErr := socketServer.Serve(listener); !errors.Is(serveErr, http.ErrServerClosed) {
+			state.Errorf("Could not serve on the socket, error: %s", serveErr.Error())
+		}
+	}()
+
+	defer func() {
+		if closeErr := socketServer.Close(); closeErr != nil {
+			state.Errorf("Could not close the socket's server, error: %s", closeErr.Error())
+		}
+	}()
+
+	for _, host := range append([]string{v1.HostName, "DECERTER", "decerter:80"}, loopbackHosts...) {
+		status, statusErr := statusWithHost(state.Context(), socketPath, host)
+
+		if (statusErr != nil) || (status != http.StatusOK) {
+			state.Errorf("Test of api.Handler failed, the host %q should be served on the socket, status: %d, error: %v", host, status, statusErr)
 			return
 		}
 	}
@@ -470,6 +505,9 @@ func TestHandlerClientNegative(state *testing.T) {
 		{Method: http.MethodGet, Path: "/status", Host: "127.0.0.1.nip.io", Status: http.StatusForbidden},
 		{Method: http.MethodGet, Path: "/status", Host: "192.168.1.2:8080", Status: http.StatusForbidden},
 		{Method: http.MethodGet, Path: "/status", Host: "decerter:http", Status: http.StatusForbidden},
+		// decerter resolves through DNS too: a page at http://decerter:<port>/ of a rebinding name, TCP takes only localhost and loopback addresses
+		{Method: http.MethodGet, Path: "/flows", Host: v1.HostName, Status: http.StatusForbidden},
+		{Method: http.MethodGet, Path: "/keylog", Host: "DECERTER:8080", Status: http.StatusForbidden},
 		{Method: http.MethodGet, Path: "/status", Host: "[fe80::1%25lo]:8080", Status: http.StatusForbidden},
 		{Method: http.MethodGet, Path: "/nothing", Host: "rebind.example", Status: http.StatusForbidden},
 		// a body a web page can send without a preflight is no JSON to the api
