@@ -140,6 +140,7 @@ func FuzzGRPC(fuzz *testing.F) {
 	fuzz.Add(grpcFrame(1, gzipped(fuzz, echoMessage("packed"))))
 	fuzz.Add(join(grpcFrame(0, echoMessage("hi")), grpcFrame(0x80, []byte("grpc-status: 0\r\n"))))
 	fuzz.Add(join([]byte{0}, be32(10), []byte("abc")))
+	fuzz.Add(bytes.Repeat(grpcFrame(1, gzipped(fuzz, make([]byte, 1<<16))), 3))
 	gzipContext := bodyContext("application/grpc")
 	gzipContext.Encoding = "gzip"
 	contexts := []Context{bodyContext("application/grpc"), bodyContext("application/grpc-web"), bodyContext("application/grpc+json"), gzipContext}

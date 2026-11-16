@@ -103,12 +103,13 @@ func fieldCount(count int) (text string) {
 
 // the fields of a message to its end under parent; count is how many were read, an error on parent says where it broke
 func protobufMessage(tree *Tree, parent *node, data []byte, place placement, depth int) (count int) {
-	_, count = protobufFields(tree, parent, data, 0, place, depth, 0)
+	_, count, _ = protobufFields(tree, parent, data, 0, place, depth, 0)
 	return
 }
 
 // fields from offset on until the end of data, or until the end of the group of field number group (0 for none); next is after the last field read
-func protobufFields(tree *Tree, parent *node, data []byte, offset int, place placement, depth int, group uint64) (next int, count int) {
+// isWhole is false when a field broke (the error is on it or on parent) or the tree is full: the bytes from next on are not fields then
+func protobufFields(tree *Tree, parent *node, data []byte, offset int, place placement, depth int, group uint64) (next int, count int, isWhole bool) {
 	next = offset
 
 	for (next < len(data)) && !tree.isFull {
@@ -127,10 +128,13 @@ func protobufFields(tree *Tree, parent *node, data []byte, offset int, place pla
 			field := tree.addAt(parent, place, "protobuf.field", fmt.Sprintf("End of group %d", number), "", start, tagLength)
 			protobufTag(tree, field, place, start, tagLength, number, wireType)
 
-			if number != group {
+			// field number 0 is no group's, at the top no group is open
+			if (group == 0) || (number != group) {
 				tree.fail(field, fmt.Sprintf("the end of group %d where none is open", number))
+				return
 			}
 
+			isWhole = true
 			return
 		}
 
@@ -156,10 +160,16 @@ func protobufFields(tree *Tree, parent *node, data []byte, offset int, place pla
 		}
 	}
 
-	if group != 0 {
-		tree.fail(parent, fmt.Sprintf("group %d has no end", group))
+	if tree.isFull {
+		return
 	}
 
+	if group != 0 {
+		tree.fail(parent, fmt.Sprintf("group %d has no end", group))
+		return
+	}
+
+	isWhole = true
 	return
 }
 
@@ -272,9 +282,14 @@ func protobufValue(tree *Tree, field *node, data []byte, offset int, place place
 			return
 		}
 
-		count := 0
-		next, count = protobufFields(tree, field, data, offset, place, depth+1, number)
+		count, isWhole := 0, false
+		next, count, isWhole = protobufFields(tree, field, data, offset, place, depth+1, number)
 		tree.setValue(field, fieldCount(count))
+
+		// a field inside the group broke: the bytes after it are not this message's fields
+		if !isWhole {
+			return
+		}
 	default:
 		tree.fail(field, fmt.Sprintf("wire type %d is not one of protobuf's", wireType))
 		return

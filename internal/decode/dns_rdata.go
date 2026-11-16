@@ -20,13 +20,13 @@ import (
 // RFC 9460 (SVCB, HTTPS), RFC 6891 (OPT), RFC 4034 (DNSKEY, RRSIG, NSEC, DS) and RFC 7344 (CDS, CDNSKEY); any other type is its rdata in hex
 // value is a short form for the record's label and the summary
 func dnsRdata(tree *Tree, recordNode *node, message dnsMessage, record dnsResource) (value string) {
-	reader := &rdataReader{tree: tree, parent: recordNode, message: message, offset: record.rdata, end: record.end, isShort: false}
+	reader := newRdataReader(tree, recordNode, message, record.rdata, record.end)
 
 	switch record.rrType {
 	case 1:
-		value = reader.address("dns.a", "Address", 4)
+		value = reader.wholeAddress("dns.a", "Address", 4)
 	case 28:
-		value = reader.address("dns.aaaa", "Address", 16)
+		value = reader.wholeAddress("dns.aaaa", "Address", 16)
 	case 2, 3, 4, 5, 7, 8, 9, 12, 39:
 		names := map[uint16]string{2: "dns.ns", 5: "dns.cname", 12: "dns.ptr", 39: "dns.dname"}
 		fieldName, isNamed := names[record.rrType]
@@ -37,7 +37,7 @@ func dnsRdata(tree *Tree, recordNode *node, message dnsMessage, record dnsResour
 
 		value = reader.name(fieldName, "Target")
 	case 15, 36:
-		preference := reader.uint16Field("dns.mx.preference", "Preference")
+		preference, _ := reader.number("dns.mx.preference", "Preference", 2, nil)
 		value = strconv.Itoa(int(preference)) + " " + reader.name("dns.mx.exchange", "Exchange")
 	case 16, 99:
 		texts := []string{}
@@ -52,15 +52,15 @@ func dnsRdata(tree *Tree, recordNode *node, message dnsMessage, record dnsResour
 	case 6:
 		value = reader.name("dns.soa.mname", "Primary name server")
 		reader.name("dns.soa.rname", "Responsible mailbox")
-		reader.uint32Field("dns.soa.serial", "Serial number", false)
-		reader.uint32Field("dns.soa.refresh", "Refresh interval", true)
-		reader.uint32Field("dns.soa.retry", "Retry interval", true)
-		reader.uint32Field("dns.soa.expire", "Expire limit", true)
-		reader.uint32Field("dns.soa.minimum", "Minimum TTL", true)
+		reader.number("dns.soa.serial", "Serial number", 4, nil)
+		reader.number("dns.soa.refresh", "Refresh interval", 4, ttlText)
+		reader.number("dns.soa.retry", "Retry interval", 4, ttlText)
+		reader.number("dns.soa.expire", "Expire limit", 4, ttlText)
+		reader.number("dns.soa.minimum", "Minimum TTL", 4, ttlText)
 	case 33:
-		priority := reader.uint16Field("dns.srv.priority", "Priority")
-		weight := reader.uint16Field("dns.srv.weight", "Weight")
-		port := reader.uint16Field("dns.srv.port", "Port")
+		priority, _ := reader.number("dns.srv.priority", "Priority", 2, nil)
+		weight, _ := reader.number("dns.srv.weight", "Weight", 2, nil)
+		port, _ := reader.number("dns.srv.port", "Port", 2, nil)
 		value = fmt.Sprintf("%d %d %d %s", priority, weight, port, reader.name("dns.srv.target", "Target"))
 	case 257:
 		value = reader.caa()
@@ -69,9 +69,9 @@ func dnsRdata(tree *Tree, recordNode *node, message dnsMessage, record dnsResour
 	case optType:
 		reader.options()
 	case 43, 59:
-		keyTag := reader.uint16Field("dns.ds.key_tag", "Key tag")
-		algorithm := reader.uint8Named("dns.ds.algorithm", "Algorithm", dnssecAlgorithms)
-		reader.uint8Named("dns.ds.digest_type", "Digest type", digestTypes)
+		keyTag, _ := reader.number("dns.ds.key_tag", "Key tag", 2, nil)
+		algorithm, _ := reader.number("dns.ds.algorithm", "Algorithm", 1, named(dnssecAlgorithms))
+		reader.number("dns.ds.digest_type", "Digest type", 1, named(digestTypes))
 		reader.rest("dns.ds.digest", "Digest", false)
 		value = fmt.Sprintf("key tag %d, %s", keyTag, shortName(dnssecAlgorithms, uint16(algorithm)))
 	case 48, 60:
@@ -89,80 +89,9 @@ func dnsRdata(tree *Tree, recordNode *node, message dnsMessage, record dnsResour
 	return
 }
 
-// count bytes at the reader's offset; the first field that does not fit fails the record and stops the reader
-func (reader *rdataReader) take(label string, count int) (data []byte, start int, ok bool) {
-	if reader.isShort {
-		return
-	}
-
-	if (count < 0) || (reader.offset+count > reader.end) {
-		reader.isShort = true
-		reader.tree.fail(reader.parent, fmt.Sprintf("%s: %s", label, errFieldShort.Error()))
-		return
-	}
-
-	start = reader.offset
-	data = reader.message.data[start : start+count]
-	reader.offset += count
-	ok = true
-	return
-}
-
-// a field node at start, in payload offsets
-func (reader *rdataReader) add(name string, label string, value string, start int, length int) (child *node) {
-	child = reader.tree.add(reader.parent, name, label, value, reader.message.base+start, length)
-	return
-}
-
-func (reader *rdataReader) uint8Field(name string, label string) (value uint8) {
-	data, start, ok := reader.take(label, 1)
-
-	if ok {
-		value = data[0]
-		reader.add(name, label, strconv.Itoa(int(value)), start, 1)
-	}
-
-	return
-}
-
-func (reader *rdataReader) uint8Named(name string, label string, table nameTable) (value uint8) {
-	data, start, ok := reader.take(label, 1)
-
-	if ok {
-		value = data[0]
-		reader.add(name, label, nameOf(table, uint16(value)), start, 1)
-	}
-
-	return
-}
-
-func (reader *rdataReader) uint16Field(name string, label string) (value uint16) {
-	data, start, ok := reader.take(label, 2)
-
-	if ok {
-		value = binary.BigEndian.Uint16(data)
-		reader.add(name, label, strconv.Itoa(int(value)), start, 2)
-	}
-
-	return
-}
-
-// isDuration adds the seconds in days, hours and minutes
-func (reader *rdataReader) uint32Field(name string, label string, isDuration bool) (value uint32) {
-	data, start, ok := reader.take(label, 4)
-
-	if !ok {
-		return
-	}
-
-	value = binary.BigEndian.Uint32(data)
-	text := strconv.FormatUint(uint64(value), 10)
-
-	if isDuration {
-		text = ttlText(value)
-	}
-
-	reader.add(name, label, text, start, 4)
+// the fields of an rdata from offset to end under parent, in payload offsets: a cursor over the message that knows its names
+func newRdataReader(tree *Tree, parent *node, message dnsMessage, offset int, end int) (reader *rdataReader) {
+	reader = &rdataReader{cursor: newCursor(tree, parent, message.data, offset, end, at(message.base)), message: message}
 	return
 }
 
@@ -179,7 +108,7 @@ func (reader *rdataReader) timeField(name string, label string) (value uint32) {
 }
 
 // an address of size bytes, the whole rdata
-func (reader *rdataReader) address(name string, label string, size int) (value string) {
+func (reader *rdataReader) wholeAddress(name string, label string, size int) (value string) {
 	if reader.end-reader.offset != size {
 		reader.isShort = true
 		reader.tree.fail(reader.parent, fmt.Sprintf("the address has %d bytes, the rdata %d", size, reader.end-reader.offset))
@@ -187,10 +116,8 @@ func (reader *rdataReader) address(name string, label string, size int) (value s
 		return
 	}
 
-	data, start, _ := reader.take(label, size)
-	address, _ := netip.AddrFromSlice(data)
+	address, _ := reader.address(name, label, size)
 	value = address.String()
-	reader.add(name, label, value, start, size)
 	return
 }
 
@@ -239,23 +166,21 @@ func (reader *rdataReader) text(name string, label string) (value string) {
 
 // the bytes up to the end of the rdata, as hex or as base64 (keys and signatures, the way zone files write them)
 func (reader *rdataReader) rest(name string, label string, isBase64 bool) (data []byte) {
-	data, start, ok := reader.take(label, reader.end-reader.offset)
-
-	if !ok {
+	if !isBase64 {
+		data, _ = reader.bytesField(name, label, reader.left())
 		return
 	}
 
-	value := hexValue(data)
+	data, start, ok := reader.take(label, reader.left())
 
-	if isBase64 {
-		value = base64Value(data)
+	if ok {
+		reader.add(name, label, base64Value(data), start, len(data))
 	}
 
-	reader.add(name, label, value, start, len(data))
 	return
 }
 
-// bytes after the last field of a known type
+// bytes after the last field of a known type, said the way DNS says it
 func (reader *rdataReader) finish() {
 	if !reader.isShort && (reader.offset < reader.end) {
 		reader.tree.fail(reader.parent, fmt.Sprintf("%s: %d bytes", errRdataTrailer.Error(), reader.end-reader.offset))
@@ -272,7 +197,7 @@ func (reader *rdataReader) caa() (value string) {
 
 	flags := reader.add("dns.caa.flags", "Flags", fmt.Sprintf("0x%02x", flagsData[0]), start, 1)
 	reader.tree.addBits(flags, "dns.caa.flags.critical", "Issuer critical", yesNo(flagsData[0]&0x80 != 0), reader.message.base+start, 1, 0x80)
-	tagLength := reader.uint8Field("dns.caa.tag_length", "Tag length")
+	tagLength, _ := reader.number("dns.caa.tag_length", "Tag length", 1, nil)
 	tagData, tagStart, ok := reader.take("Tag", int(tagLength))
 
 	if !ok {
@@ -290,7 +215,7 @@ func (reader *rdataReader) caa() (value string) {
 
 // RFC 9460 2.2: priority, target and the SvcParams, each key, length and value
 func (reader *rdataReader) svcb() (value string) {
-	priority := reader.uint16Field("dns.svcb.priority", "Priority")
+	priority, _ := reader.number("dns.svcb.priority", "Priority", 2, nil)
 	target := reader.name("dns.svcb.target", "Target")
 	parts := []string{strconv.Itoa(int(priority)), target}
 	mode := "service mode"
@@ -320,7 +245,7 @@ func (reader *rdataReader) svcb() (value string) {
 		}
 
 		param := reader.add("dns.svcb.param", "SvcParam", "", start, 4+length)
-		paramReader := &rdataReader{tree: reader.tree, parent: param, message: reader.message, offset: start, end: start + 4 + length, isShort: false}
+		paramReader := newRdataReader(reader.tree, param, reader.message, start, start+4+length)
 		paramReader.add("dns.svcb.param.key", "Key", nameOf(svcbKeys, key), start, 2)
 		paramReader.add("dns.svcb.param.length", "Length", strconv.Itoa(length), start+2, 2)
 		paramReader.offset = dataStart
@@ -362,7 +287,8 @@ func (reader *rdataReader) svcbValue(key uint16, data []byte) (text string) {
 		}
 	case 2, 8:
 	case 3:
-		values = append(values, strconv.Itoa(int(reader.uint16Field("dns.svcb.param.port", "Port"))))
+		port, _ := reader.number("dns.svcb.param.port", "Port", 2, nil)
+		values = append(values, strconv.Itoa(int(port)))
 	case 4, 6:
 		size, name := 4, "dns.svcb.param.ipv4hint.ip"
 
@@ -389,7 +315,8 @@ func (reader *rdataReader) svcbValue(key uint16, data []byte) (text string) {
 		reader.add("dns.svcb.param.dohpath", "DoH path", output.Escape(data), dataStart, len(data))
 	case 9:
 		for (reader.offset < reader.end) && !reader.isShort {
-			values = append(values, strconv.Itoa(int(reader.uint16Field("dns.svcb.param.tls_supported_groups.group", "Group"))))
+			group, _ := reader.number("dns.svcb.param.tls_supported_groups.group", "Group", 2, nil)
+			values = append(values, strconv.Itoa(int(group)))
 		}
 	default:
 		reader.rest("dns.svcb.param.value", "Value", false)
@@ -431,7 +358,7 @@ func (reader *rdataReader) options() {
 		}
 
 		option := reader.add("dns.opt", "Option: "+shortName(ednsOptions, code), "", start, 4+length)
-		optionReader := &rdataReader{tree: reader.tree, parent: option, message: reader.message, offset: start, end: start + 4 + length, isShort: false}
+		optionReader := newRdataReader(reader.tree, option, reader.message, start, start+4+length)
 		optionReader.add("dns.opt.code", "Code", nameOf(ednsOptions, code), start, 2)
 		optionReader.add("dns.opt.len", "Length", strconv.Itoa(length), start+2, 2)
 		optionReader.offset = dataStart
@@ -450,7 +377,8 @@ func (reader *rdataReader) option(code uint16, data []byte) {
 		names := []string{}
 
 		for (reader.offset < reader.end) && !reader.isShort {
-			names = append(names, shortName(dnssecAlgorithms, uint16(reader.uint8Named("dns.opt.algorithm", "Algorithm", dnssecAlgorithms))))
+			algorithm, _ := reader.number("dns.opt.algorithm", "Algorithm", 1, named(dnssecAlgorithms))
+			names = append(names, shortName(dnssecAlgorithms, uint16(algorithm)))
 		}
 
 		reader.tree.setValue(reader.parent, strings.Join(names, ", "))
@@ -458,7 +386,7 @@ func (reader *rdataReader) option(code uint16, data []byte) {
 		reader.clientSubnet()
 	case 9:
 		if len(data) == 4 {
-			reader.uint32Field("dns.opt.expire", "Expire", true)
+			reader.number("dns.opt.expire", "Expire", 4, ttlText)
 		}
 	case 10:
 		client, start, ok := reader.take("Client cookie", min(8, len(data)))
@@ -478,7 +406,7 @@ func (reader *rdataReader) option(code uint16, data []byte) {
 		}
 	case 11:
 		if len(data) == 2 {
-			timeout := reader.uint16Field("dns.opt.tcp_keepalive.timeout", "Timeout (100 ms)")
+			timeout, _ := reader.number("dns.opt.tcp_keepalive.timeout", "Timeout (100 ms)", 2, nil)
 			reader.tree.setValue(reader.parent, fmt.Sprintf("%.1f s", float64(timeout)/10))
 		}
 	case 12:
@@ -486,13 +414,13 @@ func (reader *rdataReader) option(code uint16, data []byte) {
 		reader.tree.setValue(reader.parent, fmt.Sprintf("%d bytes", len(data)))
 		reader.add("dns.opt.padding", "Padding", fmt.Sprintf("%d bytes", len(data)), reader.end-len(data), len(data))
 	case 15:
-		infoCode := reader.uint16Field("dns.opt.ede.info_code", "Info code")
+		infoCode, _ := reader.number("dns.opt.ede.info_code", "Info code", 2, nil)
 
 		if reader.isShort {
 			return
 		}
 
-		reader.tree.setValue(reader.parent, nameOf(ednsErrors, infoCode))
+		reader.tree.setValue(reader.parent, nameOf(ednsErrors, uint16(infoCode)))
 		textData, start, _ := reader.take("Extra text", reader.end-reader.offset)
 
 		if len(textData) > 0 {
@@ -516,8 +444,8 @@ func (reader *rdataReader) clientSubnet() {
 
 	family := binary.BigEndian.Uint16(familyData)
 	reader.add("dns.opt.client.family", "Family", nameOf(subnetFamilies, family), familyStart, 2)
-	source := reader.uint8Field("dns.opt.client.netmask", "Source prefix length")
-	reader.uint8Field("dns.opt.client.scope", "Scope prefix length")
+	source, _ := reader.number("dns.opt.client.netmask", "Source prefix length", 1, nil)
+	reader.number("dns.opt.client.scope", "Scope prefix length", 1, nil)
 	addressData, start, ok := reader.take("Address", reader.end-reader.offset)
 
 	if !ok {
@@ -554,8 +482,8 @@ func (reader *rdataReader) dnskey(record dnsResource) (value string) {
 	reader.tree.addBits(flags, "dns.dnskey.flags.zone_key", "Zone key", yesNo(flagsValue&0x0100 != 0), base, 2, 0x0100)
 	reader.tree.addBits(flags, "dns.dnskey.flags.key_revoked", "Revoked", yesNo(flagsValue&0x0080 != 0), base, 2, 0x0080)
 	reader.tree.addBits(flags, "dns.dnskey.flags.secure_entry_point", "Secure entry point", yesNo(flagsValue&0x0001 != 0), base, 2, 0x0001)
-	protocol := reader.uint8Field("dns.dnskey.protocol", "Protocol")
-	algorithm := reader.uint8Named("dns.dnskey.algorithm", "Algorithm", dnssecAlgorithms)
+	protocol, _ := reader.number("dns.dnskey.protocol", "Protocol", 1, nil)
+	algorithm, _ := reader.number("dns.dnskey.algorithm", "Algorithm", 1, named(dnssecAlgorithms))
 	reader.rest("dns.dnskey.public_key", "Public key", true)
 
 	if reader.isShort {
@@ -604,12 +532,12 @@ func (reader *rdataReader) rrsig() (value string) {
 
 	covered := binary.BigEndian.Uint16(typeData)
 	reader.add("dns.rrsig.type_covered", "Type covered", nameOf(dnsTypes, covered), start, 2)
-	algorithm := reader.uint8Named("dns.rrsig.algorithm", "Algorithm", dnssecAlgorithms)
-	reader.uint8Field("dns.rrsig.labels", "Labels")
-	reader.uint32Field("dns.rrsig.original_ttl", "Original TTL", true)
+	algorithm, _ := reader.number("dns.rrsig.algorithm", "Algorithm", 1, named(dnssecAlgorithms))
+	reader.number("dns.rrsig.labels", "Labels", 1, nil)
+	reader.number("dns.rrsig.original_ttl", "Original TTL", 4, ttlText)
 	reader.timeField("dns.rrsig.signature_expiration", "Signature expiration")
 	reader.timeField("dns.rrsig.signature_inception", "Signature inception")
-	keyTag := reader.uint16Field("dns.rrsig.key_tag", "Key tag")
+	keyTag, _ := reader.number("dns.rrsig.key_tag", "Key tag", 2, nil)
 	signer := reader.name("dns.rrsig.signers_name", "Signer's name")
 	reader.rest("dns.rrsig.signature", "Signature", true)
 	value = fmt.Sprintf("%s %s, key tag %d, %s", shortName(dnsTypes, covered), shortName(dnssecAlgorithms, uint16(algorithm)), keyTag, signer)

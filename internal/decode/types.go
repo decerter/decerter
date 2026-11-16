@@ -172,15 +172,11 @@ type dnsResource struct {
 	end      int
 }
 
-// the fields of one rdata read in order under parent: offset is the next byte of the message, end the end of the rdata
-// isShort is set by the first field that does not fit, the fields after it are left out
+// the fields of one rdata read in order under parent: a cursor over the message (its offsets are the message's, placed at its base) and the message
+// for the names in it
 type rdataReader struct {
-	tree    *Tree
-	parent  *node
+	*cursor
 	message dnsMessage
-	offset  int
-	end     int
-	isShort bool
 }
 
 // one run of bytes a decoder reads that lies elsewhere in the source: bytes from..from+length are source bytes at..at+length

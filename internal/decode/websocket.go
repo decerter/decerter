@@ -390,8 +390,9 @@ func websocketPayload(tree *Tree, root *node, payload []byte, start int, isTextu
 
 // a frame of a text or binary message: alone it is shown at once, a fragmented message is shown frame by frame and put together after its last frame
 func websocketData(tree *Tree, root *node, payload []byte, frame websocketFrame, isWhole bool, state *websocketState) {
+	// a new message drops what an unfinished one before it left
 	if frame.opcode != continuationOpcode {
-		state.opcode, state.isCompressed, state.parts, state.firstStart = frame.opcode, state.isDeflate && (frame.rsv&rsv1Bit != 0), nil, frame.start
+		state.opcode, state.isCompressed, state.parts, state.joined, state.firstStart = frame.opcode, state.isDeflate && (frame.rsv&rsv1Bit != 0), nil, nil, frame.start
 	}
 
 	opcode := state.opcode
@@ -415,8 +416,11 @@ func websocketData(tree *Tree, root *node, payload []byte, frame websocketFrame,
 		websocketPayload(tree, root, payload, frame.payloadStart, (opcode == textOpcode) && utf8.Valid(payload))
 	}
 
-	state.parts = append(state.parts, segment{from: len(state.joined), at: frame.payloadStart, length: len(payload)})
-	state.joined = append(state.joined, payload...)
+	// a continuation without the start of its message in the bytes belongs to no message here
+	if state.opcode != 0 {
+		state.parts = append(state.parts, segment{from: len(state.joined), at: frame.payloadStart, length: len(payload)})
+		state.joined = append(state.joined, payload...)
+	}
 
 	if !frame.isFin || !isWhole || (state.opcode == 0) {
 		state.addSummary(shortName(websocketOpcodes, uint16(frame.opcode)) + " fragment")

@@ -423,7 +423,14 @@ func tlsMessage(tree *Tree, parent *node, message []byte, place placement, state
 	messageType := message[0]
 	name = tlsShortName(tlsHandshakeTypes, uint16(messageType))
 
-	if (messageType == serverHelloType) && (len(message) >= 4+2+32) && bytes.Equal(message[6:38], helloRetryRandom) && !state.isDTLS {
+	// the random follows the handshake header and the 2-byte version, a DTLS header has 12 bytes (RFC 9147 5.1 uses the same random)
+	randomStart := tlsHandshakeHeaderBytes + 2
+
+	if state.isDTLS {
+		randomStart = dtlsHandshakeHeaderBytes + 2
+	}
+
+	if (messageType == serverHelloType) && (len(message) >= randomStart+32) && bytes.Equal(message[randomStart:randomStart+32], helloRetryRandom) {
 		name = "Hello Retry Request"
 	}
 

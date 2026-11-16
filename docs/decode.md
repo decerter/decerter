@@ -137,13 +137,14 @@ Each decoder has a fuzz test, `go test -tags unit -run '^$' -fuzz '^FuzzDNS$' ./
   - OPT with the EDNS header (UDP payload size, extended rcode, version, DO bit) and its options: NSID, DAU/DHU/N3U, Client Subnet, Expire, Cookie, TCP keepalive, Padding, Extended DNS Error, and others as hex
   - DS and CDS, DNSKEY and CDNSKEY with their key tag, RRSIG with RFC 3339 times, NSEC with its type bitmap
 - Other types are shown as hex. Each rdata is checked against its length.
+- Sniffing walks the message without building a tree: the header, the names, the questions, the records with their rdata inside the message, and the rdata of the types that are only names, numbers and addresses (A, AAAA, NS, CNAME, PTR, DNAME, MX, KX, SOA, SRV). A message whose structure reads to its end sniffs as 70 to 100; what only the decode finds wrong (a cookie's size, a DNSKEY's protocol) still shows as node errors.
 
 ## Protocol Buffers
 Without a schema, like `protoc --decode_raw` (from protobuf.dev's encoding guide):
 - Each field shows its number and wire type (the low 3 bits of the tag as a bit field when the tag has at most 4 bytes).
 - VARINT: the value, as int64 when it is negative that way, as sint (zigzag) and, for 0 and 1, as bool.
 - I64 and I32: the unsigned value, signed when negative, and as double or float.
-- LEN: text that starts with a printable byte is a string; otherwise bytes that read as a message to their end are a nested message, then UTF-8 text a string, else bytes (hex). Groups (SGROUP to EGROUP) nest like messages.
+- LEN: text that starts with a printable byte is a string; otherwise bytes that read as a message to their end are a nested message, then UTF-8 text a string, else bytes (hex). Groups (SGROUP to EGROUP) nest like messages. A field that breaks inside a group ends the message there, and an EGROUP with no open group (field 0 included) is an error.
 - Taken by `as=protobuf`, a body with `Content-Type` `application/x-protobuf`, `application/protobuf`, `application/x-google-protobuf` or `application/vnd.google.protobuf`, a gRPC message and a WebSocket binary message.
 
 ## gRPC
@@ -162,7 +163,7 @@ The tree:
 - Records with content type, version and length (DTLS: epoch and sequence number). A handshake message over several TLS records is put together into a `tls.handshake.reassembled` root whose nodes span its pieces; DTLS fragments are shown as they are.
 - ClientHello and ServerHello in full: version, random, session id, cipher suites by IANA name, compression, and the extensions server_name, max_fragment_length, status_request, supported_groups, ec_point_formats, signature_algorithms(_cert), ALPN, ALPS, padding, compress_certificate, record_size_limit, pre_shared_key, early_data, supported_versions, cookie, psk_key_exchange_modes, key_share (ClientHello, ServerHello and HelloRetryRequest forms), encrypted_client_hello (outer: config id, cipher suite, enc, payload) and renegotiation_info; others as hex. GREASE values are named.
 - Fingerprints over the hello: JA3 and JA3S (the string and its MD5) and JA4 (FoxIO, BSD-3-Clause). JA4S and the other JA4+ fingerprints are not computed. They match tshark 4.4 on curl's hellos.
-- HelloRetryRequest (by its random), HelloVerifyRequest, NewSessionTicket, EncryptedExtensions, Certificate (TLS 1.2 and 1.3 forms; each certificate read with `crypto/x509`: subject, issuer, serial number, validity in RFC 3339, algorithms, CA, and the DNS, IP, email and URI names, all spanning the certificate's DER), ServerKeyExchange (ECDHE named curve and point, signature), CertificateRequest, CertificateVerify, ClientKeyExchange, Finished, CertificateStatus and KeyUpdate.
+- HelloRetryRequest (by its random, in TLS and in DTLS 1.3), HelloVerifyRequest, NewSessionTicket, EncryptedExtensions, Certificate (TLS 1.2 and 1.3 forms; each certificate read with `crypto/x509`: subject, issuer, serial number, validity in RFC 3339, algorithms, CA, and the DNS, IP, email and URI names, all spanning the certificate's DER), ServerKeyExchange (ECDHE named curve and point, signature), CertificateRequest, CertificateVerify, ClientKeyExchange, Finished, CertificateStatus and KeyUpdate.
 - Alerts with level and description; after a change cipher spec of TLS 1.2 or on an encrypted DTLS epoch, records shown as encrypted.
 
 The same decoder also takes TLS records as they go over tcp (a flow to port 443 that decerter only relays, or `as=tls`): the hellos and a TLS 1.2 server's certificate are plaintext there, the rest is encrypted.
@@ -170,7 +171,7 @@ The same decoder also takes TLS records as they go over tcp (a flow to port 443 
 ## WebSocket
 - The reads of a tcp or tls flow after an HTTP/1.1 `Upgrade: websocket` (the flow's last exchange is a 101 whose request came before the message; the read of the 101 can carry the first frames, its head is a `websocket.http_head` node), and the bodies of an HTTP/2 extended CONNECT whose `:protocol` is `websocket`.
 - Each frame: FIN, RSV1-3, opcode, mask, payload length (with the 16- or 64-bit extended length), masking key, and the payload unmasked; close frames with their status code and reason, ping and pong.
-- A text message as text; a binary one as the protocol its bytes sniff as (protobuf counts from its clean score), else hex. A message in several frames is put together into a `websocket.message` root after its last frame, control frames between them stay where they are.
+- A text message as text; a binary one as the protocol its bytes sniff as (protobuf counts from its clean score), else hex. A message in several frames is put together into a `websocket.message` root after its last frame, control frames between them stay where they are. A continuation without its start, and what a message that never ended left, are not part of the next message.
 - permessage-deflate (when the 101's `Sec-WebSocket-Extensions` has it): a message with RSV1 is inflated alone, at most 1 MiB; one that uses the window of earlier messages (context takeover) can't be inflated alone and gets an error that says so.
 - Errors for what RFC 6455 forbids: a client frame without a mask or a server frame with one, reserved bits without an extension, reserved opcodes, a fragmented or long control frame, a continuation without its start, text that is not UTF-8.
 - A frame that goes on in the next read says how many of its bytes are there; frames are not joined across reads.

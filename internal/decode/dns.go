@@ -45,6 +45,9 @@ const (
 	multicastClassFlag uint16 = 0x8000
 )
 
+// the rdata dnsScan checks, the parts of each type in order: a number of bytes, or -1 for a name
+var dnsRdataLayouts = map[uint16][]int{1: {4}, 28: {16}, 2: {-1}, 3: {-1}, 4: {-1}, 5: {-1}, 7: {-1}, 8: {-1}, 9: {-1}, 12: {-1}, 39: {-1}, 15: {2, -1}, 36: {2, -1}, 6: {-1, -1, 20}, 33: {6, -1}}
+
 func init() {
 	register(decoder{
 		Protocol: dnsProtocol,
@@ -139,7 +142,7 @@ func dnsSniff(data []byte, context Context) (score int) {
 	return
 }
 
-// how much one message looks like DNS: it has to read without an error to reach the threshold, a known opcode and one question make it likely
+// how much one message looks like DNS: its structure has to read without an error to reach the threshold, a known opcode and one question make it likely
 func dnsMessageScore(data []byte) (score int) {
 	if len(data) < dnsHeaderBytes {
 		return
@@ -157,11 +160,8 @@ func dnsMessageScore(data []byte) (score int) {
 		return
 	}
 
-	tree := newTree()
-	dnsFields(tree, tree.add(nil, dnsProtocol, dnsTitle, "", 0, len(data)), dnsMessage{data: data, base: 0, isMulticast: false, rcode: 0})
-
 	switch {
-	case tree.errors > 0:
+	case !dnsScan(dnsMessage{data: data, base: 0, isMulticast: false, rcode: 0}):
 		score = 10
 	case records == 0:
 		score = 10
@@ -177,6 +177,89 @@ func dnsMessageScore(data []byte) (score int) {
 		}
 	}
 
+	return
+}
+
+// whether a message reads to its end without building nodes: the header, the questions, the records with their rdata inside the message, and the rdata
+// of the types that are only names and addresses; what else the decode finds wrong (a cookie's size, a DNSKEY's protocol) leaves it valid
+func dnsScan(message dnsMessage) (isValid bool) {
+	data := message.data
+
+	if len(data) < dnsHeaderBytes {
+		return
+	}
+
+	questions, records := int(binary.BigEndian.Uint16(data[4:])), 0
+
+	for index := 1; index < 4; index++ {
+		records += int(binary.BigEndian.Uint16(data[4+2*index:]))
+	}
+
+	offset := dnsHeaderBytes
+
+	for range questions {
+		length, nameErr := message.walkName(offset, nil)
+
+		if (nameErr != nil) || (length+4 > len(data)-offset) {
+			return
+		}
+
+		offset += length + 4
+	}
+
+	for range records {
+		length, nameErr := message.walkName(offset, nil)
+		fixed := offset + length
+
+		if (nameErr != nil) || (10 > len(data)-fixed) {
+			return
+		}
+
+		rrType, rdLength := binary.BigEndian.Uint16(data[fixed:]), int(binary.BigEndian.Uint16(data[fixed+8:]))
+
+		if (rdLength > len(data)-fixed-10) || !dnsRdataScan(message, rrType, fixed+10, fixed+10+rdLength) {
+			return
+		}
+
+		offset = fixed + 10 + rdLength
+	}
+
+	isValid = offset == len(data)
+	return
+}
+
+// the rdata of a type that is only names, numbers of a fixed size and addresses fills its bytes exactly; any other type is taken as it is
+func dnsRdataScan(message dnsMessage, rrType uint16, start int, end int) (isValid bool) {
+	layout, isKnown := dnsRdataLayouts[rrType]
+
+	if !isKnown {
+		isValid = true
+		return
+	}
+
+	offset := start
+
+	for _, part := range layout {
+		length := part
+
+		if part < 0 {
+			nameLength, nameErr := message.walkName(offset, nil)
+
+			if nameErr != nil {
+				return
+			}
+
+			length = nameLength
+		}
+
+		if length > end-offset {
+			return
+		}
+
+		offset += length
+	}
+
+	isValid = offset == end
 	return
 }
 
@@ -488,6 +571,23 @@ func dnsRecord(tree *Tree, recordNode *node, message dnsMessage, offset int) (ne
 // a label byte that is no printable ASCII, a dot or a backslash in a label is escaped (\xNN, \\), so the text reads back as the labels
 func (message dnsMessage) name(offset int) (name string, length int, err error) {
 	builder := strings.Builder{}
+	length, err = message.walkName(offset, &builder)
+
+	if err != nil {
+		return
+	}
+
+	name = strings.TrimSuffix(builder.String(), ".")
+
+	if name == "" {
+		name = "<Root>"
+	}
+
+	return
+}
+
+// the walk of name over the labels and pointers from offset: the bytes the name takes where it is, its labels written to builder unless it is nil
+func (message dnsMessage) walkName(offset int, builder *strings.Builder) (length int, err error) {
 	position, jumps, wireLength := offset, 0, 0
 
 	for {
@@ -544,15 +644,12 @@ func (message dnsMessage) name(offset int) (name string, length int, err error) 
 			return
 		}
 
-		labelText(&builder, message.data[position+1:position+1+labelLength])
-		builder.WriteByte('.')
+		if builder != nil {
+			labelText(builder, message.data[position+1:position+1+labelLength])
+			builder.WriteByte('.')
+		}
+
 		position += 1 + labelLength
-	}
-
-	name = strings.TrimSuffix(builder.String(), ".")
-
-	if name == "" {
-		name = "<Root>"
 	}
 
 	return

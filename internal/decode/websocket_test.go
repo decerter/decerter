@@ -191,6 +191,19 @@ func TestWebSocketNegative(state *testing.T) {
 			state.Errorf("Test of decode.Decode failed, %s should fail with %q, protocol: %s, errors: %v", name, testCase.expected, result.Protocol, errors)
 		}
 	}
+
+	// an orphan continuation and a message that never ended leave nothing in front of the next reassembled message, its pieces are its own frames
+	for name, data := range map[string][]byte{
+		"orphan":     join(websocketFrameOf(true, 0, continuationOpcode, nil, []byte("orphan")), websocketFrameOf(false, 0, textOpcode, nil, []byte("hel")), websocketFrameOf(true, 0, continuationOpcode, nil, []byte("lo"))),
+		"unfinished": join(websocketFrameOf(false, 0, textOpcode, nil, []byte("old")), websocketFrameOf(false, 0, textOpcode, nil, []byte("hel")), websocketFrameOf(true, 0, continuationOpcode, nil, []byte("lo"))),
+	} {
+		result := mustDecode(state, data, websocketDown, "")
+		message := findNode(result.Tree, "websocket.message")
+
+		if (message == nil) || (message.Value != "5 bytes") || (message.Offset != len(data)-9) || (findNode(message.Children, "websocket.payload.text").Value != `"hello"`) || (findNode(message.Children, "websocket.payload.text").Offset != len(data)-7) {
+			state.Errorf("Test of decode.Decode failed, the %s frames should not go into the reassembled message, message: %+v", name, message)
+		}
+	}
 }
 
 // Fuzz if decode.Decode never fails on any bytes as WebSocket each way, with permessage-deflate and as an HTTP/2 body: no error and a tree inside the bytes
@@ -202,6 +215,8 @@ func FuzzWebSocket(fuzz *testing.F) {
 	fuzz.Add(websocketFrameOf(true, rsv1Bit, textOpcode, nil, deflated(fuzz, []byte("hello hello hello"))))
 	fuzz.Add(websocketFrameOf(true, 0, binaryOpcode, nil, protobufSample()))
 	fuzz.Add(websocketFrameOf(true, 0, binaryOpcode, testMask, bytes.Repeat([]byte{1}, 300)))
+	fuzz.Add(join(websocketFrameOf(true, 0, continuationOpcode, nil, []byte("orphan")), websocketFrameOf(false, 0, textOpcode, nil, []byte("hel")), websocketFrameOf(true, 0, continuationOpcode, nil, []byte("lo"))))
+	fuzz.Add(bytes.Repeat(websocketFrameOf(true, rsv1Bit, binaryOpcode, nil, deflated(fuzz, make([]byte, 1<<16))), 3))
 
 	fuzz.Fuzz(func(state *testing.T, data []byte) {
 		for _, context := range []Context{websocketUp, websocketDown, websocketDeflate, websocketBody} {

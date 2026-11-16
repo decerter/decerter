@@ -132,6 +132,7 @@ func TestProtobufNegative(state *testing.T) {
 		"open group":           {data: []byte{0x0b, 0x08, 0x01}, expected: "protobuf.field: group 1 has no end"},
 		"stray end":            {data: []byte{0x0c}, expected: "protobuf.field: the end of group 1 where none is open"},
 		"group end of another": {data: []byte{0x0b, 0x14}, expected: "protobuf.field: the end of group 2 where none is open"},
+		"end of group 0":       {data: []byte{0x04, 0x08, 0x01, 0x12, 0x03, 'a', 'b', 'c'}, expected: "protobuf.field: the end of group 0 where none is open"},
 	}
 
 	for name, testCase := range testCases {
@@ -160,6 +161,13 @@ func TestProtobufNegative(state *testing.T) {
 		state.Errorf("Test of decode.Decode failed, messages should nest %d levels, then be bytes, messages: %d", maxProtobufDepth, len(messages))
 	}
 
+	// a field inside a group breaks: the message stops there, the rest of the broken value is no phantom field after the group
+	result = mustDecode(state, []byte{0x0b, 0x12, 0x05, 0x08, 0x01}, otherUDP, protobufProtocol)
+
+	if top := result.Tree[0].Children; (len(top) != 1) || (top[0].Label != "Field 1 (SGROUP)") || (len(findAll(result.Tree, "protobuf.field.varint")) != 0) {
+		state.Errorf("Test of decode.Decode failed, a broken group should end the message, fields: %+v", top)
+	}
+
 	groups := []byte{}
 
 	for range maxProtobufDepth + 1 {
@@ -179,6 +187,8 @@ func FuzzProtobuf(fuzz *testing.F) {
 	fuzz.Add([]byte{0x0a, 0x02, 0x08, 0x01, 0x12, 0x01, 'x'})
 	fuzz.Add([]byte{0x08, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01})
 	fuzz.Add([]byte{0x0e})
+	fuzz.Add([]byte{0x0b, 0x12, 0x05, 0x08, 0x01})
+	fuzz.Add([]byte{0x04, 0x08, 0x01, 0x12, 0x03, 'a', 'b', 'c'})
 	fuzz.Add(protowire.AppendVarint(protowire.AppendTag(nil, protowire.MaxValidNumber, protowire.VarintType), 1))
 
 	fuzz.Fuzz(func(state *testing.T, data []byte) {

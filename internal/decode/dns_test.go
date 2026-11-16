@@ -267,6 +267,31 @@ func TestMalformedNegative(state *testing.T) {
 		if (result.Protocol != dnsProtocol) || !slices.ContainsFunc(errors, func(text string) bool { return strings.Contains(text, testCase.message) }) {
 			state.Errorf("Test of the malformed %s failed, the tree should have the error %q, errors: %v", name, testCase.message, errors)
 		}
+
+		// the sniff's scan finds the same broken structure without a tree; a short txt, a bad subnet, cookie, DNSKEY protocol, bitmap or SvcParam only the decode
+		isStructure := !slices.Contains([]string{"next read", "one length byte", "short txt", "bad subnet", "short cookie", "dnskey protocol", "bitmap window", "svcb param length"}, name)
+
+		if isStructure && dnsScan(dnsMessage{data: testCase.data, base: 0, isMulticast: false, rcode: 0}) {
+			state.Errorf("Test of decode.dnsScan failed, the malformed %s should not scan", name)
+		}
+	}
+}
+
+// Test if decode.dnsScan returns with the expected output: the messages of the tests scan whole, and sniffing a message builds no tree (no allocations).
+func TestDNSScanPositive(state *testing.T) {
+	answer := dnsPacket(0xbeef, 0x8180, [4]uint16{1, 1, 0, 1}, question(wireName("example.com"), 1, 1), resource([]byte{0xc0, 0x0c}, 1, 1, 60, []byte{192, 0, 2, 7}),
+		resource(wireName(""), 41, 1232, 0, join(be16(10), be16(8), make([]byte, 8))))
+	records := [][]byte{answer, answerPacket(6, join(wireName("ns1.example.com"), wireName("hostmaster.example.com"), make([]byte, 20))), answerPacket(15, join(be16(10), []byte{0xc0, 0x0c})),
+		answerPacket(33, join(be16(0), be16(5), be16(443), wireName("server.example.com"))), answerPacket(28, make([]byte, 16)), answerPacket(65280, []byte{1, 2, 3})}
+
+	for index, message := range records {
+		if !dnsScan(dnsMessage{data: message, base: 0, isMulticast: false, rcode: 0}) {
+			state.Errorf("Test of decode.dnsScan failed, message %d should scan, data: %x", index, message)
+		}
+	}
+
+	if allocations := testing.AllocsPerRun(100, func() { dnsSniff(answer, udpContext) }); allocations != 0 {
+		state.Errorf("Test of decode.dnsSniff failed, the sniff should build nothing, allocations: %.0f", allocations)
 	}
 }
 

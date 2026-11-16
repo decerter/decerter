@@ -326,6 +326,13 @@ func TestDTLSPositive(state *testing.T) {
 
 	checkValues(state, "decode.Decode", result, map[string]string{"dtls.handshake.fragment_length#1": "10", "dtls.unified.epoch": "1", "dtls.record.length": "16"})
 
+	// a DTLS 1.3 HelloRetryRequest by its random after the 12-byte header: the key_share is the selected group alone
+	retry := dtlsRecord(22, 0, 1, dtlsMessage(2, 0, join(be16(0xfefd), helloRetryRandom, []byte{0}, be16(0x1302), []byte{0}, vector16(join(extension(43, be16(0xfefc)), extension(51, be16(0x0017)))))))
+
+	if result = mustDecode(state, retry, dtlsUDPContext, ""); (result.Summary != "Hello Retry Request DTLS 1.3 TLS_AES_256_GCM_SHA384") || (findNode(result.Tree, "tls.handshake.extensions_key_share_selected_group") == nil) || (len(errorsOf(result.Tree)) > 0) {
+		state.Errorf("Test of decode.Decode failed, the DTLS HelloRetryRequest should be known by its random, summary: %q, errors: %v", result.Summary, errorsOf(result.Tree))
+	}
+
 	// kept: epoch 1 is plaintext
 	kept := join(hello, dtlsRecord(22, 1, 0, dtlsMessage(20, 4, bytes.Repeat([]byte{5}, 12))))
 
@@ -381,7 +388,9 @@ func tlsSeeds(fuzz *testing.F) (seeds [][]byte) {
 	up, down := goHandshake(fuzz, tls.VersionTLS12)
 	_, down13 := goHandshake(fuzz, tls.VersionTLS13)
 	transcript := tls13ServerTranscript(fuzz)
-	seeds = append(seeds, up, down, down13, transcript, transcript[:len(transcript)/2], tlsRecord(21, 0x0303, []byte{2, 40}))
+	alpn := bytes.Repeat(join([]byte{40}, bytes.Repeat([]byte{1}, 40)), 40)
+	hello := handshakeMessage(1, join(be16(0x0303), make([]byte, 32), []byte{0}, be16(2), be16(0x1301), []byte{1, 0}, vector16(extension(16, vector16(alpn)))))
+	seeds = append(seeds, up, down, down13, transcript, transcript[:len(transcript)/2], tlsRecord(21, 0x0303, []byte{2, 40}), tlsRecord(21, 0x0303, bytes.Repeat([]byte{2, 40}, 600)), tlsRecord(22, 0x0301, hello))
 	return
 }
 
@@ -418,6 +427,7 @@ func FuzzDTLS(fuzz *testing.F) {
 	fuzz.Add(dtlsRecord(22, 0, 2, join([]byte{11}, be24(100), be16(2), be24(0), be24(10), bytes.Repeat([]byte{7}, 10))))
 	fuzz.Add(join([]byte{0x2d}, be16(5), be16(16), bytes.Repeat([]byte{8}, 16)))
 	fuzz.Add(join(hello, dtlsRecord(22, 1, 0, dtlsMessage(20, 4, bytes.Repeat([]byte{5}, 12)))))
+	fuzz.Add(dtlsRecord(22, 0, 1, dtlsMessage(2, 0, join(be16(0xfefd), helloRetryRandom, []byte{0}, be16(0x1302), []byte{0}, vector16(join(extension(43, be16(0xfefc)), extension(51, be16(0x0017))))))))
 
 	fuzz.Fuzz(func(state *testing.T, data []byte) {
 		for _, context := range []Context{dtlsUDPContext, keptDTLS} {

@@ -26,6 +26,7 @@ func dnsSeeds(fuzz *testing.F) (seeds [][]byte) {
 		join(be16(uint16(len(built))), built[:len(built)/2]),
 		dnsPacket(1, 0, [4]uint16{1, 0, 0, 0}, []byte{0xc0, 0x0c}, be16(1), be16(1)),
 		dnsPacket(1, 0x8000, [4]uint16{0, 0, 0, 1}, resource(wireName(""), 41, 1232, 0x8000, join(be16(8), be16(7), be16(1), []byte{24, 0, 192, 0, 2}, be16(15), be16(3), be16(18), []byte("x")))),
+		dnsPacket(1, 0x8000, [4]uint16{0, 0, 0, 1}, resource(wireName(""), 41, 4096, 0, join(be16(3), be16(300), bytes.Repeat([]byte{0xff}, 300)))),
 	}
 
 	for _, rrType := range []uint16{2, 5, 6, 12, 13, 15, 16, 33, 43, 46, 47, 48, 64, 65, 257} {
@@ -35,8 +36,9 @@ func dnsSeeds(fuzz *testing.F) (seeds [][]byte) {
 	return
 }
 
-// Fuzz if decode.Decode never fails on any bytes over any transport, with or without as=dns: no error, a tree inside the bytes with printable strings
-// only, and the same questions and records as golang.org/x/net/dns/dnsmessage reads when it reads the bytes as a message.
+// Fuzz if decode.Decode never fails on any bytes over any transport, with or without as=dns: no error, a tree inside the bytes and its limits with
+// printable strings only, a message the sniff's scan rejects has an error in its tree, and the same questions and records as golang.org/x/net/dns/dnsmessage
+// reads when it reads the bytes as a message.
 func FuzzDNS(fuzz *testing.F) {
 	for _, seed := range dnsSeeds(fuzz) {
 		fuzz.Add(seed)
@@ -65,6 +67,11 @@ func FuzzDNS(fuzz *testing.F) {
 
 		if found, isFound := FromTarget(target, ""); isFound && (len(found) < dnsHeaderBytes) {
 			state.Fatalf("Fuzz of decode.FromTarget failed, it should only find whole headers, found: %x", found)
+		}
+
+		// what the sniff's scan rejects, the decode finds wrong too
+		if result, _ := Decode(data, otherUDP, dnsProtocol); !dnsScan(dnsMessage{data: data, base: 0, isMulticast: false, rcode: 0}) && !result.Truncated && (len(errorsOf(result.Tree)) == 0) {
+			state.Fatalf("Fuzz of decode.dnsScan failed, the scan rejects a message the decode reads without an error, data: %x", data)
 		}
 
 		message, isRead := oracleUnpack(data)
