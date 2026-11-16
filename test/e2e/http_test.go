@@ -24,10 +24,13 @@ import (
 var (
 	// plain HTTP, TLS 1.2 and TLS 1.3, curl talks HTTP/1.1 to each
 	httpConfigs = []serverConfig{{Certificate: nil}, {Certificate: &rsaCertificate, Version: tls.VersionTLS12}, {Certificate: &ecdsaCertificate, Version: tls.VersionTLS13}}
+	// the suites the rules of layer http run on besides the default ones, the edits are sealed with each: ChaCha20-Poly1305 and AES-CBC with SHA-1 and
+	// SHA-256 in TLS 1.2, AES-256-GCM with ECDSA, and the TLS 1.3 suites other than AES-128-GCM
+	httpSuiteNames = []string{"ECDHE-RSA-CHACHA20-POLY1305", "ECDHE-ECDSA-AES256-GCM-SHA384", "ECDHE-RSA-AES128-SHA", "AES128-SHA256", "TLS_CHACHA20_POLY1305_SHA256", "TLS_AES_256_GCM_SHA384"}
 )
 
-// Test if the API shows curl's HTTP/1.1 exchanges over plain HTTP, TLS 1.2 and TLS 1.3, three keep-alive requests stay in step while rules of layer http change
-// a request head and a response body of different lengths, and a rule replaces a word that the server's chunks cut in two.
+// Test if the API shows curl's HTTP/1.1 exchanges over plain HTTP, TLS 1.2 and TLS 1.3, and the suites of httpSuiteNames, three keep-alive requests stay in
+// step while rules of layer http change a request head and a response body of different lengths, and a rule replaces a word that the server's chunks cut in two.
 func TestHTTPRulesPositive(state *testing.T) {
 	client := startAPIDecerter(state, InterceptDecerterMode, []intercept.Rule{intercept.IdentityRule{}})
 	events := client.subscribe(state)
@@ -45,9 +48,10 @@ func TestHTTPRulesPositive(state *testing.T) {
 		}
 	}
 
-	for _, config := range httpConfigs {
-		server := startServer(state, config)
-		testCase := curlCase{Name: server.URL, Server: config, Suite: "", Expected: receivedRequest{}}
+	testCases := httpCases(state, httpConfigs, false)
+
+	for _, testCase := range testCases {
+		server := startServer(state, testCase.Server)
 		arguments := curlArguments(testCase, server.URL+"a")
 		arguments = append(arguments, server.URL+"b", server.URL+"c")
 		output, err := runCurl(state.Context(), testUser, arguments)
@@ -55,12 +59,12 @@ func TestHTTPRulesPositive(state *testing.T) {
 
 		for range 3 {
 			request, receivedErr := server.received()
-			err = errors.Join(err, receivedErr)
+			err = errors.Join(err, receivedErr, checkSuite(testCase, request))
 			paths = append(paths, request.Path)
 		}
 
 		if (err != nil) || (output != "/apple/bee/c") || !slices.Equal(paths, []string{"/a", "/bee", "/c"}) {
-			state.Errorf("Test of the http layer failed, %s, three keep-alive requests should stay in step, curl: %q, server: %v, error: %v", server.URL, output, paths, err)
+			state.Errorf("Test of the http layer failed, %s, three keep-alive requests should stay in step, curl: %q, server: %v, error: %v", testCase.Name, output, paths, err)
 			return
 		}
 
@@ -119,7 +123,7 @@ func TestHTTPRulesPositive(state *testing.T) {
 		}
 	}
 
-	if len(events.wait(state, v1.ExchangeEventType, 12)) < 12 {
+	if len(events.wait(state, v1.ExchangeEventType, 4*len(testCases))) < 4*len(testCases) {
 		state.Errorf("Test of the http layer failed, the event stream should tell the exchanges")
 		return
 	}
@@ -128,8 +132,8 @@ func TestHTTPRulesPositive(state *testing.T) {
 	flows := v1.FlowList{}
 	_, err := client.call(state.Context(), http.MethodGet, "/flows?filter="+url.QueryEscape(`http.request.uri == "/chunked" && http.response.code == 200 && http.user_agent contains "curl"`), nil, &flows)
 
-	if (err != nil) || (len(flows.Flows) != len(httpConfigs)) {
-		state.Errorf("Test of the http layer failed, the filter should take the three chunked flows, flows: %d, error: %v", len(flows.Flows), err)
+	if (err != nil) || (len(flows.Flows) != len(testCases)) {
+		state.Errorf("Test of the http layer failed, the filter should take the %d chunked flows, flows: %d, error: %v", len(testCases), len(flows.Flows), err)
 		return
 	}
 }
@@ -268,6 +272,35 @@ func TestHTTPNegative(state *testing.T) {
 		state.Errorf("Test of the http layer failed, a capture filter on an http field should be refused, status: %d, error: %v", status, err)
 		return
 	}
+}
+
+// a case of each server config with curl's default suite, then a case of each suite of httpSuiteNames this host can run
+func httpCases(state *testing.T, configs []serverConfig, isHTTP2 bool) (testCases []curlCase) {
+	for _, config := range configs {
+		testCases = append(testCases, curlCase{Name: fmt.Sprintf("%+v", config), Server: config, Suite: "", Expected: receivedRequest{}})
+	}
+
+	for _, name := range httpSuiteNames {
+		row := rowByName(name)
+
+		if reason := skipReason(state.Context(), *row); reason != "" {
+			state.Logf("Leaving out the suite %s: %s", name, reason)
+			continue
+		}
+
+		testCases = append(testCases, suiteCase(*row, isHTTP2))
+	}
+
+	return
+}
+
+// a case pinned to a suite needs the server to have negotiated it
+func checkSuite(testCase curlCase, request receivedRequest) (err error) {
+	if (testCase.Expected.CipherSuite != 0) && (request.CipherSuite != testCase.Expected.CipherSuite) {
+		err = fmt.Errorf("%s: the server negotiated %s", testCase.Name, tls.CipherSuiteName(request.CipherSuite))
+	}
+
+	return
 }
 
 // the exchanges of the newest flow to the server, once count of them have their response complete

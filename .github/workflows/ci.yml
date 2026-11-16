@@ -234,6 +234,24 @@ jobs:
           for image in $images; do
             docker pull --quiet "$image" || echo "::warning::could not pull $image, its distro OpenSSL case skips"
           done
+      # the OpenSSL 4.1.0 image is built from upstream's tarball (test/e2e/assets/openssl-4.1.0.Dockerfile) once per Dockerfile and architecture and kept
+      # in the cache as the tarball of docker save; the tests take it by the tag of the Dockerfile's hash and build it themselves when it is missing
+      - name: Restore the OpenSSL 4.1.0 image
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/openssl-4.1.0.tar
+          key: openssl-4.1.0-${{ runner.arch }}-${{ hashFiles('test/e2e/assets/openssl-4.1.0.Dockerfile') }}
+      - name: Build or load the OpenSSL 4.1.0 image
+        run: |
+          dockerfile=test/e2e/assets/openssl-4.1.0.Dockerfile
+          image="decerter-e2e/openssl-4.1.0:$(sha256sum "$dockerfile" | cut -c1-12)"
+          if [ -f "$RUNNER_TEMP/openssl-4.1.0.tar" ]; then
+            docker load --quiet --input "$RUNNER_TEMP/openssl-4.1.0.tar"
+          else
+            docker build --quiet --tag "$image" - < "$dockerfile"
+            docker save --output "$RUNNER_TEMP/openssl-4.1.0.tar" "$image"
+          fi
+          docker image inspect "$image" > /dev/null
       # make test-e2e is sudo go test; the test binary is built as the runner user, so root doesn't write to its Go caches
       - name: Run the e2e tests
         run: |

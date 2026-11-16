@@ -7,6 +7,7 @@ package e2e_test
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -38,6 +39,15 @@ var (
 	dtlsEditedLine = "DTLS LINE EDITED BY DECERTER"
 	dtlsGrowLine   = "dtls line that grows"
 	dtlsGrownLine  = "DTLS LINE GROWN BY DECERTER:" + strings.Repeat(" grown", 400) + " END"
+	// the line openssl s_server sends back
+	dtlsServerLine       = "dtls line from the server"
+	dtlsServerEditedLine = "DTLS SERVER LINE EDITED BY DECERTER"
+	// the suites of the record layer that OpenSSL has for DTLS 1.2: every one of suiteRows but the TLS 1.3, 3DES and RC4 ones
+	dtlsSuites = []string{
+		"ECDHE-RSA-AES128-GCM-SHA256", "ECDHE-RSA-AES256-GCM-SHA384", "ECDHE-RSA-CHACHA20-POLY1305", "ECDHE-RSA-AES128-SHA", "ECDHE-RSA-AES256-SHA", "ECDHE-RSA-AES128-SHA256",
+		"ECDHE-ECDSA-AES128-GCM-SHA256", "ECDHE-ECDSA-AES256-GCM-SHA384", "ECDHE-ECDSA-CHACHA20-POLY1305", "ECDHE-ECDSA-AES128-SHA", "ECDHE-ECDSA-AES256-SHA", "ECDHE-ECDSA-AES128-SHA256",
+		"AES128-GCM-SHA256", "AES256-GCM-SHA384", "AES128-SHA", "AES256-SHA", "AES128-SHA256",
+	}
 )
 
 var (
@@ -140,9 +150,11 @@ func TestLegacyHTTP2Negative(state *testing.T) {
 	}
 }
 
-// Test if both rewrites reach the server with every cipher suite of eproxy's README, a suite this host or decerter can't run is skipped with the reason.
+// Test if every cipher suite of eproxy's README is rewritten in both directions, a suite this host or decerter can't run is skipped with the reason: over HTTP/1.1
+// curl asks for / twice on one connection, GET / becomes GET /test and the head of each request and answer grows past one record, so the later records of
+// both directions go on with other sequence numbers, and the answer /test becomes /TEST; over HTTP/2 the HEADERS rewrite and the /TEST of the DATA frame.
 func TestCipherSuitesPositive(state *testing.T) {
-	startDecerter(state, InterceptDecerterMode, "", []intercept.Rule{getRule{}, newHeadersRule()})
+	startDecerter(state, InterceptDecerterMode, "", []intercept.Rule{getRule{}, newHeadersRule(), splitRule{}})
 
 	for _, isHTTP2 := range []bool{false, true} {
 		protocolName := "http1.1"
@@ -161,7 +173,7 @@ func TestCipherSuitesPositive(state *testing.T) {
 					}
 
 					positive := suiteCase(row, isHTTP2)
-					err := testCurl(state, testUser, positive)
+					err := testMatrixCurl(state, positive)
 
 					if err != nil {
 						state.Errorf("Test of the cipher suite %s failed, case: %s, error: %s", row.IANA, positive.Name, err.Error())
@@ -172,64 +184,119 @@ func TestCipherSuitesPositive(state *testing.T) {
 	}
 }
 
-// one DTLS 1.2 session: openssl s_client sends Line with Suite (empty is OpenSSL's default), the server has to print Expected
+// one DTLS 1.2 session: openssl s_client sends Line with Suite (empty is OpenSSL's default) and Arguments, the server has to print Expected; then the
+// server sends dtlsServerLine and the client has to print ServerExpected; Certificate names the server's certificate in assets
 type dtlsCase struct {
-	Name     string
-	Suite    string
-	Line     string
-	Expected string
+	Name           string
+	Suite          string
+	Certificate    string
+	Arguments      []string
+	Line           string
+	Expected       string
+	ServerExpected string
 }
 
-// Test if the DTLS rule changes the line openssl s_client sends to openssl s_server over DTLS 1.2 with AES-GCM, ChaCha20-Poly1305 and AES-CBC, and an edit that no longer fits one datagram.
+// Test if the DTLS rule changes the lines of both directions between openssl s_client and openssl s_server over DTLS 1.2 with every suite of the record
+// layer OpenSSL has for DTLS: AES-GCM, ChaCha20-Poly1305 and AES-CBC, with and without encrypt-then-MAC, ECDHE and RSA key exchange, RSA and ECDSA
+// certificates; and an edit that no longer fits one datagram. The sessions run at the same time.
 func TestDTLSPositive(state *testing.T) {
 	startDecerter(state, InterceptDecerterMode, "", []intercept.Rule{newDTLSRule()})
-
-	for _, positive := range dtlsCases(true) {
-		server := startDTLSServer(state)
-		output, err := runDTLSClient(state.Context(), testUser, server, positive.Suite, positive.Line, positive.Expected)
-
-		if err == nil && strings.Contains(output, positive.Line) {
-			err = fmt.Errorf("dtls server printed the original line %q, output:\n%s", positive.Line, output)
-		}
-
-		if err != nil {
-			state.Errorf("Test of the DTLS rewrite failed, case: %s, error: %s", positive.Name, err.Error())
-		}
-	}
+	testDTLSCases(state, testUser, dtlsCases(true))
 }
 
-// Test if the DTLS rule leaves the session of an unselected user alone.
+// Test if the DTLS rule leaves the sessions of an unselected user alone.
 func TestDTLSNegative(state *testing.T) {
 	startDecerter(state, InterceptDecerterMode, "", []intercept.Rule{newDTLSRule()})
+	testDTLSCases(state, otherUser, dtlsCases(false))
+}
 
-	for _, negative := range dtlsCases(false) {
-		server := startDTLSServer(state)
-		_, err := runDTLSClient(state.Context(), otherUser, server, negative.Suite, negative.Line, negative.Expected)
+// each case as a parallel subtest, the originals of edited lines must not reach the peer
+func testDTLSCases(state *testing.T, runAs account, testCases []dtlsCase) {
+	for _, testCase := range testCases {
+		state.Run(testCase.Name, func(state *testing.T) {
+			// s_client takes half a second to leave a DTLS session
+			state.Parallel()
+			server := startOpenSSLServer(state, true, testCase.Certificate, 1)
+			arguments := append([]string{"-nocommands"}, testCase.Arguments...)
 
-		if err != nil {
-			state.Errorf("Test of the DTLS rewrite failed, case: %s, error: %s", negative.Name, err.Error())
-		}
+			if testCase.Suite != "" {
+				arguments = append(arguments, "-cipher", testCase.Suite)
+			}
+
+			client := startOpenSSLClient(state, runAs, server, true, arguments...)
+			err := exchangeLines(client, server, testCase.Line, testCase.Expected, dtlsServerLine, testCase.ServerExpected)
+			err = errors.Join(err, client.finish())
+
+			if err != nil {
+				state.Errorf("Test of the DTLS rewrite failed, case: %s, error: %s", testCase.Name, err.Error())
+			}
+		})
 	}
 }
 
-// the rule of the DTLS cases: the short line becomes another one, the long one grows past what a datagram of MinDatagramLength holds, so it goes on as several records
+// the client sends line and the server has to print expected, then the server sends serverLine and the client has to print serverExpected; the
+// original of an edited line must not reach the peer
+func exchangeLines(client opensslPeer, server opensslPeer, line string, expected string, serverLine string, serverExpected string) (err error) {
+	err = client.send(line)
+
+	if err != nil {
+		return
+	}
+
+	output, found := server.waitFor(expected, commandTimeout)
+
+	if !found || ((line != expected) && strings.Contains(output, line)) {
+		err = fmt.Errorf("server should print %q and not %q, output:\n%s", expected, line, output)
+		return
+	}
+
+	err = server.send(serverLine)
+
+	if err != nil {
+		return
+	}
+
+	output, found = client.waitFor(serverExpected, commandTimeout)
+
+	if !found || ((serverLine != serverExpected) && strings.Contains(output, serverLine)) {
+		err = fmt.Errorf("client should print %q and not %q, output:\n%s", serverExpected, serverLine, output)
+		return
+	}
+
+	return
+}
+
+// the rule of the DTLS cases: the short line becomes another one, the long one grows past what a datagram of MinDatagramLength holds, so it goes on as
+// several records; the server's line becomes another one too
 func newDTLSRule() (rule dtlsRule) {
-	rule = dtlsRule{replacements: map[string]string{dtlsLine: dtlsEditedLine, dtlsGrowLine: dtlsGrownLine}}
+	rule = dtlsRule{replacements: map[string]string{dtlsLine: dtlsEditedLine, dtlsGrowLine: dtlsGrownLine, dtlsServerLine: dtlsServerEditedLine}}
 	return
 }
 
 // the DTLS sessions of the tests, isEdited expects what the rule makes of the lines
 func dtlsCases(isEdited bool) (cases []dtlsCase) {
 	cases = []dtlsCase{
-		{Name: "default suite", Suite: "", Line: dtlsLine, Expected: dtlsEditedLine},
-		{Name: "chacha20-poly1305", Suite: "ECDHE-RSA-CHACHA20-POLY1305", Line: dtlsLine, Expected: dtlsEditedLine},
-		{Name: "aes-cbc", Suite: "ECDHE-RSA-AES128-SHA", Line: dtlsLine, Expected: dtlsEditedLine},
-		{Name: "grown past one datagram", Suite: "", Line: dtlsGrowLine, Expected: dtlsGrownLine},
+		{Name: "default suite", Suite: "", Certificate: "server_rsa", Arguments: nil, Line: dtlsLine, Expected: dtlsEditedLine},
+		{Name: "grown past one datagram", Suite: "", Certificate: "server_rsa", Arguments: nil, Line: dtlsGrowLine, Expected: dtlsGrownLine},
+		{Name: "cbc without encrypt-then-mac", Suite: "ECDHE-RSA-AES128-SHA", Certificate: "server_rsa", Arguments: []string{"-no_etm"}, Line: dtlsLine, Expected: dtlsEditedLine},
 	}
 
-	if !isEdited {
-		for index := range cases {
+	for _, suite := range dtlsSuites {
+		certificate := "server_rsa"
+
+		if strings.Contains(suite, "-ECDSA-") {
+			certificate = "server_ecdsa"
+		}
+
+		cases = append(cases, dtlsCase{Name: suite, Suite: suite, Certificate: certificate, Arguments: nil, Line: dtlsLine, Expected: dtlsEditedLine})
+	}
+
+	for index := range cases {
+		cases[index].ServerExpected = dtlsServerEditedLine
+
+		if !isEdited {
 			cases[index].Expected = cases[index].Line
+			cases[index].ServerExpected = dtlsServerLine
 		}
 	}
 
@@ -294,12 +361,28 @@ func suiteCase(row suiteRow, isHTTP2 bool) (testCase curlCase) {
 		certificate = &ecdsaCertificate
 	}
 
+	// the split rule grows only an HTTP/1.1 head
+	grown := grownLength
+
+	if isHTTP2 {
+		grown = 0
+	}
+
 	testCase = curlCase{
 		Name:     fmt.Sprintf("%s %s", strings.ToLower(proto), row.OpenSSL),
 		Server:   serverConfig{Certificate: certificate, Version: version, CipherSuite: serverSuite, HTTP2: isHTTP2},
 		Suite:    row.OpenSSL,
-		Expected: receivedRequest{Path: "/test", Proto: proto, Version: version, CipherSuite: row.ID},
+		Expected: receivedRequest{Path: "/test", Proto: proto, Version: version, CipherSuite: row.ID, Grown: grown},
 	}
+	return
+}
+
+// the README row of an OpenSSL name, it has to be in suiteRows
+func rowByName(name string) (row *suiteRow) {
+	row = &suiteRows[slices.IndexFunc(suiteRows, func(row suiteRow) (isRow bool) {
+		isRow = (row.OpenSSL == name)
+		return
+	})]
 	return
 }
 
@@ -364,6 +447,72 @@ func testCurl(state *testing.T, runAs account, testCase curlCase) (err error) {
 		return
 	}
 
+	return
+}
+
+// testCurl for the rules of TestCipherSuitesPositive: HTTP/1.1 asks for / twice on one connection, the second request and answer go after a split
+// record of each direction; curl prints the answer and the X-Decerter-Grown field the split rule gave it, and every request has to reach the server as expected
+func testMatrixCurl(state *testing.T, testCase curlCase) (err error) {
+	server := startServer(state, testCase.Server)
+	arguments := curlArguments(testCase, server.URL)
+	requests := 1
+	expected := matrixAnswer
+
+	if !testCase.Server.HTTP2 {
+		requests = 2
+		field := strings.Repeat(string(serverGrownByte), grownLength)
+		arguments = append(arguments, server.URL, "--write-out", "%header{"+grownHeaderName+"}|%{num_connects}\n")
+		expected = matrixAnswer + field + "|1\n" + matrixAnswer + field + "|0\n"
+	}
+
+	output, err := runCurl(state.Context(), testUser, arguments)
+
+	if err != nil {
+		return
+	}
+
+	for index := range requests {
+		request, receivedErr := server.received()
+
+		if err = receivedErr; err != nil {
+			return
+		}
+
+		if request != testCase.Expected {
+			err = fmt.Errorf("server request %d return value was not %+v instead: %+v", index+1, testCase.Expected, request)
+			return
+		}
+	}
+
+	if output != expected {
+		err = fmt.Errorf("curl output return value was not %s instead: %s", shorten(expected), shorten(output))
+		return
+	}
+
+	return
+}
+
+// text with every run of more than 16 equal bytes written as the byte and its count, so a grown header field fits an error message
+func shorten(text string) (short string) {
+	var builder strings.Builder
+
+	for index := 0; index < len(text); {
+		end := index
+
+		for (end < len(text)) && (text[end] == text[index]) {
+			end++
+		}
+
+		if end-index > 16 {
+			fmt.Fprintf(&builder, "<%q x %d>", text[index], end-index)
+		} else {
+			builder.WriteString(text[index:end])
+		}
+
+		index = end
+	}
+
+	short = fmt.Sprintf("%q", builder.String())
 	return
 }
 

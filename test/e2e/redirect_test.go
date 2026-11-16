@@ -579,6 +579,12 @@ func startFlagsAPIDecerter(state *testing.T, mode decerterMode, rules []intercep
 	socket := filepath.Join(state.TempDir(), "api.sock")
 	decerter := newBlockingDecerter(state, mode, "", rules, flags, "", socket, blockQuic)
 	startApp(state, &decerter, mode)
+	client = socketClient(socket)
+	return
+}
+
+// a client of the API on the unix socket of a decerter
+func socketClient(socket string) (client apiClient) {
 	client = apiClient{
 		client: &http.Client{
 			Transport: &http.Transport{

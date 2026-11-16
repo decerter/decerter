@@ -12,9 +12,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
-	"net"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -338,45 +336,21 @@ func runCommandTimeout(ctx context.Context, timeout time.Duration, name string, 
 	return
 }
 
-// run openssl s_client -dtls1_2 as runAs against the server on port, suite empty takes OpenSSL's default
+// run openssl s_client -dtls1_2 as runAs against the server, suite empty takes OpenSSL's default
 // line goes to the client's stdin, which stays open until the server printed expected or commandTimeout passed: s_client sends close_notify and leaves at the end of its input
 // output is what the server printed
-func runDTLSClient(ctx context.Context, runAs account, server dtlsServer, suite string, line string, expected string) (output string, err error) {
-	commandCtx, cancel := context.WithTimeout(ctx, commandTimeout)
-	defer cancel()
-	arguments := []string{"s_client", "-dtls1_2", "-connect", net.JoinHostPort(destinationPrefix.Addr().String(), server.Port), "-nocommands"}
+func runDTLSClient(state *testing.T, runAs account, server opensslPeer, suite string, line string, expected string) (output string, err error) {
+	arguments := []string{"-nocommands"}
 
 	if suite != "" {
 		arguments = append(arguments, "-cipher", suite)
 	}
 
-	command := exec.CommandContext(commandCtx, "openssl", arguments...)
-	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: runAs.UID, Gid: runAs.GID, Groups: []uint32{}, NoSetGroups: false}}
-	command.Dir = "/"
-	command.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/nonexistent", "LC_ALL=C"}
-	command.WaitDelay = time.Second
-	stderr := &bytes.Buffer{}
-	command.Stdout = io.Discard
-	command.Stderr = stderr
-	stdin, stdinErr := command.StdinPipe()
-
-	if err = stdinErr; err != nil {
-		return
-	}
-
-	err = command.Start()
-
-	if err != nil {
-		return
-	}
-
-	_, writeErr := io.WriteString(stdin, line+"\n")
+	client := startOpenSSLClient(state, runAs, server, true, arguments...)
+	writeErr := client.send(line)
 	output, found := server.waitFor(expected, commandTimeout)
-	closeErr := stdin.Close()
-	waitErr := command.Wait()
 
-	if err = errors.Join(writeErr, closeErr, waitErr); err != nil {
-		err = fmt.Errorf("openssl %s: %w: %s", strings.Join(arguments, " "), err, strings.TrimSpace(stderr.String()))
+	if err = errors.Join(writeErr, client.finish()); err != nil {
 		return
 	}
 

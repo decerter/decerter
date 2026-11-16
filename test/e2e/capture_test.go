@@ -246,7 +246,7 @@ func TestCaptureDTLSPositive(state *testing.T) {
 			capturePath := filepath.Join(state.TempDir(), "dtls.pcapng")
 			stop := startDecerter(state, mode, capturePath, nil)
 			server := startDTLSServer(state)
-			_, err := runDTLSClient(state.Context(), testUser, server, "", dtlsLine, dtlsLine)
+			_, err := runDTLSClient(state, testUser, server, "", dtlsLine, dtlsLine)
 
 			if err != nil {
 				state.Fatalf("Could not run the dtls session during the capture, error: %s", err.Error())

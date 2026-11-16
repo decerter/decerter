@@ -31,6 +31,13 @@ const (
 	http2PaddedFlag     uint8 = 0x8
 	http2PriorityFlag   uint8 = 0x20
 	http2PriorityLength int   = 5
+	// the header field of the split rule and its length, more than the 16 KiB of a record; the client's is of u, the server's of d
+	grownHeaderName string = "X-Decerter-Grown"
+	grownLength     int    = 20000
+	clientGrownByte byte   = 'u'
+	serverGrownByte byte   = 'd'
+	// the server's answer /test after the split rule
+	matrixAnswer string = "/TEST"
 	// the SETTINGS_HEADER_TABLE_SIZE every HTTP/2 peer starts with, Go's server does not announce another one
 	hpackTableSize uint32 = 4096
 )
@@ -46,6 +53,9 @@ var (
 	http2OldPath  = "/"
 	http2NewPath  = "/test"
 	http2PathName = ":path"
+	// the head lines the split rule adds its header field to, after the request line and after the status line of a 200
+	http1Host   = []byte("\r\nHost: ")
+	http1Status = []byte("HTTP/1.1 200 OK\r\n")
 )
 
 // eproxy's HTTP/1.1 rewrite from socket.InspectPacket: every GET / the client sends becomes GET /test
@@ -62,13 +72,42 @@ func (rule getRule) Apply(ctx context.Context, message intercept.Message) (plain
 	return
 }
 
-// changes the lines openssl s_client sends over DTLS: each key of replacements becomes its value
+// the rewrites of the cipher-suite matrix in the record layer, both directions: an HTTP/1.1 head of either side gets the X-Decerter-Grown header
+// field, more than one record holds, so the record goes on as two and every later record of its direction has another sequence number;
+// the server's answer /test becomes /TEST, in an HTTP/1.1 body and in an HTTP/2 DATA frame alike, the length stays
+type splitRule struct{}
+
+func (rule splitRule) Match(message intercept.Message) (isMatch bool) {
+	isMatch = (message.Layer == intercept.TLSLayer)
+	return
+}
+
+func (rule splitRule) Apply(ctx context.Context, message intercept.Message) (plain []byte, verdict intercept.Verdict, err error) {
+	verdict = intercept.ForwardVerdict
+
+	if message.Direction == tlsrecord.ClientDirection {
+		plain = bytes.Replace(message.Plain, http1Host, slices.Concat([]byte("\r\n"), grownField(clientGrownByte), http1Host[2:]), 1)
+		return
+	}
+
+	plain = bytes.Replace(message.Plain, http1Status, slices.Concat(http1Status, grownField(serverGrownByte)), 1)
+	plain = bytes.ReplaceAll(plain, []byte(http2NewPath), []byte(matrixAnswer))
+	return
+}
+
+// the header field X-Decerter-Grown: <grownLength times filler>\r\n
+func grownField(filler byte) (field []byte) {
+	field = fmt.Appendf(nil, "%s: %s\r\n", grownHeaderName, bytes.Repeat([]byte{filler}, grownLength))
+	return
+}
+
+// changes the lines openssl s_client and s_server send over DTLS: each key of replacements becomes its value
 type dtlsRule struct {
 	replacements map[string]string
 }
 
 func (rule dtlsRule) Match(message intercept.Message) (isMatch bool) {
-	isMatch = (message.Direction == tlsrecord.ClientDirection) && (message.Layer == intercept.DTLSLayer)
+	isMatch = (message.Layer == intercept.DTLSLayer)
 	return
 }
 

@@ -100,7 +100,7 @@ func TestFilterDTLSPositive(state *testing.T) {
 		state.Run(positive.Filter, func(state *testing.T) {
 			startFilteredDecerter(state, InterceptDecerterMode, "", []intercept.Rule{newDTLSRule()}, testFlags(), positive.Filter)
 			server := startDTLSServer(state)
-			output, err := runDTLSClient(state.Context(), testUser, server, "", dtlsLine, positive.Expected)
+			output, err := runDTLSClient(state, testUser, server, "", dtlsLine, positive.Expected)
 
 			if (err == nil) && (positive.Expected != dtlsLine) && strings.Contains(output, dtlsLine) {
 				err = fmt.Errorf("dtls server printed the original line %q, output:\n%s", dtlsLine, output)

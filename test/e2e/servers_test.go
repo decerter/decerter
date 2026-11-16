@@ -15,17 +15,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
 
 const (
 	// s_server prints this once it listens
-	dtlsServerReady string = "ACCEPT"
-	// how often the output of the dtls server is looked at
-	dtlsPollInterval time.Duration = 20 * time.Millisecond
+	opensslServerReady string = "ACCEPT"
+	// how often the output of an openssl peer is looked at
+	opensslPollInterval time.Duration = 20 * time.Millisecond
 )
 
 // what a test server serves: plain HTTP when Certificate is nil, TLS pinned to Version and CipherSuite when they are set
@@ -42,6 +44,7 @@ type serverConfig struct {
 }
 
 // what a test server saw of one request; Body and ContentLength only for the paths of the HTTP layer tests, the other tests compare the rest
+// Grown is the length of the X-Decerter-Grown header field the split rule adds
 type receivedRequest struct {
 	Path          string
 	Proto         string
@@ -49,6 +52,7 @@ type receivedRequest struct {
 	CipherSuite   uint16
 	Body          string
 	ContentLength int64
+	Grown         int
 }
 
 type testServer struct {
@@ -151,6 +155,7 @@ func (server testServer) handle(writer http.ResponseWriter, request *http.Reques
 		CipherSuite:   0,
 		Body:          "",
 		ContentLength: 0,
+		Grown:         len(request.Header.Get(grownHeaderName)),
 	}
 
 	if request.TLS != nil {
@@ -213,12 +218,6 @@ func (server testServer) received() (request receivedRequest, err error) {
 	return
 }
 
-// openssl s_server -dtls1_2 on a free loopback port, run as root so its socket is never redirected; output is what it printed, the lines a client sent among them
-type dtlsServer struct {
-	Port   string
-	output *lockedBuffer
-}
-
 // a buffer two goroutines use: the command writes into it, the test reads it
 type lockedBuffer struct {
 	mutex  *sync.Mutex
@@ -239,86 +238,200 @@ func (locked lockedBuffer) String() (text string) {
 	return
 }
 
-// start the server for one session with eproxy's RSA certificate and wait until it listens, it is killed when the test ends
-// its stdin stays open, s_server leaves at the end of its input otherwise
-func startDTLSServer(state *testing.T) (server dtlsServer) {
-	port, portErr := freeUDPPort()
+// openssl s_server or s_client: output is everything it printed, the lines of its peer among them, and its stdin stays open until finish, both leave
+// at the end of their input otherwise; Port is the port a server listens on
+type opensslPeer struct {
+	Port    string
+	output  *lockedBuffer
+	stdin   io.WriteCloser
+	command *exec.Cmd
+	exit    *peerExit
+}
+
+// the exit of a peer: done is closed once err is set
+type peerExit struct {
+	done chan struct{}
+	err  error
+}
+
+// a session of the DTLS tests on 127.0.0.1 with eproxy's RSA certificate
+func startDTLSServer(state *testing.T) (server opensslPeer) {
+	server = startOpenSSLServer(state, true, "server_rsa", 1)
+	return
+}
+
+// openssl s_server on a free loopback port for sessions connections, DTLS 1.2 when isDTLS, with the certificate and key of assets named certificate;
+// it runs as root, so its socket is never redirected, and it is killed when the test ends; arguments go after the others
+func startOpenSSLServer(state *testing.T, isDTLS bool, certificate string, sessions int, arguments ...string) (server opensslPeer) {
+	port, portErr := freePort(isDTLS)
 
 	if portErr != nil {
-		state.Fatalf("Could not find a free udp port for the dtls server, error: %s", portErr.Error())
+		state.Fatalf("Could not find a free port for the openssl server, error: %s", portErr.Error())
 	}
 
-	server = dtlsServer{
-		Port:   port,
-		output: &lockedBuffer{mutex: &sync.Mutex{}, buffer: &bytes.Buffer{}},
-	}
-	certificatePath, certificateErr := filepath.Abs(filepath.Join("assets", "server_rsa.crt"))
-	keyPath, keyErr := filepath.Abs(filepath.Join("assets", "server_rsa.key"))
+	certificatePath, certificateErr := filepath.Abs(filepath.Join("assets", certificate+".crt"))
+	keyPath, keyErr := filepath.Abs(filepath.Join("assets", certificate+".key"))
 
 	if err := errors.Join(certificateErr, keyErr); err != nil {
 		state.Fatalf("Could not find the server certificate, error: %s", err.Error())
 	}
 
-	command := exec.CommandContext(state.Context(), "openssl", "s_server", "-dtls1_2", "-accept", net.JoinHostPort(destinationPrefix.Addr().String(), port), "-cert", certificatePath, "-key", keyPath, "-naccept", "1")
-	command.WaitDelay = time.Second
-	command.Stdout = server.output
-	command.Stderr = server.output
-	stdin, stdinErr := command.StdinPipe()
+	serverArguments := []string{"s_server", "-accept", net.JoinHostPort(destinationPrefix.Addr().String(), port), "-cert", certificatePath, "-key", keyPath, "-naccept", strconv.Itoa(sessions)}
 
-	if stdinErr != nil {
-		state.Fatalf("Could not open the stdin of the dtls server, error: %s", stdinErr.Error())
+	if isDTLS {
+		serverArguments = append(serverArguments, "-dtls1_2")
 	}
 
-	startErr := command.Start()
-
-	if startErr != nil {
-		state.Fatalf("Could not start the dtls server, error: %s", startErr.Error())
-	}
-
-	state.Cleanup(func() {
-		// the server is done or not needed any more, the context of the test is cancelled after the cleanups
-		killErr := command.Process.Kill()
-
-		if (killErr != nil) && !errors.Is(killErr, os.ErrProcessDone) {
-			state.Errorf("Could not stop the dtls server, error: %s", killErr.Error())
-		}
-
-		// the exit status of a killed server says nothing
-		_ = command.Wait()
-
-		if closeErr := stdin.Close(); (closeErr != nil) && !errors.Is(closeErr, os.ErrClosed) {
-			state.Errorf("Could not close the stdin of the dtls server, error: %s", closeErr.Error())
-		}
-	})
-
-	_, isListening := server.waitFor(dtlsServerReady, commandTimeout)
+	command := exec.CommandContext(state.Context(), "openssl", append(serverArguments, arguments...)...)
+	server = startPeer(state, command, "server")
+	server.Port = port
+	_, isListening := server.waitFor(opensslServerReady, commandTimeout)
 
 	if !isListening {
-		state.Fatalf("Could not start the dtls server, output: %s", server.output.String())
+		state.Fatalf("Could not start the openssl server, output: %s", server.output.String())
 	}
 
 	return
 }
 
-// wait until the server printed text, output is everything it printed so far
-func (server dtlsServer) waitFor(text string, timeout time.Duration) (output string, found bool) {
+// openssl s_client as runAs against the server, DTLS 1.2 when isDTLS; it is killed when the test ends, arguments go after the others
+func startOpenSSLClient(state *testing.T, runAs account, server opensslPeer, isDTLS bool, arguments ...string) (client opensslPeer) {
+	clientArguments := []string{"s_client", "-connect", net.JoinHostPort(destinationPrefix.Addr().String(), server.Port)}
+
+	if isDTLS {
+		clientArguments = append(clientArguments, "-dtls1_2")
+	}
+
+	command := exec.CommandContext(state.Context(), "openssl", append(clientArguments, arguments...)...)
+	command.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: runAs.UID, Gid: runAs.GID, Groups: []uint32{}, NoSetGroups: false}}
+	command.Dir = "/"
+	command.Env = []string{"PATH=/usr/local/bin:/usr/bin:/bin", "HOME=/nonexistent", "LC_ALL=C"}
+	client = startPeer(state, command, "client")
+	return
+}
+
+// start the command with its stdin open and its output in a buffer, a cleanup kills it
+func startPeer(state *testing.T, command *exec.Cmd, name string) (peer opensslPeer) {
+	peer = opensslPeer{Port: "", output: &lockedBuffer{mutex: &sync.Mutex{}, buffer: &bytes.Buffer{}}, stdin: nil, command: command, exit: &peerExit{done: make(chan struct{}), err: nil}}
+	command.WaitDelay = time.Second
+	command.Stdout = peer.output
+	command.Stderr = peer.output
+	stdin, stdinErr := command.StdinPipe()
+
+	if stdinErr != nil {
+		state.Fatalf("Could not open the stdin of the openssl %s, error: %s", name, stdinErr.Error())
+	}
+
+	peer.stdin = stdin
+	startErr := command.Start()
+
+	if startErr != nil {
+		state.Fatalf("Could not start the openssl %s, error: %s", name, startErr.Error())
+	}
+
+	// openssl waiter, finish and the cleanup wait for its exit
+	go func() {
+		peer.exit.err = command.Wait()
+		close(peer.exit.done)
+	}()
+
+	state.Cleanup(func() {
+		// the peer is done or not needed any more, the context of the test is cancelled after the cleanups
+		killErr := command.Process.Kill()
+
+		if (killErr != nil) && !errors.Is(killErr, os.ErrProcessDone) {
+			state.Errorf("Could not stop the openssl %s, error: %s", name, killErr.Error())
+		}
+
+		// the exit status of a killed peer says nothing
+		select {
+		case <-peer.exit.done:
+		case <-time.After(commandTimeout):
+		}
+
+		if closeErr := stdin.Close(); (closeErr != nil) && !errors.Is(closeErr, os.ErrClosed) {
+			state.Errorf("Could not close the stdin of the openssl %s, error: %s", name, closeErr.Error())
+		}
+	})
+
+	return
+}
+
+// write a line to the peer's stdin
+func (peer opensslPeer) send(line string) (err error) {
+	_, err = io.WriteString(peer.stdin, line+"\n")
+	return
+}
+
+// close the stdin, which ends the session, and wait for the exit of the peer
+func (peer opensslPeer) finish() (err error) {
+	// a server of one session leaves on its own, its stdin is closed then
+	if closeErr := peer.stdin.Close(); !errors.Is(closeErr, os.ErrClosed) {
+		err = closeErr
+	}
+
+	select {
+	case <-peer.exit.done:
+		err = errors.Join(err, peer.exit.err)
+	case <-time.After(commandTimeout):
+		err = errors.Join(err, fmt.Errorf("openssl did not leave in %s", commandTimeout))
+	}
+
+	if err != nil {
+		err = fmt.Errorf("openssl %s: %w: %s", strings.Join(peer.command.Args[1:], " "), err, strings.TrimSpace(peer.output.String()))
+	}
+
+	return
+}
+
+// wait until the peer printed text, output is everything it printed so far
+func (peer opensslPeer) waitFor(text string, timeout time.Duration) (output string, found bool) {
 	deadline := time.Now().Add(timeout)
 
 	for {
-		output = server.output.String()
+		output = peer.output.String()
 		found = strings.Contains(output, text)
 
 		if found || time.Now().After(deadline) {
 			return
 		}
 
-		time.Sleep(dtlsPollInterval)
+		time.Sleep(opensslPollInterval)
 	}
 }
 
-// a port of loopback no udp socket has now, the server binds it right after
-func freeUDPPort() (port string, err error) {
-	connection, listenErr := net.ListenPacket("udp", net.JoinHostPort(destinationPrefix.Addr().String(), "0"))
+// wait until the peer printed text count times
+func (peer opensslPeer) waitCount(text string, count int, timeout time.Duration) (isFound bool) {
+	deadline := time.Now().Add(timeout)
+
+	for {
+		isFound = (strings.Count(peer.output.String(), text) >= count)
+
+		if isFound || time.Now().After(deadline) {
+			return
+		}
+
+		time.Sleep(opensslPollInterval)
+	}
+}
+
+// a port of loopback no udp socket, or no tcp socket, has now, the server binds it right after
+func freePort(isUDP bool) (port string, err error) {
+	address := net.JoinHostPort(destinationPrefix.Addr().String(), "0")
+
+	if !isUDP {
+		listener, listenErr := net.Listen("tcp", address)
+
+		if err = listenErr; err != nil {
+			return
+		}
+
+		_, port, err = net.SplitHostPort(listener.Addr().String())
+		err = errors.Join(err, listener.Close())
+		return
+	}
+
+	connection, listenErr := net.ListenPacket("udp", address)
 
 	if err = listenErr; err != nil {
 		return

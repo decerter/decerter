@@ -237,20 +237,19 @@ func addEditRules(state *testing.T, client apiClient) {
 	}
 }
 
-// Test if rules of layer http edit HTTP/2: curl --http2 over TLS 1.2, TLS 1.3 and h2c reaches /test when a rule rewrites :path, and a Go h2c client and server with
+// Test if rules of layer http edit HTTP/2: curl --http2 over TLS 1.2, TLS 1.3, h2c and the suites of httpSuiteNames reaches /test when a rule rewrites :path, and a Go h2c client and server with
 // GODEBUG=http2debug=2 log no protocol error while their 21 requests on one connection, three at a time, have :path rewritten and bodies grown by 200 KiB past 64 KiB windows and shrunk.
 func TestHTTP2EditPositive(state *testing.T) {
 	client := startAPIDecerter(state, InterceptDecerterMode, []intercept.Rule{intercept.IdentityRule{}})
 	addEditRules(state, client)
 
-	for _, config := range []serverConfig{{Certificate: &rsaCertificate, Version: tls.VersionTLS12, HTTP2: true}, {Certificate: &ecdsaCertificate, Version: tls.VersionTLS13, HTTP2: true}, {Certificate: nil, HTTP2: true}} {
-		server := startServer(state, config)
-		testCase := curlCase{Name: server.URL, Server: config, Suite: "", Expected: receivedRequest{}}
+	for _, testCase := range httpCases(state, []serverConfig{{Certificate: &rsaCertificate, Version: tls.VersionTLS12, HTTP2: true}, {Certificate: &ecdsaCertificate, Version: tls.VersionTLS13, HTTP2: true}, {Certificate: nil, HTTP2: true}}, true) {
+		server := startServer(state, testCase.Server)
 		output, err := runCurl(state.Context(), testUser, curlArguments(testCase, server.URL))
 		request, receivedErr := server.received()
 
-		if err = errors.Join(err, receivedErr); (err != nil) || (output != "/test") || (request.Path != "/test") || (request.Proto != "HTTP/2.0") {
-			state.Errorf("Test of http/2 editing failed, %s, the rewritten :path should reach /test, curl: %q, server: %+v, error: %v", server.URL, output, request, err)
+		if err = errors.Join(err, receivedErr, checkSuite(testCase, request)); (err != nil) || (output != "/test") || (request.Path != "/test") || (request.Proto != "HTTP/2.0") {
+			state.Errorf("Test of http/2 editing failed, %s, the rewritten :path should reach /test, curl: %q, server: %+v, error: %v", testCase.Name, output, request, err)
 			return
 		}
 
@@ -281,7 +280,8 @@ func TestHTTP2EditPositive(state *testing.T) {
 	}
 }
 
-// Test if holds of layer http take HTTP/2 responses one stream at a time: curl's 20 requests on one connection, three at a time, over TLS 1.2, TLS 1.3 and h2c, each response held
+// Test if holds of layer http take HTTP/2 responses one stream at a time: curl's 20 requests on one connection, three at a time, over TLS 1.2, TLS 1.3, h2c and the
+// suites of httpSuiteNames, each response held
 // and forwarded, one grown by 200 KiB and one shrunk to 10 bytes, all complete without a FLOW_CONTROL_ERROR or COMPRESSION_ERROR.
 func TestHTTP2HoldPositive(state *testing.T) {
 	client := startAPIDecerter(state, InterceptDecerterMode, []intercept.Rule{intercept.IdentityRule{}})
@@ -291,9 +291,8 @@ func TestHTTP2HoldPositive(state *testing.T) {
 		state.Fatalf("Test of http/2 holds failed, cannot hold http messages, status: %d, error: %v", status, err)
 	}
 
-	for _, config := range []serverConfig{{Certificate: &rsaCertificate, Version: tls.VersionTLS12, HTTP2: true}, {Certificate: &ecdsaCertificate, Version: tls.VersionTLS13, HTTP2: true}, {Certificate: nil, HTTP2: true}} {
-		server := startServer(state, config)
-		testCase := curlCase{Name: server.URL, Server: config, Suite: "", Expected: receivedRequest{}}
+	for _, testCase := range httpCases(state, []serverConfig{{Certificate: &rsaCertificate, Version: tls.VersionTLS12, HTTP2: true}, {Certificate: &ecdsaCertificate, Version: tls.VersionTLS13, HTTP2: true}, {Certificate: nil, HTTP2: true}}, true) {
+		server := startServer(state, testCase.Server)
 		arguments := append(curlArguments(testCase, server.URL+"h/0"), "--parallel", "--parallel-max", "3", "--write-out", `%{url} %{http_code} %{size_download} %{num_connects}\n`, "--output", "/dev/null")
 
 		for index := 1; index < editRequests; index++ {
@@ -328,8 +327,14 @@ func TestHTTP2HoldPositive(state *testing.T) {
 			}
 		}
 
+		// the server keeps the first 16 requests
 		for range editRequests {
-			_, _ = server.received()
+			request, receivedErr := server.received()
+
+			if suiteErr := checkSuite(testCase, request); (receivedErr == nil) && (suiteErr != nil) {
+				state.Errorf("Test of http/2 holds failed, error: %s", suiteErr.Error())
+				return
+			}
 		}
 	}
 }

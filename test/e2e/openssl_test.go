@@ -8,10 +8,13 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -25,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	v1 "github.com/decerter/decerter/api"
 	"github.com/decerter/decerter/internal/tls/openssl"
 )
 
@@ -42,15 +46,25 @@ const (
 )
 
 // a distribution image whose OpenSSL 3 or 4 is checked against the offsets table
-// Image is built from Base with Build when it is missing; empty Base means Image is pulled by hand (docker pull); Libssl is the soname of the image's
-// default OpenSSL, libcrypto has the same suffix; Architectures lists the only architectures the image is published for, empty is every one
+// Image is built from Base with Build when it is missing; empty Base means Image is pulled by hand (docker pull); with Dockerfile, a file of assets,
+// the image is built from that file instead and Image gets the tag of its hash; Libssl is the soname of the image's default OpenSSL, libcrypto has the
+// same suffix; Architectures lists the only architectures the image is published for, empty is every one; IsMatrix runs every suite of suiteRows in
+// the modify case, the other images run distroSmallSuites
 type distroImage struct {
 	Name          string
 	Image         string
 	Base          string
 	Build         string
+	Dockerfile    string
 	Libssl        string
 	Architectures []string
+	IsMatrix      bool
+}
+
+// one session of the distro modify case: the TLS version the client is pinned to and the README row of the only suite it offers, nil is its default
+type distroSuite struct {
+	Version string
+	Row     *suiteRow
 }
 
 // how a distro client runs: on the host with the copied libraries, or inside its container as the same uid
@@ -67,17 +81,22 @@ var (
 	// Fedora 45 ships OpenSSL 4.0 as libssl.so.4, its OpenSSL 3 is the openssl3-libs compat package; Kali, Parrot and BlackArch (Arch) are the pentest
 	// distributions, BlackArch is published for amd64 only
 	distroImages = []distroImage{
-		{Name: "ubuntu-24.04", Image: "ubuntu:24.04", Base: "", Build: "", Libssl: "libssl.so.3", Architectures: nil},
-		{Name: "debian-13", Image: "debian:13", Base: "", Build: "", Libssl: "libssl.so.3", Architectures: nil},
-		{Name: "fedora", Image: "fedora", Base: "", Build: "", Libssl: "libssl.so.4", Architectures: nil},
-		{Name: "fedora-openssl3", Image: "decerter-e2e/fedora-openssl3", Base: "fedora", Build: "RUN [ -e /usr/lib64/libssl.so.3 ] || dnf -y install openssl3-libs && dnf clean all", Libssl: "libssl.so.3", Architectures: nil},
-		{Name: "almalinux-10", Image: "almalinux:10", Base: "", Build: "", Libssl: "libssl.so.3", Architectures: nil},
-		{Name: "kali-rolling", Image: "kalilinux/kali-rolling", Base: "", Build: "", Libssl: "libssl.so.3", Architectures: nil},
-		{Name: "parrot-core", Image: "parrotsec/core", Base: "", Build: "", Libssl: "libssl.so.3", Architectures: nil},
-		{Name: "blackarch", Image: "blackarchlinux/blackarch", Base: "", Build: "", Libssl: "libssl.so.3", Architectures: []string{"amd64"}},
+		{Name: "ubuntu-24.04", Image: "ubuntu:24.04", Base: "", Build: "", Dockerfile: "", Libssl: "libssl.so.3", Architectures: nil, IsMatrix: false},
+		{Name: "debian-13", Image: "debian:13", Base: "", Build: "", Dockerfile: "", Libssl: "libssl.so.3", Architectures: nil, IsMatrix: false},
+		{Name: "fedora", Image: "fedora", Base: "", Build: "", Dockerfile: "", Libssl: "libssl.so.4", Architectures: nil, IsMatrix: true},
+		{Name: "fedora-openssl3", Image: "decerter-e2e/fedora-openssl3", Base: "fedora", Build: "RUN [ -e /usr/lib64/libssl.so.3 ] || dnf -y install openssl3-libs && dnf clean all", Dockerfile: "", Libssl: "libssl.so.3", Architectures: nil, IsMatrix: false},
+		{Name: "almalinux-10", Image: "almalinux:10", Base: "", Build: "", Dockerfile: "", Libssl: "libssl.so.3", Architectures: nil, IsMatrix: false},
+		{Name: "kali-rolling", Image: "kalilinux/kali-rolling", Base: "", Build: "", Dockerfile: "", Libssl: "libssl.so.3", Architectures: nil, IsMatrix: false},
+		{Name: "parrot-core", Image: "parrotsec/core", Base: "", Build: "", Dockerfile: "", Libssl: "libssl.so.3", Architectures: nil, IsMatrix: false},
+		{Name: "blackarch", Image: "blackarchlinux/blackarch", Base: "", Build: "", Dockerfile: "", Libssl: "libssl.so.3", Architectures: []string{"amd64"}, IsMatrix: false},
+		// upstream's newest release, built from its tarball
+		{Name: "openssl-4.1.0", Image: "decerter-e2e/openssl-4.1.0", Base: "debian:13", Build: "", Dockerfile: "openssl-4.1.0.Dockerfile", Libssl: "libssl.so.4", Architectures: nil, IsMatrix: true},
 	}
 	// where an image keeps its libssl, the first one that has it wins
-	distroLibraryDirectories = []string{"/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/usr/lib64", "/usr/lib"}
+	distroLibraryDirectories = []string{"/usr/lib/x86_64-linux-gnu", "/usr/lib/aarch64-linux-gnu", "/usr/lib64", "/usr/lib", "/usr/local/lib"}
+	// the sessions of the modify case of an image without IsMatrix: each version with the default suite, and TLS_AES_256_GCM_SHA384, the one check
+	// that decerter reads the suite of a TLS 1.3 session and takes SHA-384 for it
+	distroSmallSuites = []distroSuite{{Version: "1.2", Row: nil}, {Version: "1.3", Row: nil}, {Version: "1.3", Row: rowByName("TLS_AES_256_GCM_SHA384")}}
 )
 
 // a distro client setup: the copied libraries with the client linked against them, and the running container with the same client
@@ -90,7 +109,8 @@ type distroClient struct {
 	ContainerRoot    string
 }
 
-// Test if decerter keylog prints the key log lines a client of each distro's default OpenSSL (3 or 4) writes to SSLKEYLOGFILE, TLS 1.2 and 1.3, for the copied libraries on the host, for the client inside the container selected by its uid, and for the container's libssl found without --libssl in the maps of a selected process, and run --decrypt prints the requests.
+// Test if decerter keylog prints the key log lines a client of each distro's default OpenSSL (3 or 4) writes to SSLKEYLOGFILE, TLS 1.2 and 1.3, for the copied libraries on the host, for the client inside the container selected by its uid, and for the container's libssl found without --libssl in the maps of a selected process, run --decrypt prints the requests,
+// and run --intercept with rules of the API rewrites both directions with records split: every suite of suiteRows for OpenSSL 4 (Fedora's and 4.1.0) in one place, the host or else the container, distroSmallSuites everywhere else.
 func TestOpenSSLDistroPositive(state *testing.T) {
 	if _, err := exec.LookPath(dockerName); err != nil {
 		state.Skipf("Test of the distro OpenSSL libraries skipped, no docker: %s", err.Error())
@@ -115,13 +135,19 @@ func TestOpenSSLDistroPositive(state *testing.T) {
 				state.Skipf("Test of the distro OpenSSL libraries skipped for %s, %s is published for %s only", image.Name, image.Image, strings.Join(image.Architectures, ", "))
 			}
 
-			reason := prepareImage(state.Context(), image)
+			reason := prepareImage(state.Context(), &image)
 
 			if reason != "" {
 				state.Skipf("Test of the distro OpenSSL libraries skipped for %s: %s", image.Name, reason)
 			}
 
 			client := startDistroClient(state, image, compiler)
+			// the whole matrix runs once, on the host when the copied libraries load there
+			matrixPlace := HostClientPlace
+
+			if hostRunReason(state.Context(), client) != "" {
+				matrixPlace = ContainerClientPlace
+			}
 
 			for _, place := range []clientPlace{HostClientPlace, ContainerClientPlace, MappedClientPlace} {
 				state.Run(string(place), func(state *testing.T) {
@@ -143,6 +169,13 @@ func TestOpenSSLDistroPositive(state *testing.T) {
 
 					testDistroKeylog(state, client, place, libssl, serverURL.Port())
 					testDistroDecrypt(state, client, place, libssl, serverURL.Port(), image.Name)
+					suites := distroSmallSuites
+
+					if image.IsMatrix && (place == matrixPlace) {
+						suites = distroMatrixSuites()
+					}
+
+					testDistroModify(state, client, place, libssl, suites)
 				})
 			}
 		})
@@ -173,7 +206,7 @@ func TestOpenSSLLateProcessPositive(state *testing.T) {
 		return
 	})]
 
-	if reason := prepareImage(state.Context(), image); reason != "" {
+	if reason := prepareImage(state.Context(), &image); reason != "" {
 		state.Skipf("Test of a late OpenSSL process skipped: %s", reason)
 	}
 
@@ -284,7 +317,7 @@ func TestOpenSSLDistroNegative(state *testing.T) {
 			state.Skipf("Test of an unknown OpenSSL 4 version skipped, no docker: %s", err.Error())
 		}
 
-		if reason := prepareImage(state.Context(), image); reason != "" {
+		if reason := prepareImage(state.Context(), &image); reason != "" {
 			state.Skipf("Test of an unknown OpenSSL 4 version skipped: %s", reason)
 		}
 
@@ -366,7 +399,7 @@ func testDistroKeylog(state *testing.T, client distroClient, place clientPlace, 
 	clientKeyLog := []string{}
 
 	for _, version := range []string{"1.2", "1.3"} {
-		output, runErr := runDistroClient(state.Context(), client, place, false, keyLogPath, port, version, "/keylog")
+		output, runErr := runDistroClient(state.Context(), client, place, false, keyLogPath, port, version, "/keylog", "")
 
 		if runErr != nil {
 			state.Fatalf("Test of the distro keylog failed, TLS %s, error: %s", version, runErr.Error())
@@ -378,7 +411,7 @@ func testDistroKeylog(state *testing.T, client distroClient, place clientPlace, 
 	}
 
 	// the other uid's secrets must not show up
-	_, err := runDistroClient(state.Context(), client, place, true, "", port, "1.3", "/other")
+	_, err := runDistroClient(state.Context(), client, place, true, "", port, "1.3", "/other", "")
 
 	if err != nil {
 		state.Fatalf("Test of the distro keylog failed, the client as another user, error: %s", err.Error())
@@ -421,7 +454,7 @@ func testDistroDecrypt(state *testing.T, client distroClient, place clientPlace,
 
 	for _, version := range []string{"1.2", "1.3"} {
 		paths[version] = fmt.Sprintf("/decerter-%s-%s-%s", name, place, version)
-		output, runErr := runDistroClient(state.Context(), client, place, false, "", port, version, paths[version])
+		output, runErr := runDistroClient(state.Context(), client, place, false, "", port, version, paths[version], "")
 
 		if (runErr != nil) || !strings.Contains(output, paths[version]) {
 			state.Fatalf("Test of the distro decrypt failed, TLS %s, the response should have the path, output: %q, error: %v", version, output, runErr)
@@ -440,6 +473,112 @@ func testDistroDecrypt(state *testing.T, client distroClient, place clientPlace,
 		if !strings.Contains(printed, "version=TLS"+version) || !strings.Contains(printed, "GET "+path+" HTTP/1.1") {
 			state.Errorf("Test of the distro decrypt failed, TLS %s, decerter should print the request %s, output: %q", version, path, printed)
 			return
+		}
+	}
+}
+
+// run --intercept with the rules of splitRuleRequests added over the API: every session of suites asks for / and has to reach the server as /test with
+// the client's X-Decerter-Grown field, over the version and suite it is pinned to, and the client has to get /TEST with the server's X-Decerter-Grown field;
+// each session has a server of its own, with the certificate and the TLS 1.2 suite of suiteCase for a row
+func testDistroModify(state *testing.T, client distroClient, place clientPlace, libssl string, suites []distroSuite) {
+	socket := filepath.Join(state.TempDir(), "api.sock")
+	_, stop := startDecerterCommand(state, distroReady(place, "Redirecting flows"), distroArguments(libssl, "run", "--uid", strconv.FormatUint(uint64(testUser.UID), 10), "--intercept", "--api-socket", socket)...)
+	addRules(state, socketClient(socket), splitRuleRequests())
+	expectedField := "\r\n" + string(grownField(serverGrownByte))
+
+	for _, suite := range suites {
+		name := "tls" + suite.Version + " default"
+		config := serverConfig{Certificate: &rsaCertificate, Version: 0}
+		suiteName := ""
+		expected := receivedRequest{Path: "/test", Proto: "HTTP/1.1", Version: tls.VersionTLS12, CipherSuite: 0, Body: "", ContentLength: 0, Grown: grownLength}
+
+		if suite.Version == "1.3" {
+			expected.Version = tls.VersionTLS13
+		}
+
+		if suite.Row != nil {
+			name = suite.Row.OpenSSL
+			suiteName = suite.Row.OpenSSL
+			expected.CipherSuite = suite.Row.ID
+
+			if reason := skipReason(state.Context(), *suite.Row); reason != "" {
+				state.Logf("Leaving out the suite %s: %s", name, reason)
+				continue
+			}
+
+			config = suiteCase(*suite.Row, false).Server
+		}
+
+		server := startServer(state, config)
+		serverURL, err := url.Parse(server.URL)
+
+		if err != nil {
+			state.Fatalf("Could not parse the test server URL %s, error: %s", server.URL, err.Error())
+		}
+
+		output, err := runDistroClient(state.Context(), client, place, false, "", serverURL.Port(), suite.Version, "/", suiteName)
+
+		// a suite the library leaves out, its build or its system policy, is no failure of decerter
+		if (err != nil) && strings.Contains(err.Error(), "set the suite failed") {
+			state.Logf("Leaving out the suite %s, the library has no such suite: %s", name, err.Error())
+			continue
+		}
+
+		request, receivedErr := server.received()
+
+		if err = errors.Join(err, receivedErr); err == nil && (expected.CipherSuite == 0) {
+			request.CipherSuite = 0
+		}
+
+		if (err != nil) || (request != expected) || !strings.HasPrefix(output, "cipher "+suiteName) || !strings.Contains(output, expectedField) || !strings.HasSuffix(output, "\r\n\r\n"+matrixAnswer) {
+			state.Errorf("Test of the distro modify failed, %s, the server should get %+v and the client the answer %s with the grown field, server: %+v, output: %s, error: %v", name, expected, matrixAnswer, request, shorten(output), err)
+		}
+	}
+
+	err := stop()
+
+	if err != nil {
+		state.Fatalf("Could not stop decerter run, error: %s", err.Error())
+	}
+}
+
+// every row of suiteRows as a session of the modify case, TLS 1.2 or TLS 1.3 by the row
+func distroMatrixSuites() (suites []distroSuite) {
+	for index, row := range suiteRows {
+		version := "1.2"
+
+		if !strings.Contains(row.IANA, "_WITH_") {
+			version = "1.3"
+		}
+
+		suites = append(suites, distroSuite{Version: version, Row: &suiteRows[index]})
+	}
+
+	return
+}
+
+// the rules of splitRule as rules of the API: GET / becomes GET /test, the heads of both sides get the X-Decerter-Grown field, /test becomes /TEST
+func splitRuleRequests() (requests []v1.RuleRequest) {
+	text := func(value string) (textValue v1.Value) {
+		textValue = v1.Value{Type: v1.TextValueType, Value: value}
+		return
+	}
+	requests = []v1.RuleRequest{
+		{Filter: "", Direction: v1.UpDirection, Layer: v1.TLSLayer, Find: text(string(http1OldGet)), Replace: text(string(http1NewGet))},
+		{Filter: "", Direction: v1.UpDirection, Layer: v1.TLSLayer, Find: text(string(http1Host)), Replace: text("\r\n" + string(grownField(clientGrownByte)) + string(http1Host[2:]))},
+		{Filter: "", Direction: v1.DownDirection, Layer: v1.TLSLayer, Find: text(string(http1Status)), Replace: text(string(http1Status) + string(grownField(serverGrownByte)))},
+		{Filter: "", Direction: v1.DownDirection, Layer: v1.TLSLayer, Find: text(http2NewPath), Replace: text(matrixAnswer)},
+	}
+	return
+}
+
+// add each rule over the API, the test stops when one is refused
+func addRules(state *testing.T, client apiClient, requests []v1.RuleRequest) {
+	for _, request := range requests {
+		status, err := client.call(state.Context(), http.MethodPost, "/rules", request, nil)
+
+		if (err != nil) || (status != http.StatusCreated) {
+			state.Fatalf("Could not add the rule %+v, status: %d, error: %v", request, status, err)
 		}
 	}
 }
@@ -531,8 +670,23 @@ func holdMappedLibrary(state *testing.T, client distroClient) {
 	}
 }
 
-// the image is there, or it is built from a base that is there; a non-empty reason skips the image
-func prepareImage(ctx context.Context, image distroImage) (reason string) {
+// the image is there, or it is built from a base that is there; a non-empty reason skips the image; the image of a Dockerfile gets the tag of its hash
+func prepareImage(ctx context.Context, image *distroImage) (reason string) {
+	dockerfile := ""
+
+	if image.Dockerfile != "" {
+		content, readErr := os.ReadFile(filepath.Join("assets", image.Dockerfile))
+
+		if readErr != nil {
+			reason = fmt.Sprintf("could not read %s: %s", image.Dockerfile, readErr.Error())
+			return
+		}
+
+		dockerfile = string(content)
+		digest := sha256.Sum256(content)
+		image.Image = fmt.Sprintf("%s:%x", strings.SplitN(image.Image, ":", 2)[0], digest[:6])
+	}
+
 	if _, err := runCommand(ctx, dockerName, "image", "inspect", image.Image); err == nil {
 		return
 	}
@@ -547,11 +701,19 @@ func prepareImage(ctx context.Context, image distroImage) (reason string) {
 		return
 	}
 
-	// a package install takes longer than commandTimeout
-	buildCtx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	// a package install takes longer than commandTimeout, a build from source longer still
+	timeout := 5 * time.Minute
+
+	if dockerfile == "" {
+		dockerfile = fmt.Sprintf("FROM %s\n%s\n", image.Base, image.Build)
+	} else {
+		timeout = 20 * time.Minute
+	}
+
+	buildCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	command := exec.CommandContext(buildCtx, dockerName, "build", "--quiet", "--tag", image.Image, "-")
-	command.Stdin = strings.NewReader(fmt.Sprintf("FROM %s\n%s\n", image.Base, image.Build))
+	command.Stdin = strings.NewReader(dockerfile)
 	output, err := command.CombinedOutput()
 
 	if err != nil {
@@ -673,11 +835,16 @@ func hostRunReason(ctx context.Context, client distroClient) (reason string) {
 	return
 }
 
-// run the test client against the test server on 127.0.0.1:port as the test user, or as another user; keyLogPath empty writes no key log
-func runDistroClient(ctx context.Context, client distroClient, place clientPlace, isOtherUser bool, keyLogPath string, port string, version string, path string) (output string, err error) {
+// run the test client against the test server on 127.0.0.1:port as the test user, or as another user; keyLogPath empty writes no key log, suite empty
+// offers the default ones
+func runDistroClient(ctx context.Context, client distroClient, place clientPlace, isOtherUser bool, keyLogPath string, port string, version string, path string, suite string) (output string, err error) {
 	commandCtx, cancel := context.WithTimeout(ctx, commandTimeout)
 	defer cancel()
 	arguments := []string{"127.0.0.1", port, version, path}
+
+	if suite != "" {
+		arguments = append(arguments, suite)
+	}
 	var command *exec.Cmd
 
 	switch place {

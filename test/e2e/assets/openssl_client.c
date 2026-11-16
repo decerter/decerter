@@ -5,8 +5,10 @@
 // own), so one binary runs against every OpenSSL 3.x. It declares the few
 // functions it calls instead of including the OpenSSL headers, all of them
 // exist since 3.0.0, and writes its key log to SSLKEYLOGFILE through the key
-// log callback like curl does. usage: openssl_client <ip> <port> <1.2|1.3> <path>
-// sends GET <path>, prints the response and leaves after the server closes.
+// log callback like curl does. usage: openssl_client <ip> <port> <1.2|1.3> <path> [suite]
+// sends GET <path>, prints the negotiated suite as "cipher <name>", then the
+// response, and leaves after the server closes. A suite is the only TLS 1.2
+// cipher or TLS 1.3 cipher suite the client offers, OpenSSL names.
 // With DECERTER_CLIENT_WAIT set it reads one line from stdin before it connects,
 // so it maps libssl long before its handshake (a process decerter finds late).
 #include <arpa/inet.h>
@@ -20,10 +22,15 @@
 typedef struct ssl_st SSL;
 typedef struct ssl_ctx_st SSL_CTX;
 typedef struct ssl_method_st SSL_METHOD;
+typedef struct ssl_cipher_st SSL_CIPHER;
 
 const SSL_METHOD *TLS_client_method(void);
 SSL_CTX *SSL_CTX_new(const SSL_METHOD *method);
 long SSL_CTX_ctrl(SSL_CTX *ctx, int command, long larg, void *parg);
+int SSL_CTX_set_cipher_list(SSL_CTX *ctx, const char *list);
+int SSL_CTX_set_ciphersuites(SSL_CTX *ctx, const char *list);
+const SSL_CIPHER *SSL_get_current_cipher(const SSL *ssl);
+const char *SSL_CIPHER_get_name(const SSL_CIPHER *cipher);
 void SSL_CTX_set_keylog_callback(SSL_CTX *ctx, void (*callback)(const SSL *ssl, const char *line));
 SSL *SSL_new(SSL_CTX *ctx);
 int SSL_set_fd(SSL *ssl, int fd);
@@ -60,9 +67,9 @@ static int fail(const char *what)
 
 int main(int argc, char **argv)
 {
-	if (argc != 5)
+	if ((argc != 5) && (argc != 6))
 	{
-		fprintf(stderr, "usage: openssl_client <ip> <port> <1.2|1.3> <path>\n");
+		fprintf(stderr, "usage: openssl_client <ip> <port> <1.2|1.3> <path> [suite]\n");
 
 		return 2;
 	}
@@ -77,6 +84,17 @@ int main(int argc, char **argv)
 
 	SSL_CTX_ctrl(ctx, SSL_CTRL_SET_MIN_PROTO_VERSION, version, NULL);
 	SSL_CTX_ctrl(ctx, SSL_CTRL_SET_MAX_PROTO_VERSION, version, NULL);
+
+	if (argc == 6)
+	{
+		int is_set = (version == TLS1_2_VERSION) ? SSL_CTX_set_cipher_list(ctx, argv[5]) : SSL_CTX_set_ciphersuites(ctx, argv[5]);
+
+		if (is_set != 1)
+		{
+			return fail("set the suite");
+		}
+	}
+
 	const char *key_log_path = getenv("SSLKEYLOGFILE");
 
 	if (key_log_path && key_log_path[0])
@@ -120,6 +138,8 @@ int main(int argc, char **argv)
 		return fail("SSL_connect");
 	}
 
+	printf("cipher %s\n", SSL_CIPHER_get_name(SSL_get_current_cipher(ssl)));
+	fflush(stdout);
 	char request[512];
 	int length = snprintf(request, sizeof(request), "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", argv[4], argv[1]);
 
