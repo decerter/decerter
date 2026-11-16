@@ -88,6 +88,7 @@ func TestRedirectPingNegative(state *testing.T) {
 	flags.DestinationCIDRs = []netip.Prefix{destinationPrefix, netip.MustParsePrefix("::1/128")}
 	client := startFlagsAPIDecerter(state, RelayDecerterMode, nil, flags, false)
 	clientPath := copyClient(state)
+	allowPing(state, testUser)
 
 	for _, address := range []string{"127.0.0.1", "::1"} {
 		output, err := runClientAs(state.Context(), testUser, clientPath, "ping", address)
@@ -225,6 +226,7 @@ func TestRedirectReleasePositive(state *testing.T) {
 		state.Fatalf("Test of the released flows failed, the peer client should reach the servers, error: %s", err.Error())
 	}
 
+	allowPing(state, testUser)
 	_, err = runClientAs(state.Context(), testUser, clientPath, "ping", "127.0.0.1")
 
 	if err != nil {
@@ -333,6 +335,54 @@ func countEntries(bpfMap *ebpf.Map) (count int, err error) {
 
 	err = iterator.Err()
 	return
+}
+
+// the kernel's range of groups that may open an unprivileged ICMP socket, for IPv4 and IPv6 alike
+const pingGroupRangePath = "/proc/sys/net/ipv4/ping_group_range"
+
+// allowPing puts the group of the account into the ping group range until the test ends: the default of many hosts and of the CI runners is
+// "1 0", which allows no group, so the ping client fails with permission denied
+func allowPing(state *testing.T, runAs account) {
+	state.Helper()
+	content, err := os.ReadFile(pingGroupRangePath)
+
+	if err != nil {
+		state.Fatalf("Reading the ping group range failed, error: %s", err.Error())
+	}
+
+	var low, high uint64
+	_, err = fmt.Sscanf(string(content), "%d %d", &low, &high)
+
+	if err != nil {
+		state.Fatalf("Parsing the ping group range %q failed, error: %s", strings.TrimSpace(string(content)), err.Error())
+	}
+
+	group := uint64(runAs.GID)
+
+	if (low <= group) && (group <= high) {
+		return
+	}
+
+	value := fmt.Sprintf("%d %d", group, group)
+
+	// an empty range has low above high, a real one is widened to take the group too
+	if low <= high {
+		value = fmt.Sprintf("%d %d", min(low, group), max(high, group))
+	}
+
+	err = os.WriteFile(pingGroupRangePath, []byte(value), 0o644)
+
+	if err != nil {
+		state.Fatalf("Setting the ping group range to %q failed, error: %s", value, err.Error())
+	}
+
+	state.Cleanup(func() {
+		restoreErr := os.WriteFile(pingGroupRangePath, content, 0o644)
+
+		if restoreErr != nil {
+			state.Errorf("Restoring the ping group range %q failed, error: %s", strings.TrimSpace(string(content)), restoreErr.Error())
+		}
+	})
 }
 
 // the test user's ping client of one address: an unprivileged ICMP socket that is connected and one that sends with sendto, it prints the source
