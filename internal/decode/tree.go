@@ -4,6 +4,7 @@ package decode
 
 import (
 	"fmt"
+	"io"
 	"strings"
 
 	v1 "github.com/decerter/decerter/api"
@@ -19,8 +20,21 @@ func newTree() (tree *Tree) {
 		summary:     nil,
 		sink:        &node{},
 		moreSummary: 0,
+		inflated:    new(int),
 	}
 	return
+}
+
+// a tree of its own for a decode nested in this one (TLS after STARTTLS, a WebSocket message's protocol), it inflates from the same budget; adopt
+// takes its limits back after its nodes are grafted
+func (tree *Tree) nested() (inner *Tree) {
+	inner = newTree()
+	inner.inflated = tree.inflated
+	return
+}
+
+func (tree *Tree) adopt(inner *Tree) {
+	tree.isFull = tree.isFull || inner.isFull
 }
 
 // a node under parent, a root for nil; past a limit the tree is full and the node is the sink, which keeps no children, so a decoder goes on without checks
@@ -31,6 +45,7 @@ func (tree *Tree) add(parent *node, name string, label string, value string, off
 		depth = parent.depth + 1
 	}
 
+	name, label, value = capText(sanitize(name), maxStringBytes), capText(sanitize(label), maxStringBytes), capText(sanitize(value), maxStringBytes)
 	size := len(name) + len(label) + len(value) + nodeOverheadBytes
 
 	if (parent == tree.sink) || (tree.count >= MaxNodes) || (depth >= MaxDepth) || (tree.size+size > MaxOutputBytes) {
@@ -67,28 +82,114 @@ func (tree *Tree) addBits(parent *node, name string, label string, value string,
 func (tree *Tree) fail(target *node, message string) {
 	tree.errors++
 
+	if target.err != "" {
+		message = target.err + "; " + message
+	}
+
+	tree.replace(target, &target.err, message)
+}
+
+// the name, label or value of a node after add: these and fail write through replace, which keeps the string and the tree in their limits
+func (tree *Tree) setName(target *node, name string) {
+	tree.replace(target, &target.name, name)
+}
+
+func (tree *Tree) setLabel(target *node, label string) {
+	tree.replace(target, &target.label, label)
+}
+
+func (tree *Tree) setValue(target *node, value string) {
+	tree.replace(target, &target.value, value)
+}
+
+// a string of target, sanitized, cut to maxStringBytes and charged to the size; past MaxOutputBytes the tree is full and the string stays as it was;
+// the sink keeps no strings
+func (tree *Tree) replace(target *node, field *string, text string) {
 	if target == tree.sink {
 		return
 	}
 
-	tree.size += len(message) + 2
+	text = capText(sanitize(text), maxStringBytes)
+	grown := len(text) - len(*field)
 
-	if target.err != "" {
-		target.err += "; " + message
+	if tree.size+grown > MaxOutputBytes {
+		tree.isFull = true
 		return
 	}
 
-	target.err = message
+	tree.size += grown
+	*field = text
 }
 
-// one line of the summary per PDU, they are joined with "; "; past maxSummaryLines they are only counted
+// text of printable ASCII at most limit bytes long: a longer one is cut before an escape it would split (\\, \n, \xNN) and ends with "..."
+func capText(text string, limit int) (capped string) {
+	capped = text
+
+	if len(text) <= limit {
+		return
+	}
+
+	cut := limit - len("...")
+
+	if slash := strings.LastIndexByte(text[max(0, cut-3):cut], '\\'); slash >= 0 {
+		slash += max(0, cut-3)
+		run := 0
+
+		for (slash-run >= 0) && (text[slash-run] == '\\') {
+			run++
+		}
+
+		// an odd run of backslashes ends with the start of an escape: \\ is 2 bytes, \xNN 4
+		escapeLength := 2
+
+		if (slash+1 < len(text)) && (text[slash+1] == 'x') {
+			escapeLength = 4
+		}
+
+		if (run%2 == 1) && (slash+escapeLength > cut) {
+			cut = slash
+		}
+	}
+
+	capped = text[:cut] + "..."
+	return
+}
+
+// what reader inflates to: at most maxInflatedBytes of one payload and what is left of maxDecodeInflatedBytes for the whole decode; once that is spent
+// the tree is full and the decode stops
+func (tree *Tree) inflate(reader io.Reader) (inflated []byte, err error) {
+	limit := min(maxInflatedBytes, maxDecodeInflatedBytes-*tree.inflated)
+
+	if limit <= 0 {
+		tree.isFull = true
+		err = fmt.Errorf("the decode inflated %d bytes already, its limit", maxDecodeInflatedBytes)
+		return
+	}
+
+	inflated, err = io.ReadAll(io.LimitReader(reader, int64(limit)+1))
+
+	if (err == nil) && (len(inflated) > limit) {
+		inflated = inflated[:limit]
+		err = fmt.Errorf("it inflates to more than %d bytes", maxInflatedBytes)
+
+		if limit < maxInflatedBytes {
+			tree.isFull = true
+			err = fmt.Errorf("the decode inflated %d bytes, its limit", maxDecodeInflatedBytes)
+		}
+	}
+
+	*tree.inflated += len(inflated)
+	return
+}
+
+// one line of the summary per PDU, sanitized and cut to maxSummaryBytes; the lines are joined with "; ", past maxSummaryLines they are only counted
 func (tree *Tree) addSummary(line string) {
 	if len(tree.summary) >= maxSummaryLines {
 		tree.moreSummary++
 		return
 	}
 
-	tree.summary = append(tree.summary, line)
+	tree.summary = append(tree.summary, capText(sanitize(line), maxSummaryBytes))
 }
 
 func (tree *Tree) summaryText() (text string) {

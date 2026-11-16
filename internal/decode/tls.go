@@ -217,7 +217,7 @@ func tlsRecords(tree *Tree, data []byte, state *tlsState) {
 		names := tlsRecordBody(tree, root, data, bodyStart, offset, contentType, state)
 
 		if len(names) > 0 {
-			root.label += ": " + strings.Join(names, ", ")
+			tree.setLabel(root, root.label+": "+strings.Join(names, ", "))
 		}
 	}
 
@@ -245,7 +245,7 @@ func tlsRecordBody(tree *Tree, root *node, data []byte, start int, end int, cont
 		tree.add(root, "tls.alert_message", "Encrypted alert", hexValue(data[start:end]), start, end-start)
 		state.summary = append(state.summary, "Encrypted Alert")
 	case contentType == alertType:
-		for offset := start; offset+2 <= end; offset += 2 {
+		for offset := start; (offset+2 <= end) && !tree.isFull; offset += 2 {
 			level, description := uint16(data[offset]), uint16(data[offset+1])
 			text := tlsShortName(tlsAlertLevels, level) + " " + tlsShortName(tlsAlertDescriptions, description)
 			alert := tree.add(root, "tls.alert_message", "Alert: "+text, "", offset, 2)

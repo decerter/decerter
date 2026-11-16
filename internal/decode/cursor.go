@@ -312,9 +312,10 @@ func decodeNested(tree *Tree, parent *node, data []byte, place placement, contex
 		return
 	}
 
-	inner := newTree()
+	inner := tree.nested()
 	best.decode(inner, data, nested)
 	graft(tree, parent, inner.roots, place)
+	tree.adopt(inner)
 	protocol, summary = best.Protocol, inner.summary
 	return
 }

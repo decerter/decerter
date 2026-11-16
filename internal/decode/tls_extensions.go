@@ -81,7 +81,7 @@ func tlsExtensions(reader *cursor, kind helloKind, hello *helloInfo, state *tlsS
 		body.finish()
 	}
 
-	listNode.value = fmt.Sprintf("%d", count)
+	reader.tree.setValue(listNode, fmt.Sprintf("%d", count))
 }
 
 // the data of one extension
@@ -94,7 +94,7 @@ func tlsExtension(reader *cursor, extensionNode *node, extensionType uint16, kin
 
 	switch {
 	case reader.left() == 0:
-		extensionNode.value = "(empty)"
+		reader.tree.setValue(extensionNode, "(empty)")
 
 		if (extensionType == serverNameExtension) && isClient {
 			hello.hasServerName = true
@@ -106,7 +106,7 @@ func tlsExtension(reader *cursor, extensionNode *node, extensionType uint16, kin
 		reader.number("tls.handshake.max_fragment_length", "Maximum fragment length", 1, named(tlsMaxFragments))
 	case (extensionType == statusRequestExtension) && isClient:
 		value, _ := reader.number("tls.handshake.extensions_status_request_type", "Status type", 1, named(tlsStatusTypes))
-		extensionNode.value = tlsShortName(tlsStatusTypes, uint16(value))
+		reader.tree.setValue(extensionNode, tlsShortName(tlsStatusTypes, uint16(value)))
 		reader.opaque("tls.handshake.extensions_status_request_responder_ids", "Responder ID list", 2)
 		reader.opaque("tls.handshake.extensions_status_request_exts", "Request extensions", 2)
 	case extensionType == statusRequestExtension:
@@ -115,7 +115,7 @@ func tlsExtension(reader *cursor, extensionNode *node, extensionType uint16, kin
 	case extensionType == supportedGroupsExtension:
 		values, _ := reader.list("tls.handshake.extensions_supported_groups", "Supported groups", "tls.handshake.extensions_supported_group", "Group", 2, 2, hexNamed(tlsGroups))
 		hello.groups = asUint16(values)
-		extensionNode.value = shortNames(tlsGroups, hello.groups)
+		reader.tree.setValue(extensionNode, shortNames(tlsGroups, hello.groups))
 	case extensionType == pointFormatsExtension:
 		values, _ := reader.list("tls.handshake.extensions_ec_point_formats", "EC point formats", "tls.handshake.extensions_ec_point_format", "EC point format", 1, 1, named(tlsPointFormats))
 		hello.pointFormats = asUint16(values)
@@ -126,26 +126,26 @@ func tlsExtension(reader *cursor, extensionNode *node, extensionType uint16, kin
 			hello.signatures = asUint16(values)
 		}
 
-		extensionNode.value = fmt.Sprintf("%d algorithms", len(values))
+		reader.tree.setValue(extensionNode, fmt.Sprintf("%d algorithms", len(values)))
 	case extensionType == alpnExtension:
 		hello.alpn, hello.firstALPN = tlsProtocolNames(reader, "tls.handshake.extensions_alpn_str", "ALPN protocol")
-		extensionNode.value = strings.Join(hello.alpn, ", ")
+		reader.tree.setValue(extensionNode, strings.Join(hello.alpn, ", "))
 	case (extensionType == alpsExtension) || (extensionType == alpsOldExtension):
 		if isClient {
 			protocols, _ := tlsProtocolNames(reader, "tls.handshake.extensions_alps_alpn_str", "Protocol")
-			extensionNode.value = strings.Join(protocols, ", ")
+			reader.tree.setValue(extensionNode, strings.Join(protocols, ", "))
 			return
 		}
 
 		tlsRest(reader, "tls.handshake.extensions_alps_settings", "Settings")
 	case extensionType == paddingExtension:
-		extensionNode.value = fmt.Sprintf("%d bytes", reader.left())
+		reader.tree.setValue(extensionNode, fmt.Sprintf("%d bytes", reader.left()))
 		tlsRest(reader, "tls.handshake.extensions_padding_data", "Padding")
 	case extensionType == compressCertificateExtension:
 		reader.list("tls.handshake.compress_certificate.algorithms", "Algorithms", "tls.handshake.compress_certificate.algorithm", "Algorithm", 1, 2, hexNamed(tlsCertCompressions))
 	case extensionType == recordSizeLimitExtension:
 		value, _ := reader.number("tls.handshake.record_size_limit", "Record size limit", 2, nil)
-		extensionNode.value = fmt.Sprintf("%d", value)
+		reader.tree.setValue(extensionNode, fmt.Sprintf("%d", value))
 	case extensionType == preSharedKeyExtension:
 		tlsPreSharedKey(reader, extensionNode, isClient)
 	case extensionType == earlyDataExtension:
@@ -153,11 +153,11 @@ func tlsExtension(reader *cursor, extensionNode *node, extensionType uint16, kin
 	case (extensionType == supportedVersionsExtension) && isClient:
 		values, _ := reader.list("tls.handshake.extensions.supported_versions", "Supported versions", "tls.handshake.extensions.supported_version", "Supported version", 1, 2, hexNamed(tlsVersions))
 		hello.versions = asUint16(values)
-		extensionNode.value = shortNames(tlsVersions, hello.versions)
+		reader.tree.setValue(extensionNode, shortNames(tlsVersions, hello.versions))
 	case extensionType == supportedVersionsExtension:
 		value, _ := reader.number("tls.handshake.extensions.supported_version", "Selected version", 2, hexNamed(tlsVersions))
 		hello.selectedVersion = uint16(value)
-		extensionNode.value = tlsShortName(tlsVersions, uint16(value))
+		reader.tree.setValue(extensionNode, tlsShortName(tlsVersions, uint16(value)))
 	case extensionType == cookieExtension:
 		reader.opaque("tls.handshake.extensions.cookie", "Cookie", 2)
 	case extensionType == pskModesExtension:
@@ -230,7 +230,7 @@ func tlsServerNames(reader *cursor, extensionNode *node, hello *helloInfo) {
 
 		if hello.serverName == "" {
 			hello.serverName = escaped
-			extensionNode.value = escaped
+			reader.tree.setValue(extensionNode, escaped)
 		}
 	}
 }
@@ -265,7 +265,7 @@ func tlsProtocolNames(reader *cursor, name string, label string) (protocols []st
 		inner.add(name, label, escaped, protocolStart, 1+protocolLength)
 	}
 
-	listNode.value = strings.Join(protocols, ", ")
+	reader.tree.setValue(listNode, strings.Join(protocols, ", "))
 	return
 }
 
@@ -273,7 +273,7 @@ func tlsProtocolNames(reader *cursor, name string, label string) (protocols []st
 func tlsPreSharedKey(reader *cursor, extensionNode *node, isClient bool) {
 	if !isClient {
 		value, _ := reader.number("tls.handshake.extensions.psk.identity.selected", "Selected identity", 2, nil)
-		extensionNode.value = fmt.Sprintf("identity %d", value)
+		reader.tree.setValue(extensionNode, fmt.Sprintf("identity %d", value))
 		return
 	}
 
@@ -293,7 +293,7 @@ func tlsPreSharedKey(reader *cursor, extensionNode *node, isClient bool) {
 		count++
 	}
 
-	identities.value = fmt.Sprintf("%d", count)
+	reader.tree.setValue(identities, fmt.Sprintf("%d", count))
 	length, start, ok = reader.lengthOf("Binders", 2)
 
 	if !ok {
@@ -307,7 +307,7 @@ func tlsPreSharedKey(reader *cursor, extensionNode *node, isClient bool) {
 		inner.opaque("tls.handshake.extensions.psk.binder", "Binder", 1)
 	}
 
-	extensionNode.value = fmt.Sprintf("%d identities", count)
+	reader.tree.setValue(extensionNode, fmt.Sprintf("%d identities", count))
 }
 
 // key_share: the groups and key lengths a ClientHello offers, the one a ServerHello answers with, the group a HelloRetryRequest asks for
@@ -315,7 +315,7 @@ func tlsKeyShare(reader *cursor, extensionNode *node, kind helloKind) {
 	switch kind {
 	case helloRetryKind:
 		value, _ := reader.number("tls.handshake.extensions_key_share_selected_group", "Selected group", 2, hexNamed(tlsGroups))
-		extensionNode.value = tlsShortName(tlsGroups, uint16(value))
+		reader.tree.setValue(extensionNode, tlsShortName(tlsGroups, uint16(value)))
 	case clientHelloKind:
 		length, start, ok := reader.lengthOf("Client shares", 2)
 
@@ -331,10 +331,10 @@ func tlsKeyShare(reader *cursor, extensionNode *node, kind helloKind) {
 			groups = append(groups, tlsKeyShareEntry(inner))
 		}
 
-		shares.value = strings.Join(groups, ", ")
-		extensionNode.value = shares.value
+		reader.tree.setValue(shares, strings.Join(groups, ", "))
+		reader.tree.setValue(extensionNode, shares.value)
 	default:
-		extensionNode.value = tlsKeyShareEntry(reader)
+		reader.tree.setValue(extensionNode, tlsKeyShareEntry(reader))
 	}
 }
 
@@ -364,13 +364,13 @@ func tlsKeyShareEntry(reader *cursor) (text string) {
 // EncryptedExtensions and the confirmation of a HelloRetryRequest as hex
 func tlsECH(reader *cursor, extensionNode *node, kind helloKind) {
 	if kind != clientHelloKind {
-		extensionNode.value = "present"
+		reader.tree.setValue(extensionNode, "present")
 		tlsRest(reader, "tls.handshake.extensions_ech_data", map[bool]string{false: "Retry configs", true: "Confirmation"}[kind == helloRetryKind])
 		return
 	}
 
 	echType, _ := reader.number("tls.ech.client_hello_type", "Client hello type", 1, named(tlsECHTypes))
-	extensionNode.value = "present (" + tlsShortName(tlsECHTypes, uint16(echType)) + ")"
+	reader.tree.setValue(extensionNode, "present ("+tlsShortName(tlsECHTypes, uint16(echType))+")")
 
 	if echType != 0 {
 		return
@@ -428,7 +428,7 @@ func tlsCertificates(reader *cursor, state *tlsState) (summary string) {
 		}
 	}
 
-	listNode.value = fmt.Sprintf("%d", count)
+	reader.tree.setValue(listNode, fmt.Sprintf("%d", count))
 	return
 }
 
@@ -445,7 +445,7 @@ func tlsCertificate(reader *cursor, der []byte, start int, length int) (subject 
 	}
 
 	subject = cappedText(certificate.Subject.String())
-	certificateNode.label = "Certificate: " + subject
+	tree.setLabel(certificateNode, "Certificate: "+subject)
 	add := func(name string, label string, value string) {
 		tree.addAt(certificateNode, place, name, label, value, derStart, length)
 	}

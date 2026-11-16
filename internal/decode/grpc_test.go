@@ -152,8 +152,8 @@ func FuzzGRPC(fuzz *testing.F) {
 				state.Fatalf("Fuzz of decode.Decode failed, it should take any bytes, error: %s", err.Error())
 			}
 
-			if problems := shapeErrors(result.Tree, 0, result.Length); (len(problems) > 0) || (result.Error != "") {
-				state.Fatalf("Fuzz of decode.Decode failed, the tree should fit its bytes, problems: %v, error: %s", problems, result.Error)
+			if problems := resultProblems(result); len(problems) > 0 {
+				state.Fatalf("Fuzz of decode.Decode failed, the tree should fit its bytes, problems: %v", problems)
 			}
 
 			if result.Truncated || (len(data) == 0) {

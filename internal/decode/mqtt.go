@@ -394,13 +394,13 @@ func mqttPropertyList(tree *Tree, root *node, data []byte, reader *cursor) {
 		switch mqttPropertyKinds[identifier] {
 		case 'b':
 			value, _ := values.number("mqtt.property.byte", "Value", 1, nil)
-			property.value = strconv.Itoa(int(value))
+			tree.setValue(property, strconv.Itoa(int(value)))
 		case '2':
 			value, _ := values.number("mqtt.property.uint16", "Value", 2, nil)
-			property.value = strconv.Itoa(int(value))
+			tree.setValue(property, strconv.Itoa(int(value)))
 		case '4':
 			value, _ := values.number("mqtt.property.uint32", "Value", 4, nil)
-			property.value = strconv.FormatUint(uint64(value), 10)
+			tree.setValue(property, strconv.FormatUint(uint64(value), 10))
 		case 'v':
 			value, valueSize := mqttRemaining(data[values.offset:values.end])
 
@@ -412,15 +412,15 @@ func mqttPropertyList(tree *Tree, root *node, data []byte, reader *cursor) {
 
 			values.add("mqtt.property.varint", "Value", strconv.Itoa(value), values.offset, valueSize)
 			values.offset += valueSize
-			property.value = strconv.Itoa(value)
+			tree.setValue(property, strconv.Itoa(value))
 		case 's':
-			property.value = mqttString(values, "mqtt.property.string", "Value")
+			tree.setValue(property, mqttString(values, "mqtt.property.string", "Value"))
 		case 'd':
 			mqttBinary(values, "mqtt.property.binary", "Value")
 		case 'p':
 			key := mqttString(values, "mqtt.property.key", "Key")
 			value := mqttString(values, "mqtt.property.value", "Value")
-			property.value = key + "=" + value
+			tree.setValue(property, key+"="+value)
 		default:
 			tree.fail(property, "an unknown property, the properties after it can't be read")
 			values.offset = values.end

@@ -146,6 +146,58 @@ func shapeErrors(nodes []v1.DecodeNode, start int, end int) (problems []string) 
 	return
 }
 
+// the bytes of the strings of every node
+func outputBytes(nodes []v1.DecodeNode) (size int) {
+	for _, current := range nodes {
+		size += len(current.Name) + len(current.Label) + len(current.Value) + len(current.Error) + outputBytes(current.Children)
+	}
+
+	return
+}
+
+// a string of a node longer than maxStringBytes
+func longStrings(nodes []v1.DecodeNode) (problems []string) {
+	for _, current := range nodes {
+		for _, text := range []string{current.Name, current.Label, current.Value, current.Error} {
+			if len(text) > maxStringBytes {
+				problems = append(problems, fmt.Sprintf("%s has a string of %d bytes", current.Name, len(text)))
+			}
+		}
+
+		problems = append(problems, longStrings(current.Children)...)
+	}
+
+	return
+}
+
+// what is wrong with a result: a decoder failure and the problems of limitProblems
+func resultProblems(result v1.Decode) (problems []string) {
+	problems = limitProblems(result)
+
+	if result.Error != "" {
+		problems = append(problems, "the decoder failed: "+result.Error)
+	}
+
+	return
+}
+
+// what is wrong with a result's tree and summary: their shape and the limits, every string at most maxStringBytes, all of them within MaxOutputBytes
+// (the decode.truncated node on top), the summary within maxSummaryLines of maxSummaryBytes with "; N more"
+func limitProblems(result v1.Decode) (problems []string) {
+	problems = shapeErrors(result.Tree, 0, result.Length)
+	problems = append(problems, longStrings(result.Tree)...)
+
+	if size := outputBytes(result.Tree); size > MaxOutputBytes+256 {
+		problems = append(problems, fmt.Sprintf("the strings of the tree have %d bytes, more than %d", size, MaxOutputBytes))
+	}
+
+	if len(result.Summary) > maxSummaryLines*(maxSummaryBytes+2)+32 {
+		problems = append(problems, fmt.Sprintf("the summary has %d bytes", len(result.Summary)))
+	}
+
+	return
+}
+
 // a decode that must not fail
 func mustDecode(state *testing.T, data []byte, context Context, as string) (result v1.Decode) {
 	result, err := Decode(data, context, as)
@@ -154,8 +206,8 @@ func mustDecode(state *testing.T, data []byte, context Context, as string) (resu
 		state.Fatalf("Could not decode %x, error: %s", data, err.Error())
 	}
 
-	if problems := shapeErrors(result.Tree, 0, result.Length); len(problems) > 0 {
-		state.Fatalf("Test of decode.Decode failed, the tree should fit its bytes, problems: %v", problems)
+	if problems := limitProblems(result); len(problems) > 0 {
+		state.Fatalf("Test of decode.Decode failed, the tree should fit its bytes and limits, problems: %v", problems)
 	}
 
 	return

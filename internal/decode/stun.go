@@ -144,7 +144,7 @@ func stunPDU(tree *Tree, data []byte, start int, state *streamState) (root *node
 
 	if len(root.children) > 0 {
 		typeNode := root.children[0]
-		typeNode.value += " " + shortName(stunMethods, uint16(method)) + " " + shortName(stunClasses, uint16(class))
+		tree.setValue(typeNode, typeNode.value+" "+shortName(stunMethods, uint16(method))+" "+shortName(stunClasses, uint16(class)))
 		tree.addBits(typeNode, "stun.type.method", "Method", hexNameOf(stunMethods, uint16(method)), start, 2, 0x3eef)
 		tree.addBits(typeNode, "stun.type.class", "Class", nameOf(stunClasses, uint16(class)), start, 2, 0x0110)
 	}
@@ -153,7 +153,7 @@ func stunPDU(tree *Tree, data []byte, start int, state *streamState) (root *node
 	cookie, _ := reader.number("stun.cookie", "Magic Cookie", 4, func(value uint32) (text string) { text = fmt.Sprintf("0x%08x", value); return })
 	transaction, _ := reader.bytesField("stun.id", "Transaction ID", 12)
 	summary := fmt.Sprintf("%s %s", shortName(stunMethods, uint16(method)), shortName(stunClasses, uint16(class)))
-	root.label = stunTitle + " " + summary
+	tree.setLabel(root, stunTitle+" "+summary)
 
 	if (len(root.children) > 2) && (cookie != stunCookie) {
 		tree.fail(root.children[2], fmt.Sprintf("the magic cookie of RFC 8489 is 0x%08x, so this is a classic RFC 3489 message", stunCookie))
@@ -181,7 +181,7 @@ func stunPDU(tree *Tree, data []byte, start int, state *streamState) (root *node
 		count++
 	}
 
-	attributes.value = strconv.Itoa(count)
+	tree.setValue(attributes, strconv.Itoa(count))
 
 	if reader.left() > 0 {
 		tree.fail(attributes, fmt.Sprintf("%d bytes after the last attribute", reader.left()))
@@ -212,22 +212,22 @@ func stunAttribute(tree *Tree, parent *node, data []byte, reader *cursor, messag
 
 	switch attributeType {
 	case 0x0001, 0x0002, 0x0004, 0x0005, 0x000b, 0x8023, 0x802b, 0x802c:
-		attribute.value = stunAddress(inner, nil, nil)
+		tree.setValue(attribute, stunAddress(inner, nil, nil))
 	case 0x0020, 0x0012, 0x0016:
-		attribute.value = stunAddress(inner, binary.BigEndian.AppendUint32(nil, cookie), transaction)
+		tree.setValue(attribute, stunAddress(inner, binary.BigEndian.AppendUint32(nil, cookie), transaction))
 
 		if attributeType == 0x0020 {
 			summary = attribute.value
 		}
 	case 0x0006, 0x0014, 0x0015, 0x8022, 0x8003:
 		text, _ := inner.textField("stun.attribute.text", shortName(stunAttributes, attributeType), length)
-		attribute.value = textValue(text)
+		tree.setValue(attribute, textValue(text))
 	case 0x0009:
 		inner.number("stun.error.reserved", "Reserved", 2, nil)
 		class, _ := inner.number("stun.error.class", "Class", 1, func(value uint32) (text string) { text = strconv.Itoa(int(value & 7)); return })
 		number, _ := inner.number("stun.error.number", "Number", 1, nil)
 		reason, _ := inner.textField("stun.error.reason", "Reason", inner.left())
-		attribute.value = fmt.Sprintf("%d %s", (class&7)*100+number, textValue(reason))
+		tree.setValue(attribute, fmt.Sprintf("%d %s", (class&7)*100+number, textValue(reason)))
 		summary = "error " + attribute.value
 	case 0x000a:
 		for inner.left() >= 2 {
@@ -236,36 +236,36 @@ func stunAttribute(tree *Tree, parent *node, data []byte, reader *cursor, messag
 	case 0x000c:
 		channel, _ := inner.number("stun.channel", "Channel Number", 2, func(value uint32) (text string) { text = fmt.Sprintf("0x%04x", value); return })
 		inner.number("stun.channel.reserved", "Reserved", 2, nil)
-		attribute.value = fmt.Sprintf("0x%04x", channel)
+		tree.setValue(attribute, fmt.Sprintf("0x%04x", channel))
 	case 0x000d, 0x8027:
 		lifetime, _ := inner.number("stun.lifetime", "Lifetime", 4, func(value uint32) (text string) { text = ttlText(value); return })
-		attribute.value = ttlText(lifetime)
+		tree.setValue(attribute, ttlText(lifetime))
 	case 0x0019:
 		transport, _ := inner.number("stun.transport", "Protocol", 1, named(stunTransports))
 		inner.bytesField("stun.transport.reserved", "Reserved", 3)
-		attribute.value = shortName(stunTransports, uint16(transport))
+		tree.setValue(attribute, shortName(stunTransports, uint16(transport)))
 	case 0x0017, 0x8000:
 		family, _ := inner.number("stun.family", "Family", 1, named(stunFamilies))
 		inner.bytesField("stun.family.reserved", "Reserved", 3)
-		attribute.value = shortName(stunFamilies, uint16(family))
+		tree.setValue(attribute, shortName(stunFamilies, uint16(family)))
 	case 0x0024:
 		priority, _ := inner.number("stun.priority", "Priority", 4, nil)
-		attribute.value = strconv.FormatUint(uint64(priority), 10)
+		tree.setValue(attribute, strconv.FormatUint(uint64(priority), 10))
 	case 0x8029, 0x802a:
 		tieBreaker, _ := inner.number64("stun.tie_breaker", "Tie breaker", func(value uint64) (text string) { text = fmt.Sprintf("0x%016x", value); return })
-		attribute.value = fmt.Sprintf("0x%016x", tieBreaker)
+		tree.setValue(attribute, fmt.Sprintf("0x%016x", tieBreaker))
 	case 0x0003:
 		flags, _ := inner.number("stun.change", "Change", 4, func(value uint32) (text string) { text = fmt.Sprintf("0x%08x", value); return })
-		attribute.value = fmt.Sprintf("change IP %s, change port %s", yesNo(flags&4 != 0), yesNo(flags&2 != 0))
+		tree.setValue(attribute, fmt.Sprintf("change IP %s, change port %s", yesNo(flags&4 != 0), yesNo(flags&2 != 0)))
 	case 0x0018:
 		inner.number("stun.even_port", "Reserve next port", 1, func(value uint32) (text string) { text = yesNo(value&0x80 != 0); return })
 	case 0x0013:
 		inner.bytesField("stun.data", "Data", length)
-		attribute.value = fmt.Sprintf("%d bytes", length)
+		tree.setValue(attribute, fmt.Sprintf("%d bytes", length))
 	case 0x0008, 0x001c:
 		inner.bytesField("stun.integrity", "HMAC", length)
 	case stunFingerprint:
-		attribute.value = stunCheckFingerprint(tree, inner, data, messageStart, start)
+		tree.setValue(attribute, stunCheckFingerprint(tree, inner, data, messageStart, start))
 	default:
 		if length > 0 {
 			inner.restField("stun.attribute.value", "Value")
@@ -275,10 +275,10 @@ func stunAttribute(tree *Tree, parent *node, data []byte, reader *cursor, messag
 	inner.finish()
 
 	if attribute.value == "" {
-		attribute.value = strconv.Itoa(length) + " bytes"
+		tree.setValue(attribute, strconv.Itoa(length)+" bytes")
 	}
 
-	attribute.label = shortName(stunAttributes, attributeType)
+	tree.setLabel(attribute, shortName(stunAttributes, attributeType))
 	return
 }
 

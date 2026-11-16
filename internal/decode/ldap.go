@@ -157,7 +157,8 @@ func ldapPDU(tree *Tree, data []byte, start int, state *streamState) (root *node
 	}
 
 	root = berNodes(tree, nil, data, message, label, nil)
-	root.name, root.label = ldapProtocol, ldapTitle+" ("+operationName+")"
+	tree.setName(root, ldapProtocol)
+	tree.setLabel(root, ldapTitle+" ("+operationName+")")
 	summary := fmt.Sprintf("LDAP %s(%d)", operationName, identifier)
 
 	if operation != nil {
@@ -326,10 +327,10 @@ func kerberosPDU(tree *Tree, data []byte, start int, state *streamState) (root *
 
 	if root == nil {
 		root = messageNode
-		root.name = kerberosProtocol
+		tree.setName(root, kerberosProtocol)
 	}
 
-	root.label = kerberosTitle + " (" + name + ")"
+	tree.setLabel(root, kerberosTitle+" ("+name+")")
 	summary := "Kerberos " + name
 
 	switch message.tag {

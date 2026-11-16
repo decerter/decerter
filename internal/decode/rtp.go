@@ -401,7 +401,7 @@ func rtcpReports(tree *Tree, root *node, reader *cursor, count int) {
 		block := tree.add(root, "rtcp.report", fmt.Sprintf("Report block %d", index+1), "", reader.offset, min(24, reader.left()))
 		inner := reader.vector(block, "Report block", 24)
 		ssrc, _ := inner.number("rtcp.ssrc.identifier", "Identifier", 4, hexWord)
-		block.value = hexWord(ssrc)
+		tree.setValue(block, hexWord(ssrc))
 		inner.number("rtcp.ssrc.fraction", "Fraction lost", 1, func(value uint32) (text string) { text = fmt.Sprintf("%d / 256", value); return })
 		inner.number("rtcp.ssrc.cum_nr", "Cumulative number of packets lost", 3, nil)
 		inner.number("rtcp.ssrc.ext_high", "Extended highest sequence number received", 4, nil)
@@ -425,7 +425,7 @@ func rtcpSourceDescription(tree *Tree, root *node, data []byte, reader *cursor, 
 		chunk := tree.add(root, "rtcp.sdes.chunk", fmt.Sprintf("Chunk %d", index+1), "", chunkStart, 0)
 		inner := fieldsOf(tree, chunk, data, chunkStart, reader.end)
 		ssrc, _ := inner.number("rtcp.sdes.ssrc_csrc", "SSRC / CSRC", 4, hexWord)
-		chunk.value = hexWord(ssrc)
+		tree.setValue(chunk, hexWord(ssrc))
 
 		for (inner.left() > 0) && !inner.isShort && !tree.isFull {
 			itemType := data[inner.offset]
@@ -451,7 +451,7 @@ func rtcpSourceDescription(tree *Tree, root *node, data []byte, reader *cursor, 
 			text, ok := itemReader.textField("rtcp.sdes.text", "Text", length)
 
 			if ok {
-				item.value = textValue(text)
+				tree.setValue(item, textValue(text))
 			}
 
 			inner.offset = min(inner.end, itemStart+2+length)

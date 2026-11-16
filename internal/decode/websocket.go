@@ -458,11 +458,20 @@ func websocketMessage(tree *Tree, parent *node, payload []byte, place placement,
 	kind := shortName(websocketOpcodes, uint16(opcode))
 
 	if state.isCompressed {
-		inflated, err := inflateMessage(payload)
-		inflatedNode := tree.addAt(parent, place, "websocket.payload.inflated", "Payload (inflated, "+deflateName+")", fmt.Sprintf("%d bytes from %d", len(inflated), len(payload)), 0, len(payload))
+		// the node comes first: an inflate that spends the decode's budget fills the tree, the node still says so
+		inflatedNode := tree.addAt(parent, place, "websocket.payload.inflated", "Payload (inflated, "+deflateName+")", "", 0, len(payload))
+		inflated, err := inflateMessage(tree, payload)
+		tree.setValue(inflatedNode, fmt.Sprintf("%d bytes from %d", len(inflated), len(payload)))
 
 		if err != nil {
-			tree.fail(inflatedNode, "could not inflate the message alone: "+err.Error()+"; it may use the window of earlier messages (context takeover)")
+			reason := "could not inflate the message alone: " + err.Error() + "; it may use the window of earlier messages (context takeover)"
+
+			// the decode spent its inflate budget, the message itself may be fine
+			if tree.isFull {
+				reason = "could not inflate the message: " + err.Error()
+			}
+
+			tree.fail(inflatedNode, reason)
 			state.addSummary(kind + " (compressed)")
 			return
 		}
@@ -509,20 +518,15 @@ func websocketMessage(tree *Tree, parent *node, payload []byte, place placement,
 	state.addSummary(fmt.Sprintf("%s %d bytes", kind, len(data)))
 }
 
-// a permessage-deflate message: raw DEFLATE with the empty stored block put back at its end, at most maxInflatedBytes
-func inflateMessage(payload []byte) (inflated []byte, err error) {
+// a permessage-deflate message: raw DEFLATE with the empty stored block put back at its end, as far as the tree inflates it
+func inflateMessage(tree *Tree, payload []byte) (inflated []byte, err error) {
 	reader := flate.NewReader(io.MultiReader(bytes.NewReader(payload), bytes.NewReader(deflateTail)))
-	inflated, err = io.ReadAll(io.LimitReader(reader, int64(maxInflatedBytes)+1))
+	inflated, err = tree.inflate(reader)
 	closeErr := reader.Close()
 
 	// the stream ends with the empty block, without a final block: the end of the bytes is the end of the message (Close gives the same error again)
 	if errors.Is(err, io.ErrUnexpectedEOF) {
 		err, closeErr = nil, nil
-	}
-
-	if (err == nil) && (len(inflated) > maxInflatedBytes) {
-		inflated = inflated[:maxInflatedBytes]
-		err = fmt.Errorf("it inflates to more than %d bytes", maxInflatedBytes)
 	}
 
 	err = errors.Join(err, closeErr)

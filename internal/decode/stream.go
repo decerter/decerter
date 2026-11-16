@@ -25,9 +25,10 @@ func decodeFramed(tree *Tree, data []byte, context Context, protocol decoder) {
 			root := tree.add(nil, protocol.Protocol+".tls", "TLS after "+protocol.Title+" switched to it", strconv.Itoa(len(rest))+" bytes", offset, len(rest))
 			nested := context
 			nested.Transport, nested.Joined = StreamTransport, context.Joined
-			inner := newTree()
+			inner := tree.nested()
 			tlsDecode(inner, rest, nested)
 			graft(tree, root, inner.roots, at(offset))
+			tree.adopt(inner)
 			tree.addSummary("TLS")
 			return
 		}

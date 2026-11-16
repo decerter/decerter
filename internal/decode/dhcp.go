@@ -159,7 +159,7 @@ func dhcpDecode(tree *Tree, data []byte, context Context) {
 
 	if messageType != 0 {
 		name = "DHCP " + shortName(dhcpMessageTypes, uint16(messageType))
-		root.label = dhcpTitle + " (" + shortName(dhcpMessageTypes, uint16(messageType)) + ")"
+		tree.setLabel(root, dhcpTitle+" ("+shortName(dhcpMessageTypes, uint16(messageType))+")")
 	}
 
 	summary := fmt.Sprintf("%s - Transaction ID 0x%08x", name, transaction)
@@ -211,7 +211,7 @@ func dhcpOptionList(tree *Tree, root *node, data []byte, reader *cursor) (messag
 		inner := reader.vector(option, "Option", 2+length)
 		inner.number("dhcp.option.type", "Option", 1, named(dhcpOptions))
 		inner.number("dhcp.option.length", "Length", 1, nil)
-		option.value = dhcpOptionValue(tree, option, data, inner, code, length)
+		tree.setValue(option, dhcpOptionValue(tree, option, data, inner, code, length))
 
 		if (code == 53) && (length == 1) && !inner.isShort {
 			messageType = data[start+2]
@@ -376,7 +376,7 @@ func dhcpv6Message(tree *Tree, root *node, data []byte, start int, end int, dept
 		return
 	}
 
-	root.label = dhcpv6Title + " (" + shortName(dhcpv6Types, uint16(messageType)) + ")"
+	tree.setLabel(root, dhcpv6Title+" ("+shortName(dhcpv6Types, uint16(messageType))+")")
 	summary = shortName(dhcpv6Types, uint16(messageType))
 
 	if (messageType == 12) || (messageType == 13) {
@@ -423,7 +423,7 @@ func dhcpv6OptionList(tree *Tree, parent *node, data []byte, reader *cursor, dep
 
 		switch code {
 		case 1, 2:
-			option.value = dhcpv6DUID(inner)
+			tree.setValue(option, dhcpv6DUID(inner))
 		case 3, 4, 25:
 			inner.number("dhcpv6.iaid", "IAID", 4, hexWord)
 
@@ -437,14 +437,14 @@ func dhcpv6OptionList(tree *Tree, parent *node, data []byte, reader *cursor, dep
 			address, _ := inner.address("dhcpv6.iaaddr.ip", "IPv6 address", 16)
 			inner.number("dhcpv6.iaaddr.pref_lifetime", "Preferred lifetime", 4, ttlText)
 			inner.number("dhcpv6.iaaddr.valid_lifetime", "Valid lifetime", 4, ttlText)
-			option.value = address.String()
+			tree.setValue(option, address.String())
 			dhcpv6OptionList(tree, option, data, inner, depth)
 		case 26:
 			inner.number("dhcpv6.iaprefix.pref_lifetime", "Preferred lifetime", 4, ttlText)
 			inner.number("dhcpv6.iaprefix.valid_lifetime", "Valid lifetime", 4, ttlText)
 			prefixLength, _ := inner.number("dhcpv6.iaprefix.pref_len", "Prefix length", 1, nil)
 			prefix, _ := inner.address("dhcpv6.iaprefix.pref_addr", "Prefix address", 16)
-			option.value = fmt.Sprintf("%s/%d", prefix, prefixLength)
+			tree.setValue(option, fmt.Sprintf("%s/%d", prefix, prefixLength))
 			dhcpv6OptionList(tree, option, data, inner, depth)
 		case 6:
 			names := []string{}
@@ -454,13 +454,13 @@ func dhcpv6OptionList(tree *Tree, parent *node, data []byte, reader *cursor, dep
 				names = append(names, strconv.Itoa(int(requested)))
 			}
 
-			option.value = strings.Join(names, ", ")
+			tree.setValue(option, strings.Join(names, ", "))
 		case 7:
 			preference, _ := inner.number("dhcpv6.preference", "Pref-value", 1, nil)
-			option.value = strconv.Itoa(int(preference))
+			tree.setValue(option, strconv.Itoa(int(preference)))
 		case 8:
 			elapsed, _ := inner.number("dhcpv6.elapsed_time", "Elapsed time", 2, func(value uint32) (text string) { text = fmt.Sprintf("%d ms", 10*value); return })
-			option.value = fmt.Sprintf("%d ms", 10*elapsed)
+			tree.setValue(option, fmt.Sprintf("%d ms", 10*elapsed))
 		case 9:
 			if depth >= 8 {
 				tree.fail(option, "relay messages nest more than 8 deep")
@@ -474,10 +474,10 @@ func dhcpv6OptionList(tree *Tree, parent *node, data []byte, reader *cursor, dep
 		case 13:
 			status, _ := inner.number("dhcpv6.status_code", "Status Code", 2, named(dhcpv6Statuses))
 			text, _ := inner.textField("dhcpv6.status_message", "Status Message", inner.left())
-			option.value = shortName(dhcpv6Statuses, uint16(status)) + " " + textValue(text)
+			tree.setValue(option, shortName(dhcpv6Statuses, uint16(status))+" "+textValue(text))
 		case 12:
 			address, _ := inner.address("dhcpv6.unicast", "Server Address", 16)
-			option.value = address.String()
+			tree.setValue(option, address.String())
 		case 21, 23, 31, 22, 27, 56:
 			addresses := []string{}
 
@@ -486,10 +486,10 @@ func dhcpv6OptionList(tree *Tree, parent *node, data []byte, reader *cursor, dep
 				addresses = append(addresses, address.String())
 			}
 
-			option.value = strings.Join(addresses, ", ")
+			tree.setValue(option, strings.Join(addresses, ", "))
 		case 32, 82, 83:
 			seconds, _ := inner.number("dhcpv6.time", shortName(dhcpv6Options, code), 4, ttlText)
-			option.value = ttlText(seconds)
+			tree.setValue(option, ttlText(seconds))
 		case 14, 20:
 		default:
 			if inner.left() > 0 {

@@ -272,7 +272,7 @@ func mysqlPDU(tree *Tree, data []byte, start int, state *streamState) (root *nod
 		kind += ", continued in the next packet"
 	}
 
-	root.label = mysqlTitle + " (" + kind + ")"
+	tree.setLabel(root, mysqlTitle+" ("+kind+")")
 
 	if reader.left() > 0 {
 		reader.restField("mysql.payload", "Payload")

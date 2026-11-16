@@ -147,14 +147,14 @@ func Decode(data []byte, context Context, as string) (result v1.Decode, err erro
 	result.Truncated = result.Truncated || tree.isFull
 
 	if tree.isFull {
-		result.Tree = append(result.Tree, v1.DecodeNode{Name: "decode.truncated", Label: "Decode stopped", Value: "", Offset: 0, Length: 0, Mask: 0, Error: fmt.Sprintf("the tree reached its limit: %d nodes, %d levels or %d bytes", MaxNodes, MaxDepth, MaxOutputBytes), Children: nil})
+		result.Tree = append(result.Tree, v1.DecodeNode{Name: "decode.truncated", Label: "Decode stopped", Value: "", Offset: 0, Length: 0, Mask: 0, Error: fmt.Sprintf("the tree reached its limit: %d nodes, %d levels, %d bytes or %d inflated bytes", MaxNodes, MaxDepth, MaxOutputBytes, maxDecodeInflatedBytes), Children: nil})
 	}
 
 	return
 }
 
 // the protocols that might be the payload's, in the order of the choice: as, the context, the port, then sniffing by score; one per protocol and basis
-// a hint or a port is kept with its sniff score, choose skips it when the score is 0
+// a hint or a port is kept with its sniff score, choose skips it when the score is 0; kept handshake records have the hint of their record protocol only
 func candidatesOf(data []byte, context Context, as string) (candidates []candidate) {
 	if as == RawProtocol {
 		candidates = append(candidates, candidate{Protocol: RawProtocol, Basis: v1.OverrideDecodeBasis, Reason: "Decode As raw", Score: 0})
@@ -177,7 +177,12 @@ func candidatesOf(data []byte, context Context, as string) (candidates []candida
 		candidates = append(candidates, candidate{Protocol: as, Basis: v1.OverrideDecodeBasis, Reason: "Decode As " + as, Score: scores[as]})
 	}
 
+	// the handshake records decerter kept are TLS or DTLS records whatever the flow carries: the ALPN and the port name what comes after them
 	for _, protocol := range registry {
+		if context.Handshake && (protocol.Protocol != tlsProtocol) && (protocol.Protocol != dtlsProtocol) {
+			continue
+		}
+
 		if reason := protocol.hint(context); reason != "" {
 			candidates = append(candidates, candidate{Protocol: protocol.Protocol, Basis: v1.ContextDecodeBasis, Reason: reason, Score: scores[protocol.Protocol]})
 		}
@@ -185,7 +190,7 @@ func candidatesOf(data []byte, context Context, as string) (candidates []candida
 
 	for _, protocol := range registry {
 		for _, port := range protocol.Ports {
-			if (context.Transport != BodyTransport) && (port.Layer == context.Layer) && (port.Number == context.ServerPort) {
+			if (context.Transport != BodyTransport) && !context.Handshake && (port.Layer == context.Layer) && (port.Number == context.ServerPort) {
 				candidates = append(candidates, candidate{Protocol: protocol.Protocol, Basis: v1.PortDecodeBasis, Reason: string(port.Layer) + " port " + strconv.Itoa(int(port.Number)) + " is " + protocol.Title, Score: scores[protocol.Protocol]})
 				break
 			}

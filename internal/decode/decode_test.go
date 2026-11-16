@@ -5,6 +5,7 @@
 package decode
 
 import (
+	"bytes"
 	"slices"
 	"strings"
 	"testing"
@@ -50,16 +51,16 @@ func TestLimitsPositive(state *testing.T) {
 		state.Errorf("Test of the depth limit failed, the chain should stop at %d nodes, count: %d, full: %t", MaxDepth, tree.count, tree.isFull)
 	}
 
-	// size: values of 1 MiB stop before MaxOutputBytes
+	// size: values of 1 MiB are cut to maxStringBytes, and the nodes stop before MaxOutputBytes
 	tree = newTree()
 	value := strings.Repeat("x", 1<<20)
 
-	for range 8 {
+	for range 1000 {
 		tree.add(nil, "big", "Big", value, 0, 0)
 	}
 
-	if !tree.isFull || (tree.size > MaxOutputBytes) || (len(tree.roots) != 3) {
-		state.Errorf("Test of the size limit failed, the tree should keep 3 values of 1 MiB, roots: %d, size: %d", len(tree.roots), tree.size)
+	if !tree.isFull || (tree.size > MaxOutputBytes) || (len(tree.roots) != MaxOutputBytes/(maxStringBytes+6+nodeOverheadBytes)) || (len(tree.roots[0].value) != maxStringBytes) || !strings.HasSuffix(tree.roots[0].value, "x...") {
+		state.Errorf("Test of the size limit failed, the tree should keep %d values cut to %d bytes, roots: %d, size: %d", MaxOutputBytes/(maxStringBytes+6+nodeOverheadBytes), maxStringBytes, len(tree.roots), tree.size)
 	}
 
 	// the sink takes errors and bits without keeping them
@@ -126,5 +127,175 @@ func TestFromTargetNegative(state *testing.T) {
 
 	if _, found := FromTarget(Context{Transport: BodyTransport, Layer: "", Direction: v1.UpDirection, ServerPort: 0, ALPN: "", ContentType: "", Upgrade: "", Method: "GET", Target: "/q?dns=AAABAAABAAAAAAAAAAABAAEB", Encoding: "", Extensions: "", Handshake: false, Joined: false}, RawProtocol); found {
 		state.Errorf("Test of decode.FromTarget failed, as=raw should find nothing in a dns parameter")
+	}
+}
+
+// text capText cut at limit: at most limit bytes, an escape it would split left out, "..." at the end
+func isCut(text string, limit int) (isCapped bool) {
+	isCapped = (len(text) <= limit) && (len(text) >= limit-len(`\x00`)) && strings.HasSuffix(text, "...")
+	return
+}
+
+// Test if the tree's bounds return with the expected output: capText cuts before an escape it would split, a label or value written after add is charged
+// and cut, the sink keeps none, a summary line is cut to maxSummaryBytes, and inflating draws from one budget per decode that nested trees share.
+func TestTreeBoundsPositive(state *testing.T) {
+	positiveCases := map[string]struct {
+		text     string
+		limit    int
+		expected string
+	}{
+		"short":          {text: "abc", limit: 10, expected: "abc"},
+		"cut":            {text: strings.Repeat("a", 20), limit: 10, expected: "aaaaaaa..."},
+		"hex escape":     {text: `aaaaa\x41bbbb`, limit: 10, expected: "aaaaa..."},
+		"short escape":   {text: `aaaaaa\nbbbb`, limit: 10, expected: "aaaaaa..."},
+		"whole escape":   {text: `aaaaa\\bbbbbb`, limit: 10, expected: `aaaaa\\...`},
+		"escaped escape": {text: `aaaa\\\x41bbbb`, limit: 11, expected: `aaaa\\...`},
+	}
+
+	for name, testCase := range positiveCases {
+		if capped := capText(testCase.text, testCase.limit); (capped != testCase.expected) || (len(capped) > testCase.limit) {
+			state.Errorf("Test of decode.capText failed, %s: %q should be %q, result: %q", name, testCase.text, testCase.expected, capped)
+		}
+	}
+
+	// a value written after add counts and is cut; one past MaxOutputBytes leaves the old value and fills the tree; the sink keeps nothing
+	tree := newTree()
+	target := tree.add(nil, "field", "Field", "old", 0, 0)
+	size := tree.size
+	tree.setValue(target, strings.Repeat("\x01", 1<<20))
+
+	if !isCut(target.value, maxStringBytes) || !strings.HasSuffix(target.value, `\x01...`) || (tree.size != size-3+len(target.value)) || tree.isFull {
+		state.Errorf("Test of Tree.setValue failed, the value should be cut and charged, length: %d, size: %d", len(target.value), tree.size)
+	}
+
+	tree.size = MaxOutputBytes - 10
+	tree.setLabel(target, strings.Repeat("y", 100))
+	tree.setValue(tree.sink, "lost")
+	tree.fail(tree.sink, "lost")
+
+	if !tree.isFull || (target.label != "Field") || (tree.sink.value != "") || (tree.sink.err != "") || (tree.errors != 1) {
+		state.Errorf("Test of Tree.setLabel failed, past the limit the label should stay and the tree be full, label: %q, full: %t, sink: %+v", target.label, tree.isFull, tree.sink)
+	}
+
+	// a summary line is cut and sanitized
+	tree = newTree()
+	tree.addSummary(strings.Repeat("z", 2000))
+	tree.addSummary("a\x01b")
+
+	if (len(tree.summary[0]) != maxSummaryBytes) || !strings.HasSuffix(tree.summary[0], "z...") || (tree.summary[1] != `a\x01b`) {
+		state.Errorf("Test of Tree.addSummary failed, the line should be cut to %d bytes and sanitized, summary: %q", maxSummaryBytes, tree.summaryText()[:40])
+	}
+
+	// four payloads of 1 MiB spend the budget, the fifth inflates nothing and fills the tree; a nested tree draws from the same budget
+	tree = newTree()
+	inner := tree.nested()
+
+	for index := range 4 {
+		source := tree
+
+		if index == 3 {
+			source = inner
+		}
+
+		if inflated, err := source.inflate(bytes.NewReader(make([]byte, maxInflatedBytes))); (err != nil) || (len(inflated) != maxInflatedBytes) {
+			state.Fatalf("Test of Tree.inflate failed, payload %d should inflate whole, length: %d, error: %v", index, len(inflated), err)
+		}
+	}
+
+	inflated, err := inner.inflate(bytes.NewReader([]byte("more")))
+	tree.adopt(inner)
+
+	if (err == nil) || !strings.Contains(err.Error(), "the decode inflated 4194304 bytes already") || (len(inflated) != 0) || !inner.isFull || !tree.isFull || (*tree.inflated != maxDecodeInflatedBytes) {
+		state.Errorf("Test of Tree.inflate failed, the budget should be spent, length: %d, error: %v, full: %t", len(inflated), err, tree.isFull)
+	}
+
+	// one payload past what is left: cut to the budget, the tree full
+	tree = newTree()
+	*tree.inflated = maxDecodeInflatedBytes - 10
+
+	if inflated, err = tree.inflate(bytes.NewReader(make([]byte, 100))); (err == nil) || (len(inflated) != 10) || !tree.isFull {
+		state.Errorf("Test of Tree.inflate failed, the payload should stop at the budget, length: %d, error: %v", len(inflated), err)
+	}
+}
+
+// Test if decode.Decode returns with the expected output at the bounds the second review found broken: a joined DNS stream of 64 KB NSID options, a ClientHello
+// of 255 ALPN names of 255 bytes, a record of 32767 alerts, gRPC and WebSocket messages that inflate to 1 MiB each, and the handshake records of a flow
+// whose ALPN names another protocol.
+func TestDecodeBoundsPositive(state *testing.T) {
+	// the strings of the NSID options were not charged: 20 MB of JSON from a tree of 4 MiB
+	option := join(be16(3), be16(65000), bytes.Repeat([]byte{0xff}, 65000))
+	message := dnsPacket(1, 0x8000, [4]uint16{0, 0, 0, 1}, resource(wireName(""), 41, 4096, 0, option))
+	stream := []byte{}
+
+	for range 60 {
+		stream = append(stream, join(be16(uint16(len(message))), message)...)
+	}
+
+	context := tcpContext
+	context.Direction, context.Joined = v1.DownDirection, true
+	result := mustDecode(state, stream, context, "")
+
+	if (result.Protocol != dnsProtocol) || (len(findAll(result.Tree, "dns.opt")) != 60) || !strings.HasSuffix(findNode(result.Tree, "dns.opt").Value, "...") {
+		state.Errorf("Test of the output bound failed, the NSID values should be cut, protocol: %s, options: %d, bytes: %d", result.Protocol, len(findAll(result.Tree, "dns.opt")), outputBytes(result.Tree))
+	}
+
+	// 255 ALPN names of 255 bytes that are no text: the extension's value and the summary
+	names := bytes.Repeat(join([]byte{255}, bytes.Repeat([]byte{1}, 255)), 255)
+	hello := handshakeMessage(1, join(be16(0x0303), make([]byte, 32), []byte{0}, be16(2), be16(0x1301), []byte{1, 0}, vector16(extension(16, vector16(names)))))
+	result = mustDecode(state, tlsRecord(22, 0x0301, hello), tlsTCPContext, tlsProtocol)
+	alpn := findNode(result.Tree, "tls.handshake.extension")
+
+	if (result.Protocol != tlsProtocol) || !isCut(result.Summary, maxSummaryBytes) || (alpn == nil) || !isCut(alpn.Value, maxStringBytes) {
+		state.Errorf("Test of the summary bound failed, the ALPN list should be cut, summary: %d bytes, extension found: %t", len(result.Summary), alpn != nil)
+	}
+
+	// a record of 32767 alerts: the loop stops when the tree is full, the summary line stays short
+	result = mustDecode(state, tlsRecord(21, 0x0303, bytes.Repeat([]byte{2, 40}, 32767)), tlsTCPContext, tlsProtocol)
+
+	if !result.Truncated || !isCut(result.Summary, maxSummaryBytes) || (len(findAll(result.Tree, "tls.alert_message")) >= 32767) {
+		state.Errorf("Test of the summary bound failed, the alerts should stop at the tree's limit, truncated: %t, summary: %d bytes", result.Truncated, len(result.Summary))
+	}
+
+	// gzip messages of 1 MiB each: the fifth finds the budget spent
+	zeros := gzipped(state, make([]byte, maxInflatedBytes))
+	body := bytes.Repeat(grpcFrame(1, zeros), 6)
+	grpcContext := bodyContext("application/grpc")
+	grpcContext.Encoding = "gzip"
+	result = mustDecode(state, body, grpcContext, "")
+	errors := errorsOf(result.Tree)
+	last := result.Tree[len(result.Tree)-1]
+
+	if !result.Truncated || !slices.ContainsFunc(errors, func(text string) bool {
+		return strings.Contains(text, "the decode inflated 4194304 bytes already, its limit")
+	}) || (len(result.Tree) != 6) ||
+		(last.Name != "decode.truncated") || !strings.Contains(last.Error, "4194304 inflated bytes") {
+		state.Errorf("Test of the inflate budget failed, the gRPC body should stop after 4 MiB, roots: %d, errors: %v", len(result.Tree), errors)
+	}
+
+	// the same over permessage-deflate
+	frames := bytes.Repeat(websocketFrameOf(true, rsv1Bit, binaryOpcode, nil, deflated(state, make([]byte, maxInflatedBytes))), 6)
+	result = mustDecode(state, frames, websocketDeflate, "")
+	errors = errorsOf(result.Tree)
+
+	if !result.Truncated || !slices.ContainsFunc(errors, func(text string) bool {
+		return strings.Contains(text, "could not inflate the message: the decode inflated 4194304 bytes already")
+	}) {
+		state.Errorf("Test of the inflate budget failed, the WebSocket messages should stop after 4 MiB, errors: %v", errors)
+	}
+
+	// the handshake records of a flow with the ALPN mqtt or dot (and its port) are TLS, the ALPN names what comes after them
+	record := tlsRecord(22, 0x0301, handshakeMessage(1, join(be16(0x0303), make([]byte, 32), []byte{0}, be16(2), be16(0x1301), []byte{1, 0})))
+
+	for _, flow := range []struct {
+		alpn string
+		port uint16
+	}{{alpn: "mqtt", port: 8883}, {alpn: "dot", port: 853}, {alpn: "imap", port: 993}} {
+		kept := keptContext
+		kept.ALPN, kept.ServerPort = flow.alpn, flow.port
+		result = mustDecode(state, record, kept, "")
+
+		if (result.Protocol != tlsProtocol) || (len(result.Candidates) != 2) || (result.Candidates[0].Protocol != tlsProtocol) || (result.Candidates[0].Basis != v1.ContextDecodeBasis) {
+			state.Errorf("Test of the hint order failed, the kept handshake of an %s flow should be tls, candidates: %+v", flow.alpn, result.Candidates)
+		}
 	}
 }

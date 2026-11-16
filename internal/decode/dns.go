@@ -27,7 +27,6 @@ const (
 	mdnsPort         uint16 = 5353
 	maxNameBytes     int    = 255
 	maxPointerJumps  int    = 32
-	maxSummaryBytes  int    = 512
 	maxSummaryValues int    = 4
 	// the type of an EDNS OPT record, it has no class and TTL of its own
 	optType uint16 = 41
@@ -255,7 +254,7 @@ func dnsFields(tree *Tree, root *node, message dnsMessage) {
 		kind = "response"
 	}
 
-	root.label = titleOf(message.isMulticast) + " (" + kind + ")"
+	tree.setLabel(root, titleOf(message.isMulticast)+" ("+kind+")")
 	tree.add(root, "dns.id", "Transaction ID", fmt.Sprintf("0x%04x", id), base, 2)
 	flagsNode := tree.add(root, "dns.flags", "Flags", fmt.Sprintf("0x%04x %s", flags, flagsText(flags)), base+2, 2)
 	tree.addBits(flagsNode, "dns.flags.response", "Response", map[bool]string{false: "Message is a query", true: "Message is a response"}[isResponse], base+2, 2, uint32(responseFlag))
@@ -327,13 +326,7 @@ func dnsFields(tree *Tree, root *node, message dnsMessage) {
 		tree.fail(root, fmt.Sprintf("%d bytes after the last record", len(message.data)-offset))
 	}
 
-	line := strings.Join(summary, " ")
-
-	if len(line) > maxSummaryBytes {
-		line = line[:maxSummaryBytes] + "..."
-	}
-
-	tree.addSummary(line)
+	tree.addSummary(strings.Join(summary, " "))
 }
 
 // the question section from offset; isRead is false when a question did not fit, the sections after it can't be found then
@@ -379,7 +372,7 @@ func dnsQuestions(tree *Tree, root *node, message dnsMessage, offset int, count 
 
 		tree.add(question, "dns.qry.class", "Class", nameOf(dnsClasses, class), message.base+next+2, 2)
 		next += 4
-		question.label = fmt.Sprintf("%s: type %s, class %s", name, shortName(dnsTypes, qType), shortName(dnsClasses, class))
+		tree.setLabel(question, fmt.Sprintf("%s: type %s, class %s", name, shortName(dnsTypes, qType), shortName(dnsClasses, class)))
 		question.length = next - start
 
 		if index < maxSummaryValues {
@@ -477,12 +470,12 @@ func dnsRecord(tree *Tree, recordNode *node, message dnsMessage, offset int) (ne
 	}
 
 	if record.rrType == optType {
-		recordNode.label = fmt.Sprintf("%s: type OPT, UDP payload size %d", name, record.class)
+		tree.setLabel(recordNode, fmt.Sprintf("%s: type OPT, UDP payload size %d", name, record.class))
 	} else {
-		recordNode.label = fmt.Sprintf("%s: type %s, class %s", name, shortName(dnsTypes, record.rrType), shortName(dnsClasses, class))
+		tree.setLabel(recordNode, fmt.Sprintf("%s: type %s, class %s", name, shortName(dnsTypes, record.rrType), shortName(dnsClasses, class)))
 
 		if value != "" {
-			recordNode.label += ", " + value
+			tree.setLabel(recordNode, recordNode.label+", "+value)
 		}
 	}
 

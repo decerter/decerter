@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 	"mime"
 	"strconv"
 	"strings"
@@ -169,7 +168,7 @@ func grpcDecode(tree *Tree, data []byte, context Context) {
 		payload := data[payloadStart:offset]
 
 		if isWeb && (flags&grpcTrailersBit != 0) {
-			message.label = "gRPC-Web trailers"
+			tree.setLabel(message, "gRPC-Web trailers")
 			grpcTrailers(tree, message, payload, payloadStart)
 			trailers++
 			continue
@@ -206,7 +205,7 @@ func grpcPayload(tree *Tree, message *node, payload []byte, place placement, cod
 	case codec == "proto":
 		root := tree.addAt(message, place, protobufProtocol, protobufTitle, "", 0, len(payload))
 		count := protobufMessage(tree, root, payload, place, 0)
-		root.value = fieldCount(count)
+		tree.setValue(root, fieldCount(count))
 	case isText(payload):
 		tree.addAt(message, place, "grpc.message_data", "Message ("+output.Escape([]byte(codec))+")", textValue(payload), 0, len(payload))
 	default:
@@ -214,7 +213,7 @@ func grpcPayload(tree *Tree, message *node, payload []byte, place placement, cod
 	}
 }
 
-// a compressed message: gzip is inflated, at most maxInflatedBytes, and its fields all span the compressed bytes; another encoding stays bytes
+// a compressed message: gzip is inflated within the tree's limits, and its fields all span the compressed bytes; another encoding stays bytes
 func grpcCompressed(tree *Tree, message *node, payload []byte, start int, codec string, context Context) {
 	encoding := strings.ToLower(strings.TrimSpace(context.Encoding))
 
@@ -224,8 +223,10 @@ func grpcCompressed(tree *Tree, message *node, payload []byte, start int, codec 
 		return
 	}
 
-	inflated, err := gunzip(payload)
-	data := tree.add(message, "grpc.message_data", "Compressed message (gzip)", fmt.Sprintf("%d bytes, %d inflated", len(payload), len(inflated)), start, len(payload))
+	// the node comes first: an inflate that spends the decode's budget fills the tree, the node still says so
+	data := tree.add(message, "grpc.message_data", "Compressed message (gzip)", "", start, len(payload))
+	inflated, err := gunzip(tree, payload)
+	tree.setValue(data, fmt.Sprintf("%d bytes, %d inflated", len(payload), len(inflated)))
 
 	if err != nil {
 		tree.fail(data, "could not inflate it: "+err.Error())
@@ -235,21 +236,15 @@ func grpcCompressed(tree *Tree, message *node, payload []byte, start int, codec 
 	grpcPayload(tree, data, inflated, fixed(start, len(payload)), codec)
 }
 
-// at most maxInflatedBytes of a gzip stream
-func gunzip(data []byte) (inflated []byte, err error) {
+// a gzip stream as far as the tree inflates it
+func gunzip(tree *Tree, data []byte) (inflated []byte, err error) {
 	reader, err := gzip.NewReader(bytes.NewReader(data))
 
 	if err != nil {
 		return
 	}
 
-	inflated, err = io.ReadAll(io.LimitReader(reader, int64(maxInflatedBytes)+1))
-
-	if (err == nil) && (len(inflated) > maxInflatedBytes) {
-		inflated = inflated[:maxInflatedBytes]
-		err = fmt.Errorf("it inflates to more than %d bytes", maxInflatedBytes)
-	}
-
+	inflated, err = tree.inflate(reader)
 	err = errors.Join(err, reader.Close())
 	return
 }

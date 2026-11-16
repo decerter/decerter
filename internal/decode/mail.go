@@ -204,7 +204,7 @@ func smtpPDU(tree *Tree, data []byte, start int, state *streamState) (root *node
 				tree.add(lineNode, "smtp.rsp.parameter", "Response parameter", textValue([]byte(text[4:])), lineStart+4, len(text)-4)
 			}
 		})
-		root.value = code
+		tree.setValue(root, code)
 		state.mode = starttlsMode
 		tree.addSummary(fmt.Sprintf("SMTP reply %s %s", code, textValue([]byte(strings.TrimSpace(first[min(len(first), 4):])))) + moreLines(lines))
 		return
@@ -221,7 +221,7 @@ func smtpPDU(tree *Tree, data []byte, start int, state *streamState) (root *node
 			tree.add(lineNode, "smtp.req.parameter", "Request parameter", textValue([]byte(rest)), lineStart+len(word)+1, len(rest))
 		}
 	})
-	root.value = textValue([]byte(command))
+	tree.setValue(root, textValue([]byte(command)))
 
 	switch command {
 	case "DATA":

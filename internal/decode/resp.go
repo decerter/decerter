@@ -189,7 +189,7 @@ func respPDU(tree *Tree, data []byte, start int, state *streamState) (root *node
 	if len(root.children) > 0 {
 		child = root.children[0]
 		root.length = child.length
-		root.label = respTitle + " (" + child.label + ")"
+		tree.setLabel(root, respTitle+" ("+child.label+")")
 	}
 
 	// a client sends commands as arrays of bulk strings
@@ -207,7 +207,7 @@ func respPDU(tree *Tree, data []byte, start int, state *streamState) (root *node
 			summary += fmt.Sprintf(" ... (%d arguments)", len(words)-1)
 		}
 
-		child.value = summary
+		tree.setValue(child, summary)
 		tree.addSummary(summary)
 	default:
 		tree.addSummary("Redis " + strings.ToLower(child.label) + " " + child.value)
@@ -241,13 +241,13 @@ func respValue(tree *Tree, parent *node, data []byte, offset int, depth int) (en
 
 	switch kind {
 	case '+', '-', ':', ',', '(':
-		valueNode.value = textValue(header)
+		tree.setValue(valueNode, textValue(header))
 		ok = true
 	case '_':
-		valueNode.value = "null"
+		tree.setValue(valueNode, "null")
 		ok = true
 	case '#':
-		valueNode.value = map[string]string{"t": "true", "f": "false"}[string(header)]
+		tree.setValue(valueNode, map[string]string{"t": "true", "f": "false"}[string(header)])
 
 		if valueNode.value == "" {
 			tree.fail(valueNode, "a boolean is t or f")
@@ -259,7 +259,7 @@ func respValue(tree *Tree, parent *node, data []byte, offset int, depth int) (en
 		tree.add(valueNode, "resp.length", "Length", strconv.Itoa(size), offset+1, line-1)
 
 		if size < 0 {
-			valueNode.value = "null"
+			tree.setValue(valueNode, "null")
 			ok = true
 			return
 		}
@@ -270,7 +270,7 @@ func respValue(tree *Tree, parent *node, data []byte, offset int, depth int) (en
 			tree.fail(valueNode, fmt.Sprintf("the string goes on past the bytes: %d of its %d bytes are there", len(body), size))
 		}
 
-		valueNode.value = fmt.Sprintf("%d bytes", size)
+		tree.setValue(valueNode, fmt.Sprintf("%d bytes", size))
 		text := textValue(body)
 
 		if !isText(body) {
@@ -280,7 +280,7 @@ func respValue(tree *Tree, parent *node, data []byte, offset int, depth int) (en
 		dataNode := tree.add(valueNode, "resp.data", "Data", text, offset+line, len(body))
 
 		if (kind == '=') && (len(body) >= 4) {
-			dataNode.label = "Data (" + output.Escape(body[:3]) + ")"
+			tree.setLabel(dataNode, "Data ("+output.Escape(body[:3])+")")
 		}
 
 		if (offset+line+size+2 <= len(data)) && !bytes.Equal(data[offset+line+size:offset+line+size+2], []byte("\r\n")) {
@@ -308,10 +308,10 @@ func respValue(tree *Tree, parent *node, data []byte, offset int, depth int) (en
 			elements *= 2
 		}
 
-		valueNode.value = fmt.Sprintf("%d elements", count)
+		tree.setValue(valueNode, fmt.Sprintf("%d elements", count))
 
 		if count < 0 {
-			valueNode.value = "null"
+			tree.setValue(valueNode, "null")
 			ok = true
 			return
 		}

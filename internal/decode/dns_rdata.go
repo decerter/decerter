@@ -325,14 +325,14 @@ func (reader *rdataReader) svcb() (value string) {
 		paramReader.add("dns.svcb.param.length", "Length", strconv.Itoa(length), start+2, 2)
 		paramReader.offset = dataStart
 		text := paramReader.svcbValue(key, data)
-		param.label = shortName(svcbKeys, key)
+		label := shortName(svcbKeys, key)
 
 		if text != "" {
-			param.label += "=" + text
-			parts = append(parts, param.label)
-		} else {
-			parts = append(parts, shortName(svcbKeys, key))
+			label += "=" + text
 		}
+
+		reader.tree.setLabel(param, label)
+		parts = append(parts, label)
 
 		paramReader.finish()
 	}
@@ -445,7 +445,7 @@ func (reader *rdataReader) option(code uint16, data []byte) {
 	switch code {
 	case 3:
 		reader.rest("dns.opt.nsid", "NSID", false)
-		reader.parent.value = output.Escape(data)
+		reader.tree.setValue(reader.parent, output.Escape(data))
 	case 5, 6, 7:
 		names := []string{}
 
@@ -453,7 +453,7 @@ func (reader *rdataReader) option(code uint16, data []byte) {
 			names = append(names, shortName(dnssecAlgorithms, uint16(reader.uint8Named("dns.opt.algorithm", "Algorithm", dnssecAlgorithms))))
 		}
 
-		reader.parent.value = strings.Join(names, ", ")
+		reader.tree.setValue(reader.parent, strings.Join(names, ", "))
 	case 8:
 		reader.clientSubnet()
 	case 9:
@@ -479,11 +479,11 @@ func (reader *rdataReader) option(code uint16, data []byte) {
 	case 11:
 		if len(data) == 2 {
 			timeout := reader.uint16Field("dns.opt.tcp_keepalive.timeout", "Timeout (100 ms)")
-			reader.parent.value = fmt.Sprintf("%.1f s", float64(timeout)/10)
+			reader.tree.setValue(reader.parent, fmt.Sprintf("%.1f s", float64(timeout)/10))
 		}
 	case 12:
 		reader.offset = reader.end
-		reader.parent.value = fmt.Sprintf("%d bytes", len(data))
+		reader.tree.setValue(reader.parent, fmt.Sprintf("%d bytes", len(data)))
 		reader.add("dns.opt.padding", "Padding", fmt.Sprintf("%d bytes", len(data)), reader.end-len(data), len(data))
 	case 15:
 		infoCode := reader.uint16Field("dns.opt.ede.info_code", "Info code")
@@ -492,12 +492,12 @@ func (reader *rdataReader) option(code uint16, data []byte) {
 			return
 		}
 
-		reader.parent.value = nameOf(ednsErrors, infoCode)
+		reader.tree.setValue(reader.parent, nameOf(ednsErrors, infoCode))
 		textData, start, _ := reader.take("Extra text", reader.end-reader.offset)
 
 		if len(textData) > 0 {
 			reader.add("dns.opt.ede.extra_text", "Extra text", output.Escape(textData), start, len(textData))
-			reader.parent.value += ": " + output.Escape(textData)
+			reader.tree.setValue(reader.parent, reader.parent.value+": "+output.Escape(textData))
 		}
 	}
 
@@ -537,7 +537,7 @@ func (reader *rdataReader) clientSubnet() {
 	address, _ := netip.AddrFromSlice(full)
 	prefix := netip.PrefixFrom(address, int(source)).String()
 	reader.add("dns.opt.client.addr", "Address", prefix, start, len(addressData))
-	reader.parent.value = prefix
+	reader.tree.setValue(reader.parent, prefix)
 }
 
 // RFC 4034 2.1: flags, protocol, algorithm and the public key; the key tag (appendix B) is computed over the whole rdata

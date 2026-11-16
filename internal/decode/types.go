@@ -25,13 +25,17 @@ const (
 	hexDigits string = "0123456789abcdef"
 	// the bytes one value shows of a text field (a protobuf string, a WebSocket text frame), the node still spans the whole field
 	maxTextBytes int = 1024
-	// the bytes a decoder inflates of one compressed payload (gRPC gzip, WebSocket permessage-deflate)
-	maxInflatedBytes int = 1 << 20
+	// the bytes a decoder inflates of one compressed payload (gRPC gzip, WebSocket permessage-deflate), and of all of them in one decode
+	maxInflatedBytes       int = 1 << 20
+	maxDecodeInflatedBytes int = 4 << 20
+	// the bytes of one string of a node (its name, label, value or error); a longer one is cut and ends with "..."
+	maxStringBytes int = 8 << 10
 	// what a decode reads of one direction of a flow joined from its messages (Context.Joined), and the first bytes of it sniffing sees
 	MaxStreamBytes   int = 4 << 20
 	sniffStreamBytes int = 128 << 10
-	// the lines of a summary, one per PDU, the rest are counted
+	// the lines of a summary, one per PDU, the rest are counted, and the bytes of each line
 	maxSummaryLines int = 32
+	maxSummaryBytes int = 512
 )
 
 // how a payload came, which decides its framing
@@ -116,7 +120,7 @@ type candidate struct {
 }
 
 // the tree of one decode while it grows: count, size and isFull keep it within the limits, sink takes the nodes past them and keeps none
-// errors counts the nodes with an error, sniffing scores a payload by it
+// errors counts the nodes with an error, sniffing scores a payload by it; inflated counts the bytes the decode inflated, shared with its nested trees
 type Tree struct {
 	roots       []*node
 	count       int
@@ -126,6 +130,7 @@ type Tree struct {
 	summary     []string
 	sink        *node
 	moreSummary int
+	inflated    *int
 }
 
 // one field: offset and length are bytes of the payload, mask the bits of a field smaller than its bytes

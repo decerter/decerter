@@ -87,7 +87,7 @@ func protobufSniff(data []byte, context Context) (score int) {
 func protobufDecode(tree *Tree, data []byte, context Context) {
 	root := tree.add(nil, protobufProtocol, protobufTitle, "", 0, len(data))
 	count := protobufMessage(tree, root, data, at(0), 0)
-	root.value = fieldCount(count)
+	tree.setValue(root, fieldCount(count))
 	tree.addSummary(fmt.Sprintf("Protocol Buffers message, %s, %d bytes", fieldCount(count), len(data)))
 }
 
@@ -198,8 +198,9 @@ func protobufValue(tree *Tree, field *node, data []byte, offset int, place place
 			return
 		}
 
-		field.value = strconv.FormatUint(value, 10)
-		tree.addAt(field, place, "protobuf.field.varint", "Value", field.value, offset, length)
+		text := strconv.FormatUint(value, 10)
+		tree.setValue(field, text)
+		tree.addAt(field, place, "protobuf.field.varint", "Value", text, offset, length)
 
 		if int64(value) < 0 {
 			tree.addAt(field, place, "protobuf.field.int64", "As int64", strconv.FormatInt(int64(value), 10), offset, length)
@@ -219,8 +220,9 @@ func protobufValue(tree *Tree, field *node, data []byte, offset int, place place
 		}
 
 		value := binary.LittleEndian.Uint64(data[offset:])
-		field.value = strconv.FormatUint(value, 10)
-		tree.addAt(field, place, "protobuf.field.fixed64", "Value", field.value, offset, 8)
+		text := strconv.FormatUint(value, 10)
+		tree.setValue(field, text)
+		tree.addAt(field, place, "protobuf.field.fixed64", "Value", text, offset, 8)
 
 		if int64(value) < 0 {
 			tree.addAt(field, place, "protobuf.field.sfixed64", "As sfixed64", strconv.FormatInt(int64(value), 10), offset, 8)
@@ -235,8 +237,9 @@ func protobufValue(tree *Tree, field *node, data []byte, offset int, place place
 		}
 
 		value := binary.LittleEndian.Uint32(data[offset:])
-		field.value = strconv.FormatUint(uint64(value), 10)
-		tree.addAt(field, place, "protobuf.field.fixed32", "Value", field.value, offset, 4)
+		text := strconv.FormatUint(uint64(value), 10)
+		tree.setValue(field, text)
+		tree.addAt(field, place, "protobuf.field.fixed32", "Value", text, offset, 4)
 
 		if int32(value) < 0 {
 			tree.addAt(field, place, "protobuf.field.sfixed32", "As sfixed32", strconv.FormatInt(int64(int32(value)), 10), offset, 4)
@@ -271,7 +274,7 @@ func protobufValue(tree *Tree, field *node, data []byte, offset int, place place
 
 		count := 0
 		next, count = protobufFields(tree, field, data, offset, place, depth+1, number)
-		field.value = fieldCount(count)
+		tree.setValue(field, fieldCount(count))
 	default:
 		tree.fail(field, fmt.Sprintf("wire type %d is not one of protobuf's", wireType))
 		return
@@ -290,19 +293,21 @@ func protobufBytes(tree *Tree, field *node, data []byte, place placement, depth 
 		if fields, isClean := protobufScan(data, depth+1); isClean && (fields > 0) {
 			message := tree.addAt(field, place, "protobuf.message", "Message", fieldCount(fields), 0, len(data))
 			protobufMessage(tree, message, data, place, depth+1)
-			field.value = "message, " + fieldCount(fields)
+			tree.setValue(field, "message, "+fieldCount(fields))
 			return
 		}
 	}
 
 	if isReadable {
-		field.value = textValue(data)
-		tree.addAt(field, place, "protobuf.field.string", "String", field.value, 0, len(data))
+		text := textValue(data)
+		tree.setValue(field, text)
+		tree.addAt(field, place, "protobuf.field.string", "String", text, 0, len(data))
 		return
 	}
 
-	field.value = hexValue(data)
-	tree.addAt(field, place, "protobuf.field.bytes", "Bytes", field.value, 0, len(data))
+	text := hexValue(data)
+	tree.setValue(field, text)
+	tree.addAt(field, place, "protobuf.field.bytes", "Bytes", text, 0, len(data))
 }
 
 // whether data is a message to its end without building nodes: fields counts its top-level fields, groups closed in order; depth is that of data

@@ -97,7 +97,7 @@ func ntpDecode(tree *Tree, data []byte, context Context) {
 
 	first := data[0]
 	leap, version, mode := first>>6, (first>>3)&7, first&7
-	root.label = fmt.Sprintf("%s, version %d (%s)", ntpTitle, version, shortName(ntpModes, uint16(mode)))
+	tree.setLabel(root, fmt.Sprintf("%s, version %d (%s)", ntpTitle, version, shortName(ntpModes, uint16(mode))))
 	flags := tree.add(root, "ntp.flags", "Flags", fmt.Sprintf("0x%02x", first), 0, 1)
 	tree.addBits(flags, "ntp.flags.li", "Leap indicator", nameOf(ntpLeaps, uint16(leap)), 0, 1, 0xc0)
 	tree.addBits(flags, "ntp.flags.vn", "Version", strconv.Itoa(int(version)), 0, 1, 0x38)
@@ -134,7 +134,7 @@ func ntpDecode(tree *Tree, data []byte, context Context) {
 		fieldType, _ := inner.number("ntp.ext.fieldtype", "Field type", 2, func(value uint32) (text string) { text = fmt.Sprintf("0x%04x", value); return })
 		inner.number("ntp.ext.length", "Length", 2, nil)
 		inner.bytesField("ntp.ext.value", "Value", inner.left())
-		field.value = fmt.Sprintf("type 0x%04x, %d bytes", fieldType, length)
+		tree.setValue(field, fmt.Sprintf("type 0x%04x, %d bytes", fieldType, length))
 
 		if (length < 16) || (length%4 != 0) {
 			tree.fail(field, "an extension field has a length of at least 16 that is a multiple of 4")

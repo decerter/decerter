@@ -257,7 +257,7 @@ func postgresPDU(tree *Tree, data []byte, start int, state *streamState) (root *
 	}
 
 	reader.finish()
-	root.value = strings.TrimPrefix(summary, "PostgreSQL "+name+" ")
+	tree.setValue(root, strings.TrimPrefix(summary, "PostgreSQL "+name+" "))
 	tree.addSummary(summary)
 	return
 }
@@ -283,19 +283,19 @@ func postgresUntyped(tree *Tree, root *node, data []byte, start int, state *stre
 
 	switch code {
 	case postgresSSLCode:
-		root.label = postgresTitle + " (SSLRequest)"
+		tree.setLabel(root, postgresTitle+" (SSLRequest)")
 		tree.addSummary("PostgreSQL SSLRequest")
 		state.mode = starttlsMode
 	case postgresGSSCode:
-		root.label = postgresTitle + " (GSSENCRequest)"
+		tree.setLabel(root, postgresTitle+" (GSSENCRequest)")
 		tree.addSummary("PostgreSQL GSSENCRequest")
 	case postgresCancelCode:
-		root.label = postgresTitle + " (CancelRequest)"
+		tree.setLabel(root, postgresTitle+" (CancelRequest)")
 		pid, _ := reader.number("pgsql.pid", "Process ID", 4, nil)
 		reader.bytesField("pgsql.key", "Secret key", reader.left())
 		tree.addSummary(fmt.Sprintf("PostgreSQL CancelRequest pid %d", pid))
 	default:
-		root.label = postgresTitle + " (StartupMessage)"
+		tree.setLabel(root, postgresTitle+" (StartupMessage)")
 		parameters := []string{}
 
 		for (reader.left() > 1) && !reader.isShort && !reader.tree.isFull {
@@ -305,7 +305,7 @@ func postgresUntyped(tree *Tree, root *node, data []byte, start int, state *stre
 			key, _ := values.cString("pgsql.parameter_name", "Parameter name")
 			value, _ := values.cString("pgsql.parameter_value", "Parameter value")
 			parameter.length = values.offset - parameterStart
-			parameter.value = textValue(key) + "=" + textValue(value)
+			tree.setValue(parameter, textValue(key)+"="+textValue(value))
 			reader.offset = values.offset
 			reader.isShort = values.isShort
 
@@ -429,7 +429,8 @@ func postgresBackendFields(tree *Tree, root *node, reader *cursor, kind byte, st
 			values.number("pgsql.val.length", "Type size", 2, func(value uint32) (text string) { text = strconv.Itoa(int(int16(value))); return })
 			values.number("pgsql.col.typemod", "Type modifier", 4, func(value uint32) (text string) { text = strconv.Itoa(int(int32(value))); return })
 			values.number("pgsql.format", "Format", 2, postgresFormatText)
-			field.value, field.length = textValue(name), values.offset-fieldStart
+			tree.setValue(field, textValue(name))
+			field.length = values.offset - fieldStart
 			reader.offset, reader.isShort = values.offset, values.isShort
 			names = append(names, textValue(name))
 		}
