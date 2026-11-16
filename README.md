@@ -139,12 +139,12 @@ Most intercepting proxies terminate TLS with a certificate of their own CA, whic
 What decerter adds: editing TLS traffic without a CA, by sealing changed records with the session's own keys; selection per UID (so per Android app) or PID; no VPN and no proxy setting; and apps that pin their certificate work unchanged when decerter supports their TLS library (see the matrix). The price is root and a kernel with eBPF, and a TLS library decerter knows.
 
 ## Support matrix
-**tested**: run by `make test-e2e` / `make test-e2e-android` or by hand on the named target. **built, untested**: the code and offsets are there, no run on that target. **unsupported**: not handled; such traffic is relayed (and captured) without decryption.
+**tested**: run by `make test-e2e` / `make test-e2e-android` or by hand on the named target; for a TLS library that is a rewrite of both directions checked at the peer, on the suites the protocol table names. **built, untested**: the code and offsets are there, no run on that target. **unsupported**: not handled; such traffic is relayed (and captured) without decryption.
 
 | TLS library | Versions | Status |
 |---|---|---|
 | OpenSSL 3 (`libssl.so.3`), Linux amd64 | 3.6.2 (Debian forky); distribution builds 3.0.13 (Ubuntu 24.04), 3.5.7 (Debian 13), 3.5.7 (Parrot 7.4, `parrotsec/core`), 3.5.8 (AlmaLinux 10, FIPS), 3.5.9 (Fedora 45 `openssl3-libs`), 3.6.5 (Kali rolling 2026.3, `kalilinux/kali-rolling`), 3.6.5 (BlackArch on Arch, `blackarchlinux/blackarch`) | tested |
-| OpenSSL 4 (`libssl.so.4`), Linux amd64 | 4.0.3 (Fedora 45's default, also next to `openssl3-libs` 3.5.9 with both hooked at once); 4.1.0 built from upstream source | tested |
+| OpenSSL 4 (`libssl.so.4`), Linux amd64 | 4.0.3 (Fedora 45's default, also next to `openssl3-libs` 3.5.9 with both hooked at once); 4.1.0 built from upstream's release tarball (the e2e image of `test/e2e/assets/openssl-4.1.0.Dockerfile`) | tested |
 | OpenSSL 3 and 4, Linux amd64 | every other release 3.0.0–3.6.5 and 4.0.0–4.1.0 (offsets generated from each release's source) | built, untested |
 | OpenSSL 3 and 4, Linux arm64 | distribution builds on Debian 13 arm64 (2026-11-14): 3.0.13 (Ubuntu 24.04), 3.5.7 (Debian 13, the host and `debian:13`), 3.5.7 (Parrot), 3.5.8 (AlmaLinux 10), 3.6.5 (Kali rolling), 4.0.3 (Fedora 45) and 3.5.9 (Fedora 45 `openssl3-libs`) | tested |
 | OpenSSL 3 and 4, Linux arm64 | every other release 3.0.0–3.6.5 and 4.0.0–4.1.0 | built, untested |
@@ -155,7 +155,7 @@ What decerter adds: editing TLS traffic without a CA, by sealing changed records
 | Flutter | 3.24.0–3.50.0 (74 releases, 38 Dart versions) | built, untested |
 | Flutter | before 3.24.0; 32-bit apps | unsupported |
 | Chrome (Trichrome) | 124.0.6367.219, x86_64 and arm64 (emulator, 2026-11-14) | tested |
-| Chromium (ChromePublic snapshot) | 160.0.8161.0, x86_64 (snapshot 1744338) and arm64 (snapshot 1744436, 2026-11-14) | tested |
+| Chromium (ChromePublic snapshot) | 160.0.8161.0, x86_64 (snapshot 1744338); arm64 (snapshot 1744436, 2026-11-14), decryption only | tested |
 | Chrome, WebView, Cronet | release branches of milestones 124–160 and the listed builds 122.0.6238.4, 125.0.6383.0, 126.0.6452.4, 127.0.6493.0 | built, untested |
 | Cronet bundled in apps | YouTube's Cronet 125.0.6383.0 is found and hooked, its key log lines were counted but not checked; Play services' Cronet 126.0.6452.4 is hooked, no traffic seen | built, untested |
 | WebView in an app | maps Trichrome's library, so it is expected to work like Chrome | built, untested |
@@ -164,9 +164,9 @@ What decerter adds: editing TLS traffic without a CA, by sealing changed records
 | Protocol | Status |
 |---|---|
 | TCP and UDP relay, IPv4 and IPv6 | tested |
-| TLS 1.2 and 1.3: AES-GCM, ChaCha20-Poly1305, AES-CBC (SHA-1, SHA-256), 3DES; ECDHE and RSA key exchange; KeyUpdate, resumption | tested (3DES only in unit tests, the host's OpenSSL has none) |
-| TLS: DHE suites, `ECDHE-RSA-AES256-SHA384`, RC4, renegotiation, 0-RTT early data, kTLS | unsupported (kTLS not tried) |
-| DTLS 1.2 (OpenSSL) | tested; a datagram that does not frame, a record of epoch 2 or more (renegotiation) and one that fails its MAC are dropped from the decryption and go on as they came, as an endpoint drops them |
+| TLS 1.2 and 1.3: AES-GCM, ChaCha20-Poly1305, AES-CBC (SHA-1, SHA-256) with and without encrypt-then-MAC, 3DES; ECDHE and RSA key exchange; KeyUpdate, resumption | tested: every suite rewritten in both directions, with records split, on the host's OpenSSL 3 and on OpenSSL 4.0.3 and 4.1.0 (amd64); every suite Conscrypt offers (all but the SHA-256 CBC ones and 3DES) with an RSA and an ECDSA certificate, six suites on Flutter and Chrome and three on ChromePublic (x86_64 emulator); three on the other distribution builds; encrypt-then-MAC, KeyUpdate and resumption (TLS 1.2 and 1.3) between `openssl s_client` and `s_server`; 3DES only in unit tests, no OpenSSL of the tests has it |
+| TLS: DHE suites, `ECDHE-*-AES256-SHA384`, `AES256-SHA256`, CCM, Camellia, ARIA, RC4, renegotiation, 0-RTT early data, kTLS | unsupported: relayed raw, also by `--intercept` (tested for DHE, the SHA-384 CBC suites, `AES256-SHA256`, CCM, Camellia and TLS 1.3 CCM); kTLS not tried |
+| DTLS 1.2 (OpenSSL) | tested: every suite of the record layer OpenSSL has for DTLS, RSA and ECDSA, rewritten in both directions; a datagram that does not frame, a record of epoch 2 or more (renegotiation) and one that fails its MAC are dropped from the decryption and go on as they came, as an endpoint drops them |
 | DTLS 1.0 and 1.3 | unsupported |
 | HTTP/1.1 (and 1.0): view, rules, holds, edit with Content-Length and chunking fixed | tested |
 | HTTP/2 over TLS (`h2`) and h2c with prior knowledge: view, rules, holds, edit with HPACK and flow control kept consistent | tested (curl, Go client and server); Chrome's HTTP/2 seen in the Android quickstart |
