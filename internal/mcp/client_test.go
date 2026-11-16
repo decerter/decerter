@@ -5,6 +5,7 @@
 package mcp
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	v1 "github.com/decerter/decerter/api"
 	"github.com/decerter/decerter/internal/api"
@@ -222,6 +224,81 @@ func TestDownloadNegative(state *testing.T) {
 	if !errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, ErrOutputFile) || (result.Path != "") || (readErr != nil) || (len(entries) != 0) {
 		state.Errorf("Test of mcp.Client.download function failed, a cut body should be %v and leave no file, result: %+v, error: %v, entries: %v, read: %v", io.ErrUnexpectedEOF, result, err, entries, readErr)
 		return
+	}
+}
+
+// an api that sends a body of count pieces of piece bytes, gap apart, after the head; done is closed when the handler returned
+func slowAPI(state *testing.T, piece int, count int, gap time.Duration, done chan struct{}) (target ui.Target) {
+	target = startHandlerAPI(state, func(writer http.ResponseWriter, request *http.Request) {
+		defer close(done)
+		writer.Header().Set("Content-Type", pcapngMediaType)
+		writer.Header().Set("Content-Length", strconv.Itoa(piece*count))
+		controller := http.NewResponseController(writer)
+
+		for index := range count {
+			if index > 0 {
+				select {
+				case <-time.After(gap):
+				case <-request.Context().Done():
+					return
+				}
+			}
+
+			_, writeErr := writer.Write(bytes.Repeat([]byte{'p'}, piece))
+
+			if writeErr == nil {
+				writeErr = controller.Flush()
+			}
+
+			if writeErr != nil {
+				return
+			}
+		}
+	})
+	return
+}
+
+// Test if mcp.Client.download returns with the expected output for a slow api: a body that keeps coming takes many idle timeouts in all and is whole,
+// and returns with the expected errors for one that stops: ErrStalled after the idle timeout, and no file.
+func TestDownloadSlowPositive(state *testing.T) {
+	previous := downloadIdleTimeout
+	downloadIdleTimeout = 200 * time.Millisecond
+	state.Cleanup(func() {
+		downloadIdleTimeout = previous
+	})
+	directory := state.TempDir()
+	output, err := OpenOutput(directory)
+
+	if err != nil {
+		state.Fatalf("Could not open the output directory, error: %s", err.Error())
+	}
+
+	defer func() {
+		if closeErr := output.Close(); closeErr != nil {
+			state.Errorf("Could not close the output directory, error: %s", closeErr.Error())
+		}
+	}()
+
+	// 20 pieces 50 ms apart: a second in all, five idle timeouts
+	done := make(chan struct{})
+	start := time.Now()
+	result, _, err := NewClient(slowAPI(state, 1000, 20, 50*time.Millisecond, done)).download(state.Context(), "/flows/pcap", nil, pcapngMediaType, output, "flows", "pcapng", io.Discard)
+	elapsed := time.Since(start)
+	<-done
+
+	if (err != nil) || (result.Size != 20000) || (elapsed < 4*downloadIdleTimeout) {
+		state.Errorf("Test of mcp.Client.download function failed, a slow body should come whole, result: %+v, elapsed: %s, error: %v", result, elapsed, err)
+		return
+	}
+
+	// a piece, then nothing for longer than the idle timeout
+	done = make(chan struct{})
+	result, _, err = NewClient(slowAPI(state, 1000, 2, 2*time.Second, done)).download(state.Context(), "/flows/pcap", nil, pcapngMediaType, output, "stalled", "pcapng", io.Discard)
+	<-done
+	entries, readErr := os.ReadDir(directory)
+
+	if !errors.Is(err, ErrStalled) || (result.Path != "") || (readErr != nil) || (len(entries) != 1) {
+		state.Errorf("Test of mcp.Client.download function failed, a stalled body should be %v and leave no file, result: %+v, error: %v, entries: %v, read: %v", ErrStalled, result, err, entries, readErr)
 	}
 }
 

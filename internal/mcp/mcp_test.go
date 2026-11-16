@@ -765,7 +765,7 @@ func TestReadToolsNegative(state *testing.T) {
 	}
 }
 
-// Test if internal/mcp links none of decerter's internals: only the api types and the socket helpers of decerter ui.
+// Test if internal/mcp links none of decerter's internals: only the api types, the socket helpers of decerter ui and the escaping of internal/output.
 func TestDependenciesNegative(state *testing.T) {
 	output, err := exec.CommandContext(state.Context(), "go", "list", "-deps", ".").Output()
 
@@ -773,7 +773,7 @@ func TestDependenciesNegative(state *testing.T) {
 		state.Fatalf("Could not list the dependencies, error: %s", err.Error())
 	}
 
-	allowed := []string{"github.com/decerter/decerter/api", "github.com/decerter/decerter/internal/mcp", "github.com/decerter/decerter/internal/ui"}
+	allowed := []string{"github.com/decerter/decerter/api", "github.com/decerter/decerter/internal/mcp", "github.com/decerter/decerter/internal/output", "github.com/decerter/decerter/internal/ui"}
 	module := "github.com/decerter/decerter"
 
 	for dependency := range strings.Lines(string(output)) {
@@ -783,5 +783,10 @@ func TestDependenciesNegative(state *testing.T) {
 			state.Errorf("Test of the dependencies failed, internal/mcp should only import %v of decerter, it imports %s", allowed, dependency)
 			return
 		}
+	}
+
+	// the escaping is output.Escape's, not a copy of it
+	if !slices.Contains(strings.Fields(string(output)), "github.com/decerter/decerter/internal/output") {
+		state.Errorf("Test of the dependencies failed, internal/mcp should escape with internal/output")
 	}
 }

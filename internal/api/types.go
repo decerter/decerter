@@ -63,15 +63,15 @@ type Info struct {
 	IsInterceptCapable bool
 }
 
-// what the server serves: the history of the run, the hold queue and the rules; Holds and Rules are nil without --intercept
-// KeyLog looks up the NSS key log lines of a session, nil without the secrets uprobe; Bus carries the events of everything
-// Captures are the captures, the stream and the captured packets: on decerter capture the packets of the recorded sockets, on decerter run the ones of the proxy's upstream sockets; nil without capture programs
 // the body of a pcap export, it keeps the error of the client's connection apart from a failure to make the file
 type exportWriter struct {
 	writer   io.Writer
 	writeErr error
 }
 
+// what the server serves: the history of the run, the hold queue and the rules; Holds and Rules are nil without --intercept
+// KeyLog looks up the NSS key log lines of a session, nil without the secrets uprobe; Bus carries the events of everything
+// Captures are the captures, the stream and the captured packets: on decerter capture the packets of the recorded sockets, on decerter run the ones of the proxy's upstream sockets; nil without capture programs
 type Backend struct {
 	Info     Info
 	History  *history.History

@@ -15,10 +15,14 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	v1 "github.com/decerter/decerter/api"
 	"github.com/decerter/decerter/internal/ui"
 )
+
+// a download ends when the api sent no byte of it for this long, the tests shorten it; a capture of 1 GiB takes as long as it takes
+var downloadIdleTimeout = time.Minute
 
 // a client of the control API at target, the transport of decerter ui: every connection goes to target whatever the URL names
 func NewClient(target ui.Target) (client Client) {
@@ -130,13 +134,19 @@ func (client Client) decode(response *http.Response, method string, path string,
 }
 
 // GET path and write the answer, it must have mediaType, into a new file of output named after kind, and into counter; the file is only made once the api answered 200
-// runs as long as the copy, at most downloadTimeout; header is the answer's
+// runs as long as the copy and the call, a slow link (adb forward over wireless debugging) included; it ends when no byte came for downloadIdleTimeout; header is the answer's
 func (client Client) download(ctx context.Context, path string, query url.Values, mediaType string, output Output, kind string, extension string, counter io.Writer) (result FileResult, header http.Header, err error) {
-	ctx, cancel := context.WithTimeout(ctx, downloadTimeout)
-	defer cancel()
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	timeout := downloadIdleTimeout
+	timer := time.AfterFunc(timeout, func() {
+		cancel(fmt.Errorf("%w: %s %s: nothing for %s", ErrStalled, http.MethodGet, path, timeout))
+	})
+	defer timer.Stop()
 	response, err := client.get(ctx, path, query, mediaType)
 
 	if err != nil {
+		err = stalledOr(ctx, err)
 		return
 	}
 
@@ -145,11 +155,32 @@ func (client Client) download(ctx context.Context, path string, query url.Values
 	}()
 
 	header = response.Header
-	result, err = output.save(kind, extension, io.TeeReader(response.Body, counter))
+	result, err = output.save(kind, extension, io.TeeReader(&progressReader{reader: response.Body, timer: timer, timeout: timeout}, counter))
 
 	// a file error names its path, anything else came from reading the answer
 	if _, isFileErr := errors.AsType[*fs.PathError](err); (err != nil) && !isFileErr {
-		err = ui.Explain(err, client.target)
+		err = stalledOr(ctx, ui.Explain(err, client.target))
+	}
+
+	return
+}
+
+// the error of a download: that it stalled when the idle timer ended it, err otherwise
+func stalledOr(ctx context.Context, err error) (explained error) {
+	explained = err
+
+	if cause := context.Cause(ctx); errors.Is(cause, ErrStalled) {
+		explained = cause
+	}
+
+	return
+}
+
+func (reader *progressReader) Read(buffer []byte) (count int, err error) {
+	count, err = reader.reader.Read(buffer)
+
+	if count > 0 {
+		reader.timer.Reset(reader.timeout)
 	}
 
 	return

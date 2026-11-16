@@ -10,37 +10,16 @@ import (
 	"strings"
 
 	v1 "github.com/decerter/decerter/api"
+	"github.com/decerter/decerter/internal/output"
 )
 
 // the start of a marker inside escaped data, opening or closing, any case, with spaces or escaped bytes before the name: <untrusted-traffic, < /UNTRUSTED-TRAFFIC, <\t/untrusted-traffic, <\x00/untrusted-traffic
 var markerPattern = regexp.MustCompile(`(?i)<((?:\s|\\[nrt]|\\x[0-9a-f]{2})*/?(?:\s|\\[nrt]|\\x[0-9a-f]{2})*` + markerName + `)`)
 
-// the escaped form of data from the traffic: printable ASCII as it is, \\ \n \r \t, \xNN for every other byte (control characters, ANSI escapes, NUL, DEL, every byte of UTF-8 or invalid UTF-8)
-// a < that starts the marker becomes \x3c, so data can neither close nor open one; the result is ASCII with no control characters
+// the escaped form of data from the traffic, output.Escape's: printable ASCII as it is, \\ \n \r \t, \xNN for every other byte (control characters, ANSI escapes,
+// NUL, DEL, every byte of UTF-8 or invalid UTF-8); a < that starts the marker becomes \x3c, so data can neither close nor open one; the result is ASCII with no control characters
 func Escape(data []byte) (escaped string) {
-	builder := strings.Builder{}
-	builder.Grow(len(data))
-
-	for _, character := range data {
-		switch {
-		case character == '\\':
-			builder.WriteString(`\\`)
-		case character == '\n':
-			builder.WriteString(`\n`)
-		case character == '\r':
-			builder.WriteString(`\r`)
-		case character == '\t':
-			builder.WriteString(`\t`)
-		case (character >= 0x20) && (character < 0x7f):
-			builder.WriteByte(character)
-		default:
-			builder.WriteString(`\x`)
-			builder.WriteByte(hexDigits[character>>4])
-			builder.WriteByte(hexDigits[character&0x0f])
-		}
-	}
-
-	escaped = markerPattern.ReplaceAllString(builder.String(), `\x3c$1`)
+	escaped = markerPattern.ReplaceAllString(output.Escape(data), `\x3c$1`)
 	return
 }
 

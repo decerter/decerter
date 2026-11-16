@@ -52,9 +52,8 @@ const (
 	maxLineBytes int = sdk.DefaultMaxLineLength
 	// a decode candidate's reason that is not in the words of decerter's decoders
 	withheldReason string = "withheld by decerter mcp: not in the words of decerter's decoders"
-	// a JSON call gets this long, a download (a capture is at most 1 GiB) this long; the event tail runs as long as its own bound
-	callTimeout     time.Duration = 30 * time.Second
-	downloadTimeout time.Duration = 5 * time.Minute
+	// a JSON call gets this long; the event tail runs as long as its own bound, a download as long as bytes keep coming (see downloadIdleTimeout)
+	callTimeout time.Duration = 30 * time.Second
 	// names of output files: decerter-<kind>-<time>.<extension>, a number is added when the name is taken
 	fileTimeFormat string = "20060102T150405.000Z"
 	maxFileTries   int    = 100
@@ -104,6 +103,13 @@ type errorAnswer struct {
 type errorObject struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+}
+
+// a reader that tells the timer of a download it is still moving: every read that gave bytes starts its idle time again
+type progressReader struct {
+	reader  io.Reader
+	timer   *time.Timer
+	timeout time.Duration
 }
 
 // the control API on its socket, a handle for every tool call

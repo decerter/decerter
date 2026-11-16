@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	v1 "github.com/decerter/decerter/api"
+	"github.com/decerter/decerter/internal/output"
 )
 
 // Test if mcp.Escape returns with the expected output: printable ASCII as it is, \\ \n \r \t, \xNN for control characters, ANSI escapes, NUL, DEL, UTF-8 and invalid UTF-8, and a marker inside the data with its < as \x3c.
@@ -48,6 +49,18 @@ func TestEscapePositive(state *testing.T) {
 				state.Errorf("Test of mcp.Escape failed, %q should give printable ASCII only, escaped: %q", positive.Data, escaped)
 				return
 			}
+		}
+	}
+}
+
+// Test if mcp.Escape returns with the expected output for every byte: output.Escape's form, so decerter mcp and the API escape alike, with only a marker's < as \x3c.
+func TestEscapeOutputPositive(state *testing.T) {
+	for value := range 256 {
+		data := []byte{'a', byte(value), '<', 'u', 'n', 't', 'r', 'u', 's', 't', 'e', 'd', '-', 't', 'r', 'a', 'f', 'f', 'i', 'c'}
+		expected := strings.Replace(output.Escape(data), "<untrusted-traffic", `\x3cuntrusted-traffic`, 1)
+
+		if escaped := Escape(data); escaped != expected {
+			state.Errorf("Test of mcp.Escape failed, byte 0x%02x, result should be %q, result: %q", value, expected, escaped)
 		}
 	}
 }

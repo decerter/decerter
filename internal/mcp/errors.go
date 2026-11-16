@@ -13,6 +13,7 @@ var (
 	ErrEventStream = errors.New("could not read the decerter event stream")
 	ErrHex         = errors.New("the decerter api sent a payload that is not hex")
 	ErrNoHold      = errors.New("no such held message")
+	ErrStalled     = errors.New("the decerter api sent no bytes of the download for too long")
 	// the arguments of the write tools
 	ErrEscape     = errors.New("invalid escape in the payload")
 	ErrPayloadHex = errors.New("the payload is not hex")
