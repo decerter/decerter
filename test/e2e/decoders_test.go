@@ -145,7 +145,7 @@ func TestDecodeGRPCHandshakePositive(state *testing.T) {
 	}
 }
 
-// both sides of the call decode as gRPC by their content type with the protobuf fields at body offsets
+// both sides of the call decode as gRPC by their content type with the protobuf fields at body offsets; the reason names the media type in decerter's words, application/grpc for application/grpc+proto too
 func testGRPCDecode(state *testing.T, client apiClient, session *sdk.ClientSession, exchangeID uint64) {
 	expected := map[v1.Side]struct {
 		reason  string
@@ -153,7 +153,7 @@ func testGRPCDecode(state *testing.T, client apiClient, session *sdk.ClientSessi
 		text    string
 	}{
 		v1.RequestSide:  {reason: "content type application/grpc is gRPC", summary: "gRPC request " + grpcProtoPath + ", 1 message", text: `"` + grpcProtoText + `"`},
-		v1.ResponseSide: {reason: "content type application/grpc+proto is gRPC", summary: "gRPC response, 1 message", text: `"echo: ` + grpcProtoText + `"`},
+		v1.ResponseSide: {reason: "content type application/grpc is gRPC", summary: "gRPC response, 1 message", text: `"echo: ` + grpcProtoText + `"`},
 	}
 
 	for side, want := range expected {
