@@ -63,3 +63,17 @@ func continued(context Context, unit string, have int, length int) (message stri
 
 	return
 }
+
+// the decode of a protocol with a frame function: its PDUs over any transport (a datagram or a body holds whole ones)
+func framedDecode(name string) (decode func(tree *Tree, data []byte, context Context)) {
+	decode = func(tree *Tree, data []byte, context Context) {
+		protocol, _ := lookup(name)
+		decodeFramed(tree, data, context, protocol)
+	}
+	return
+}
+
+// the hint of a protocol no context names
+func noHint(context Context) (reason string) {
+	return
+}

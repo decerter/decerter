@@ -67,7 +67,7 @@ func TestJoinedPositive(state *testing.T) {
 // Test if decode.decodeFramed returns with the expected errors: bytes a frame function refuses are one node with an error.
 func TestFramedNegative(state *testing.T) {
 	tree := newTree()
-	protocol := decoder{Protocol: "zframe", Title: "Frames", Ports: nil, hint: nil, sniff: nil, decode: nil, fromTarget: nil,
+	protocol := decoder{Protocol: "zframe", Title: "Frames", Ports: nil, hint: noHint, sniff: nil, decode: nil, fromTarget: nil,
 		frame: func(data []byte, state *streamState) (length int) { length = -1; return }, pdu: nil, unit: "frame"}
 	decodeFramed(tree, []byte("abc"), joinedContext, protocol)
 	nodes := tree.view()
