@@ -63,6 +63,26 @@ func TestEscapeFieldPositive(state *testing.T) {
 	}
 }
 
+// Test if output.Escape returns with the expected output: printable ASCII stays, a backslash is doubled, \n \r \t stay readable and every other byte is \xNN.
+func TestEscapePositive(state *testing.T) {
+	positiveCases := map[string]string{
+		"":                    "",
+		"GET / HTTP/1.1\r\n":  `GET / HTTP/1.1\r\n`,
+		"a\tb\\c":             `a\tb\\c`,
+		"\x00\x1b[2J\x7f\xff": `\x00\x1b[2J\x7f\xff`,
+		"caf\xc3\xa9":         `caf\xc3\xa9`,
+	}
+
+	for data, expected := range positiveCases {
+		text := output.Escape([]byte(data))
+
+		if text != expected {
+			state.Errorf("Test of output.Escape function failed, data: %q, result should be %q, result: %q", data, expected, text)
+			return
+		}
+	}
+}
+
 // Test if output.Writer returns with the expected output: writes to a reader that is there go through and call nothing.
 func TestWriterPositive(state *testing.T) {
 	reader, file, err := os.Pipe()

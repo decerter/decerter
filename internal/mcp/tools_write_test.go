@@ -204,8 +204,8 @@ func TestWriteToolsListPositive(state *testing.T) {
 		tools[tool.Name] = tool
 	}
 
-	if len(tools) != 15+len(writeTools) {
-		state.Errorf("Test of the tool list failed, there should be 15 read and %d write tools, tools: %d", len(writeTools), len(tools))
+	if len(tools) != 17+len(writeTools) {
+		state.Errorf("Test of the tool list failed, there should be 17 read and %d write tools, tools: %d", len(writeTools), len(tools))
 		return
 	}
 

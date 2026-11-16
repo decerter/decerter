@@ -17,10 +17,10 @@ import (
 	v1 "github.com/decerter/decerter/api"
 	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/intercept"
+	"github.com/decerter/decerter/internal/output"
 )
 
 const (
-	hexDigits string = "0123456789abcdef"
 	// the requests with a body and every answer that is no pcapng, event stream or key log
 	jsonMediaType string = "application/json"
 )
@@ -656,36 +656,8 @@ func payloadWindow(data []byte, offset int, length int) (payload v1.Payload) {
 		Length:  len(window),
 		Total:   len(data),
 		Hex:     hex.EncodeToString(window),
-		Escaped: escape(window),
+		Escaped: output.Escape(window),
 	}
-	return
-}
-
-// printable ASCII stays, a backslash is doubled, \n \r \t are written as such and every other byte as \xNN: the text can be read and the bytes can be read back from it
-func escape(data []byte) (text string) {
-	builder := strings.Builder{}
-	builder.Grow(len(data) + len(data)/8)
-
-	for _, value := range data {
-		switch {
-		case value == '\n':
-			builder.WriteString(`\n`)
-		case value == '\r':
-			builder.WriteString(`\r`)
-		case value == '\t':
-			builder.WriteString(`\t`)
-		case value == '\\':
-			builder.WriteString(`\\`)
-		case (value >= ' ') && (value <= '~'):
-			builder.WriteByte(value)
-		default:
-			builder.WriteString(`\x`)
-			builder.WriteByte(hexDigits[value>>4])
-			builder.WriteByte(hexDigits[value&0x0f])
-		}
-	}
-
-	text = builder.String()
 	return
 }
 

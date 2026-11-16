@@ -1,9 +1,9 @@
 # decerter
 An eBPF intercepting proxy that reads and edits the live TCP, UDP, TLS and DTLS traffic of selected local processes, with no CA certificate and no change to the app.
 
-decerter picks the sockets of one user, one process or one Android app with eBPF cgroup hooks and sends them through a proxy on `lo`, while a uprobe on the app's TLS library reads the session keys. With those keys decerter decrypts every TLS record and, when you edit one, encrypts it again with the same keys, so the app keeps talking to the real server over the real certificate. It runs as root on Linux 6.6 or newer and on rooted Android 15 or newer, and comes with a capture mode for Wireshark, a control API, a minimal web UI and an MCP server.
+decerter picks the sockets of one user, one process or one Android app with eBPF cgroup hooks and sends them through a proxy on `lo`, while a uprobe on the app's TLS library reads the session keys. With those keys decerter decrypts every TLS record and, when you edit one, encrypts it again with the same keys, so the app keeps talking to the real server over the real certificate. It runs as root on Linux 6.6 or newer and on rooted Android 15 or newer, and comes with a capture mode for Wireshark, a control API, a minimal web UI, an MCP server and packet decoders that show a payload as a tree of fields (DNS so far).
 
-**Docs:** [filter language](docs/filter.md) · [control API](docs/api.md) · [HTTP layer](docs/http.md) · [capture](docs/capture.md) · [web UI](docs/ui.md) · [MCP](docs/mcp.md) · [Android](docs/android.md) · [building and testing](docs/development.md)
+**Docs:** [filter language](docs/filter.md) · [control API](docs/api.md) · [HTTP layer](docs/http.md) · [capture](docs/capture.md) · [decoders](docs/decode.md) · [web UI](docs/ui.md) · [MCP](docs/mcp.md) · [Android](docs/android.md) · [building and testing](docs/development.md)
 
 ## Quickstart: Linux
 Download `decerter_<version>_linux_amd64.tar.gz` (or `_arm64`) and `SHA256SUMS`, or build them with `make release` (see [building](docs/development.md)). decerter needs root, Linux 6.6 or newer with BTF, cgroup v2, and for decryption a program linked against OpenSSL 3's `libssl.so.3` or OpenSSL 4's `libssl.so.4`, such as curl on most distributions.
@@ -123,6 +123,7 @@ For an arm64 phone, put the arm64 binary next to the amd64 one, where setup look
 - **Redirect:** a selected socket's destination is rewritten to decerter's proxy on `lo` (port 15001, one TCP listener and one UDP socket); `getpeername()` and `recvmsg()` still show the real server. The kernel builds every packet on both sides, so nothing rewrites checksums or sequence numbers, and no interface, VPN or iptables rule is added.
 - **Keys:** a uprobe on the TLS library (OpenSSL 3 and 4 on Linux; Conscrypt, Flutter's and Chrome's BoringSSL on Android) copies the session secrets into a BPF map keyed by the ClientHello's random, the model of `SSLKEYLOGFILE`. The handshake goes on untouched.
 - **Edit:** the proxy decrypts each record with those keys, runs it through the rules, the hold queue and the HTTP/1.1 and HTTP/2 layer, and seals it again with the same keys and the right sequence number.
+- **Decode:** on request, the API, the web UI and the MCP tools decode a payload or an HTTP body into a tree of fields with byte offsets, chosen by Decode As, the context (content type, ALPN), the port or the bytes; DNS over UDP, TCP, TLS and HTTPS so far ([decoders](docs/decode.md)).
 - **Capture:** `decerter capture` redirects nothing; `cgroup_skb` programs copy the selected sockets' packets to a ring buffer, written as pcapng with a Decryption Secrets Block per session.
 - On Android netd holds the cgroup hooks exclusively; decerter shares them while it runs and puts them back on exit.
 

@@ -108,6 +108,29 @@ func escapeText(text string) (escaped string) {
 	return
 }
 
+// a string of a decode tree, which decerter escaped already: a byte outside printable ASCII becomes \xNN (a backslash stays, it starts an escape), and a < that
+// starts the marker \x3c, so a tree that came through the api unescaped still can't reach the client raw
+func escapeDecoded(text string) (escaped string) {
+	builder := strings.Builder{}
+	builder.Grow(len(text))
+
+	for index := range len(text) {
+		character := text[index]
+
+		if (character >= 0x20) && (character < 0x7f) {
+			builder.WriteByte(character)
+			continue
+		}
+
+		builder.WriteString(`\x`)
+		builder.WriteByte(hexDigits[character>>4])
+		builder.WriteByte(hexDigits[character&0x0f])
+	}
+
+	escaped = markerPattern.ReplaceAllString(builder.String(), `\x3c$1`)
+	return
+}
+
 // one payload in the marker; id is made by decerter, never taken from the data
 func Wrap(id string, escaped string) (wrapped string) {
 	wrapped = `<` + markerName + ` id="` + id + `">` + "\n" + escaped + "\n" + `</` + markerName + `>`

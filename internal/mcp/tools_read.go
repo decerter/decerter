@@ -21,7 +21,7 @@ import (
 // the read tools, one per GET operation of api/openapi.yaml except streamCapture; each is annotated read-only and closed-world
 // tool name, operationId: status getStatus, list_flows listFlows, get_flow getFlow, list_messages listMessages, get_message getMessage, tail_events streamEvents,
 // list_held listHolds, list_rules listRules, export_keylog exportKeylog, export_pcap exportPcap, list_captures listCaptures, download_pcap downloadCapture,
-// list_exchanges listExchanges, get_exchange getExchange, get_exchange_body getExchangeBody
+// list_exchanges listExchanges, get_exchange getExchange, get_exchange_body getExchangeBody, decode_message decodeMessage, decode_exchange_body decodeExchangeBody
 func addReadTools(server *sdk.Server, client Client, output Output) (err error) {
 	payloadBounds := []integerProperty{
 		{Name: "offset", Minimum: 0, Maximum: -1, Default: 0},
@@ -70,6 +70,21 @@ func addReadTools(server *sdk.Server, client Client, output Output) (err error) 
 	}
 
 	err = addTool(server, readTool("get_exchange_body", "Get exchange body", "A window of the request or response body of an exchange without chunk framing (and of the original body when it was edited), 4 KiB by default; page with offset and next_offset. The body is escaped text inside its <untrusted-traffic> marker, hex in payload_hex only with hex. "+trafficText), getExchangeBody(client), payloadBounds, []enumProperty{{Name: "side", Values: []any{v1.RequestSide, v1.ResponseSide}}})
+
+	if err != nil {
+		return
+	}
+
+	err = addTool(server, readTool("decode_message", "Decode message", "One message's payload decoded like Wireshark's packet details, on request: the protocol decerter chose and why (candidates: as, the context such as the TLS ALPN, the server port, sniffing the bytes; protocols lists what as takes), "+
+		"then in the marker m<id>-decode the summary line and the tree as JSON, each node with a filter-style name (dns.qry.name), label, value, offset and length in the payload's bytes (get_message's offsets), its error and children. "+
+		"Bytes no decoder takes are a raw node. A tcp or tls message is a stream read: DNS over TCP and TLS takes the 2-byte length of each message. "+trafficText), decodeMessage(client), []integerProperty{{Name: "max_nodes", Minimum: 1, Maximum: maxDecodeNodes, Default: defaultDecodeNodes}}, nil)
+
+	if err != nil {
+		return
+	}
+
+	err = addTool(server, readTool("decode_exchange_body", "Decode exchange body", "The request or response body of an HTTP exchange decoded like decode_message, by its content type (application/dns-message is DoH): the offsets are get_exchange_body's. "+
+		"A request without a body whose target carries the message (the dns parameter of a DoH GET) is decoded from there, source is target and those bytes are escaped in the marker x<id>-request-target, the offsets count from their first byte. "+trafficText), decodeExchangeBody(client), []integerProperty{{Name: "max_nodes", Minimum: 1, Maximum: maxDecodeNodes, Default: defaultDecodeNodes}}, []enumProperty{{Name: "side", Values: []any{v1.RequestSide, v1.ResponseSide}}})
 
 	if err != nil {
 		return

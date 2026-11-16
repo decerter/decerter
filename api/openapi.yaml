@@ -36,6 +36,13 @@ info:
     Payloads in responses are lowercase hex (`hex`) plus an escaped text form (`escaped`: printable ASCII as it is,
     `\\`, `\n`, `\r`, `\t` and `\xNN` for every other byte). Values in requests are `{"type": "text"|"hex", "value": …}`.
 
+    The decode operations (`/messages/{id}/decode`, `/exchanges/{id}/decode`) decode a payload or a body on request
+    into a tree of fields like Wireshark's packet details: each node has a filter-style name, a label, a value, an
+    offset and a length in the bytes `source` names (the payload, the body, or the bytes of a request target in
+    `data`), a mask for bit fields, an error and children. The protocol is chosen by `as` (Decode As), then the context
+    (content type, ALPN), then the server port, then sniffing the bytes; the candidates say why. Bytes no decoder takes
+    are protocol `raw`, not an error. Every string of a tree is printable ASCII, other bytes are `\xNN`.
+
     The HTTP layer reads the HTTP/1.1 exchanges of every tcp flow in scope (plain, or decrypted TLS whose ALPN is
     http/1.1 or none) into the history: request and response heads with their fields in order and case, and the
     bodies without chunk framing, at most 100000 exchanges and 32 MiB of heads and bodies in total, 10000 exchanges
@@ -267,6 +274,50 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+  /exchanges/{id}/decode:
+    get:
+      operationId: decodeExchangeBody
+      summary: The body of the request or the response of an exchange as a tree of fields
+      description: |
+        Decoded on request, nothing is decoded while traffic flows. `offset` and `length` of every node are bytes of the
+        body without chunk framing, the same bytes as GET /exchanges/{id}/body. A request without a body whose target
+        carries the message (the `dns` parameter of a DoH GET) is decoded from there: `source` is `target` and `data` holds
+        those bytes, the offsets count from their first byte. Context for the choice: the Content-Type and Upgrade of
+        the side's message, the request's method and target, the flow's TLS ALPN. Bytes no decoder takes are a `raw`
+        tree, not an error. 404 when the exchange has no message of that side (yet).
+      parameters:
+        - $ref: "#/components/parameters/ID"
+        - name: side
+          in: query
+          description: request (default) or response.
+          schema:
+            $ref: "#/components/schemas/Side"
+        - name: as
+          in: query
+          description: |
+            "Decode As": the protocol to decode with (a value of `protocols`, `raw` for none); absent lets decerter choose: the
+            context, the port, then the bytes. A value that names no protocol is 400.
+          schema:
+            type: string
+        - name: original
+          in: query
+          description: true decodes what the peer sent when a rule or an edit changed it; without a change it is what went on.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: The decode tree of the body
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Decode"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
   /messages/{id}:
     get:
       operationId: getMessage
@@ -298,6 +349,45 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/MessageDetail"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /messages/{id}/decode:
+    get:
+      operationId: decodeMessage
+      summary: The payload of a message as a tree of fields
+      description: |
+        Decoded on request, nothing is decoded while traffic flows. `offset` and `length` of every node are bytes of the
+        payload from its first byte, the same bytes as the `payload` window of GET /messages/{id} (with original=true the
+        `original` window). The protocol is the `as` override, else the first of: the context (TLS ALPN), the server port of
+        the flow on the message's layer, sniffing the bytes. A stream layer (tcp, tls) is framed as a stream: DNS takes the
+        2-byte length of each message, several in one read or the start of one. Bytes no decoder takes are a `raw` tree,
+        not an error.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+        - name: as
+          in: query
+          description: |
+            "Decode As": the protocol to decode with (a value of `protocols`, `raw` for none); absent lets decerter choose: the
+            context, the port, then the bytes. A value that names no protocol is 400.
+          schema:
+            type: string
+        - name: original
+          in: query
+          description: true decodes what the peer sent when a rule or an edit changed it; without a change it is what went on.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: The decode tree of the payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Decode"
         "400":
           $ref: "#/components/responses/BadRequest"
         "403":
@@ -1377,6 +1467,115 @@ components:
               $ref: "#/components/schemas/Payload"
             original:
               $ref: "#/components/schemas/Payload"
+    DecodeBasis:
+      type: string
+      description: |
+        Why a candidate is named: override (the as parameter), context (content type, Upgrade or TLS ALPN), port (the
+        server port of the flow), sniff (the bytes), none (no decoder took them)
+      enum: [override, context, port, sniff, none]
+    DecodeSource:
+      type: string
+      description: |
+        The bytes the offsets count from: payload (the message's, GET /messages/{id}), body (the exchange side's, GET
+        /exchanges/{id}/body), target (the bytes the request target carries, given in `data`)
+      enum: [payload, body, target]
+    DecodeCandidate:
+      type: object
+      required: [protocol, basis, reason, score]
+      properties:
+        protocol:
+          type: string
+        basis:
+          $ref: "#/components/schemas/DecodeBasis"
+        reason:
+          type: string
+          description: Why, in words
+        score:
+          type: integer
+          description: |
+            What sniffing the bytes gave, 0 (can't be this protocol) to 100; a context or port candidate with 0 is
+            skipped, a sniff candidate needs 50
+    DecodeNode:
+      type: object
+      required: [name, label, offset, length]
+      properties:
+        name:
+          type: string
+          description: A filter-style field id, the protocol first (dns.qry.name)
+        label:
+          type: string
+          description: What the field is, or for a node with parts a line that sums them up
+        value:
+          type: string
+          description: The value as text; strings from the traffic are escaped like Payload.escaped
+        offset:
+          type: integer
+          description: The first byte of the field in the source
+        length:
+          type: integer
+          description: Its bytes in the source; a node's children lie inside it
+        mask:
+          type: integer
+          format: uint32
+          description: The bits of a field smaller than its bytes, big endian over length bytes (a flag of dns.flags)
+        error:
+          type: string
+          description: What is wrong with the field, the decoder goes on where it can
+        children:
+          type: array
+          items:
+            $ref: "#/components/schemas/DecodeNode"
+    Decode:
+      type: object
+      required: [source, protocol, summary, length, total, truncated, candidates, tree, protocols]
+      properties:
+        message_id:
+          type: integer
+          format: uint64
+        exchange_id:
+          type: integer
+          format: uint64
+        side:
+          $ref: "#/components/schemas/Side"
+        source:
+          $ref: "#/components/schemas/DecodeSource"
+        protocol:
+          type: string
+          description: The decoder that made the tree, raw when none took the bytes
+        summary:
+          type: string
+          description: One line, like the Info column of Wireshark; "; " between the PDUs of one payload
+        length:
+          type: integer
+          description: Bytes of the source that were decoded, at most 1 MiB
+        total:
+          type: integer
+          description: Bytes the source has
+        truncated:
+          type: boolean
+          description: |
+            The source was longer than 1 MiB, or the tree reached a limit (10000 nodes, 32 levels, 4 MiB of strings) and
+            ends with a decode.truncated node
+        candidates:
+          type: array
+          description: Every protocol the payload might be, in the order of the choice; the first with a score above 0 (any override) was taken
+          items:
+            $ref: "#/components/schemas/DecodeCandidate"
+        tree:
+          type: array
+          description: The top nodes, one per PDU (a stream read can have several)
+          items:
+            $ref: "#/components/schemas/DecodeNode"
+        data:
+          $ref: "#/components/schemas/Payload"
+        error:
+          type: string
+          description: Why the decoder failed, the tree is raw then
+        protocols:
+          type: array
+          description: The values the as parameter takes
+          items:
+            type: string
     Hold:
       type: object
       required: [id, flow_id, direction, layer, held_at, deadline, edited, length, original_length]

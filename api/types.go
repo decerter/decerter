@@ -155,6 +155,34 @@ const (
 	RegexValueType ValueType = "regex"
 )
 
+// why a decode result names a protocol, in the order the choice takes them
+type DecodeBasis string
+
+const (
+	// the as query parameter ("Decode As")
+	OverrideDecodeBasis DecodeBasis = "override"
+	// the content type, Upgrade or TLS ALPN of the message's flow or exchange
+	ContextDecodeBasis DecodeBasis = "context"
+	// the server port of the flow
+	PortDecodeBasis DecodeBasis = "port"
+	// the bytes themselves
+	SniffDecodeBasis DecodeBasis = "sniff"
+	// no decoder took the bytes
+	NoneDecodeBasis DecodeBasis = "none"
+)
+
+// which bytes the offsets of a decode tree count from
+type DecodeSource string
+
+const (
+	// the payload of the message (GET /api/v1/messages/{id}), or its original with original=true
+	PayloadDecodeSource DecodeSource = "payload"
+	// the body of the exchange's side without chunk framing (GET /api/v1/exchanges/{id}/body)
+	BodyDecodeSource DecodeSource = "body"
+	// bytes in the request target, the dns parameter of a DoH GET: they are in Data, since no other operation has them
+	TargetDecodeSource DecodeSource = "target"
+)
+
 type EventType string
 
 const (
@@ -517,4 +545,49 @@ type CaptureList struct {
 // the body of every error response
 type Error struct {
 	Error string `json:"error"`
+}
+
+// GET /api/v1/messages/{id}/decode and GET /api/v1/exchanges/{id}/decode: the payload as a tree of fields, decoded on request
+// Protocol is the decoder that made the tree, raw when none took the bytes; Candidates are every protocol that might be it with the reason, the first one taken
+// Offset and Length of each node are bytes of the source from its first byte, the same offsets as the payload window of the source's own operation; Length is
+// how many bytes of the source were decoded, Total how many there are; Truncated is true when the input or the tree reached a limit
+// every string that comes from the traffic (names, text, unknown bytes) is escaped like Payload.Escaped; Error says why a decoder failed, the tree is raw then
+// Protocols are the values as takes
+type Decode struct {
+	MessageID  uint64            `json:"message_id,omitzero"`
+	ExchangeID uint64            `json:"exchange_id,omitzero"`
+	Side       Side              `json:"side,omitzero"`
+	Source     DecodeSource      `json:"source"`
+	Protocol   string            `json:"protocol"`
+	Summary    string            `json:"summary"`
+	Length     int               `json:"length"`
+	Total      int               `json:"total"`
+	Truncated  bool              `json:"truncated"`
+	Candidates []DecodeCandidate `json:"candidates"`
+	Tree       []DecodeNode      `json:"tree"`
+	Data       *Payload          `json:"data,omitzero"`
+	Error      string            `json:"error,omitzero"`
+	Protocols  []string          `json:"protocols"`
+}
+
+// a protocol the payload might be: Score is what sniffing the bytes gave, 0 to 100
+type DecodeCandidate struct {
+	Protocol string      `json:"protocol"`
+	Basis    DecodeBasis `json:"basis"`
+	Reason   string      `json:"reason"`
+	Score    int         `json:"score"`
+}
+
+// one field of a decode tree: Name is a filter-style id (dns.qry.name), Label what it is, Value its value as text
+// Offset and Length are its bytes in the source, Mask the bits of a field smaller than its bytes (a flag of dns.flags), big endian over Length bytes
+// Error says what is wrong with the field; the children are its parts
+type DecodeNode struct {
+	Name     string       `json:"name"`
+	Label    string       `json:"label"`
+	Value    string       `json:"value,omitzero"`
+	Offset   int          `json:"offset"`
+	Length   int          `json:"length"`
+	Mask     uint32       `json:"mask,omitzero"`
+	Error    string       `json:"error,omitzero"`
+	Children []DecodeNode `json:"children,omitzero"`
 }

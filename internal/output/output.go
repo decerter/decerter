@@ -58,3 +58,32 @@ func EscapeField(field string) (text string) {
 	text = builder.String()
 	return
 }
+
+// the escaped form of payload bytes the API, decerter mcp and the decoders give out: printable ASCII stays, a backslash is doubled, \n \r \t are written as such
+// and every other byte as \xNN, so the text can be read and the bytes can be read back from it
+func Escape(data []byte) (text string) {
+	builder := strings.Builder{}
+	builder.Grow(len(data) + len(data)/8)
+
+	for _, value := range data {
+		switch {
+		case value == '\n':
+			builder.WriteString(`\n`)
+		case value == '\r':
+			builder.WriteString(`\r`)
+		case value == '\t':
+			builder.WriteString(`\t`)
+		case value == '\\':
+			builder.WriteString(`\\`)
+		case (value >= ' ') && (value <= '~'):
+			builder.WriteByte(value)
+		default:
+			builder.WriteString(`\x`)
+			builder.WriteByte(hexDigits[value>>4])
+			builder.WriteByte(hexDigits[value&0x0f])
+		}
+	}
+
+	text = builder.String()
+	return
+}

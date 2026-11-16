@@ -8,6 +8,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,6 +49,9 @@ const (
 var (
 	testRandom = [32]byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32}
 	testKeyLog = "CLIENT_RANDOM 0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20 " + strings.Repeat("ab", 48) + "\n"
+	// a DNS query for example.com A and its answer 93.184.216.34, the name of the answer compressed
+	testDNSQuery  = []byte{0xbe, 0xef, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0, 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1}
+	testDNSAnswer = slices.Concat([]byte{0xbe, 0xef, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0}, testDNSQuery[12:], []byte{0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0x0e, 0x10, 0, 4, 93, 184, 216, 34})
 )
 
 // one request against the test server: Status is what it must answer, IsInvalid marks a request the spec itself refuses, only its response is checked
@@ -71,6 +75,9 @@ type testBackend struct {
 	dropID   uint64
 	ruleID   uint64
 	exchange uint64
+	dnsQuery uint64
+	dohPost  uint64
+	dohGet   uint64
 	stop     func()
 	pipeline *intercept.Pipeline
 }
@@ -121,6 +128,7 @@ func TestTypesPositive(state *testing.T) {
 		"Payload": v1.Payload{}, "MessageDetail": v1.MessageDetail{}, "Hold": v1.Hold{}, "HoldList": v1.HoldList{}, "EditRequest": v1.EditRequest{},
 		"RuleRequest": v1.RuleRequest{}, "Rule": v1.Rule{}, "RuleList": v1.RuleList{}, "Event": v1.Event{},
 		"Header": v1.Header{}, "HTTPHead": v1.HTTPHead{}, "HTTPMessage": v1.HTTPMessage{}, "GRPCMessage": v1.GRPCMessage{}, "Exchange": v1.Exchange{}, "ExchangeList": v1.ExchangeList{}, "ExchangeBody": v1.ExchangeBody{},
+		"Decode": v1.Decode{}, "DecodeCandidate": v1.DecodeCandidate{}, "DecodeNode": v1.DecodeNode{},
 		"CaptureStatus": v1.CaptureStatus{}, "CaptureLimits": v1.CaptureLimits{}, "CaptureRequest": v1.CaptureRequest{}, "Capture": v1.Capture{}, "CaptureList": v1.CaptureList{},
 	}
 
@@ -182,6 +190,19 @@ func TestHandlerPositive(state *testing.T) {
 		{Method: http.MethodGet, Path: fmt.Sprintf("/messages/%d?offset=4&length=6", test.request), Status: http.StatusOK},
 		{Method: http.MethodGet, Path: fmt.Sprintf("/messages/%d", test.dropped), Status: http.StatusOK},
 		{Method: http.MethodGet, Path: "/messages/999", Status: http.StatusNotFound},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/messages/%d/decode", test.dnsQuery), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/messages/%d/decode?as=raw", test.dnsQuery), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/messages/%d/decode?original=true", test.request), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/messages/%d/decode?as=nosuch", test.dnsQuery), Status: http.StatusBadRequest},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/messages/%d/decode?original=maybe", test.dnsQuery), Status: http.StatusBadRequest, IsInvalid: true},
+		{Method: http.MethodGet, Path: "/messages/999/decode", Status: http.StatusNotFound},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/exchanges/%d/decode", test.dohPost), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/exchanges/%d/decode?side=response&as=dns", test.dohPost), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/exchanges/%d/decode", test.dohGet), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/exchanges/%d/decode?side=response&original=true", test.exchange), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/exchanges/%d/decode?as=nosuch", test.dohPost), Status: http.StatusBadRequest},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/exchanges/%d/decode?side=trailer", test.dohPost), Status: http.StatusBadRequest, IsInvalid: true},
+		{Method: http.MethodGet, Path: "/exchanges/999/decode", Status: http.StatusNotFound},
 		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/exchanges", test.tlsFlow), Status: http.StatusOK},
 		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/exchanges?limit=1", test.udpFlow), Status: http.StatusOK},
 		{Method: http.MethodGet, Path: "/flows/999/exchanges", Status: http.StatusNotFound},
@@ -1010,11 +1031,26 @@ func newTestBackend(ctx context.Context) (test testBackend, err error) {
 	backend.History.AppendBody(pushed, v1.ResponseSide, []byte{1, 0, 0, 0, 9, 'h', 'i'})
 	backend.History.AppendGRPC(pushed, v1.ResponseSide, []v1.GRPCMessage{{Offset: 0, Length: 9, Compressed: true}})
 	backend.History.EndMessage(pushed, v1.ResponseSide, history.HTTPEnd{State: v1.IncompleteHTTPState, Trailers: nil, Note: "the server reset the stream: CANCEL; the last gRPC message is cut short", Edit: nil})
+	// DoH on the same flow: a POST with the query as its body and the answer, a GET with the query in its dns parameter
+	dohRequest := v1.HTTPMessage{HTTPHead: v1.HTTPHead{Method: "POST", Target: "/dns-query", Version: "HTTP/2", Headers: []v1.Header{{Name: ":method", Value: "POST"}, {Name: "content-type", Value: "application/dns-message"}}}, URL: "https://example.com/dns-query", Time: time.Now(), Framing: v1.FramesFraming, State: v1.HeadHTTPState}
+	test.dohPost = backend.History.OpenStream(test.tlsFlow, "HTTP/2", history.Stream{ID: 3, PromisedBy: 0}, v1.RequestSide, dohRequest)
+	backend.History.AppendBody(test.dohPost, v1.RequestSide, testDNSQuery)
+	backend.History.EndMessage(test.dohPost, v1.RequestSide, history.HTTPEnd{State: v1.CompleteHTTPState, Trailers: nil, Note: "", Edit: nil})
+	backend.History.AddHead(test.dohPost, v1.ResponseSide, v1.HTTPMessage{HTTPHead: v1.HTTPHead{Version: "HTTP/2", Status: 200, Headers: []v1.Header{{Name: ":status", Value: "200"}, {Name: "content-type", Value: "application/dns-message"}}}, Time: time.Now(), Framing: v1.FramesFraming, State: v1.HeadHTTPState}, false)
+	backend.History.AppendBody(test.dohPost, v1.ResponseSide, testDNSAnswer)
+	backend.History.EndMessage(test.dohPost, v1.ResponseSide, history.HTTPEnd{State: v1.CompleteHTTPState, Trailers: nil, Note: "", Edit: nil})
+	dohRequest.Method, dohRequest.Target, dohRequest.Headers = "GET", "/dns-query?dns="+base64.RawURLEncoding.EncodeToString(testDNSQuery), []v1.Header{{Name: ":method", Value: "GET"}}
+	test.dohGet = backend.History.OpenStream(test.tlsFlow, "HTTP/2", history.Stream{ID: 5, PromisedBy: 0}, v1.RequestSide, dohRequest)
+	backend.History.EndMessage(test.dohGet, v1.RequestSide, history.HTTPEnd{State: v1.CompleteHTTPState, Trailers: nil, Note: "", Edit: nil})
 	backend.History.CloseFlow(test.tlsFlow, history.Counters{Bytes: 100, Datagrams: 0}, history.Counters{Bytes: 200, Datagrams: 0})
 	// an open udp flow whose TLS state was never read
 	udpValues := filter.Values{PID: 43, UID: 1001, GID: 1001, Comm: "dig", IPProtocol: syscall.IPPROTO_UDP, Source: netip.MustParseAddrPort("[::ffff:127.0.0.1]:5353"), Destination: netip.MustParseAddrPort("127.0.0.1:53"), TLS: filter.UnknownTLSState}
 	test.udpFlow = backend.History.OpenFlow(8, udpValues, [32]byte{})
 	udpFlow := intercept.FlowOf(test.udpFlow, 8, redirectFlow(udpValues), udpValues.Source, udpValues)
+	// a DNS query to port 53, before the holds
+	query := test.pipeline.Message(udpFlow, tlsrecord.ClientDirection, intercept.UDPLayer, testDNSQuery)
+	test.dnsQuery = query.ID
+	test.pipeline.Process(ctx, query, logger)
 	release := holdOne(ctx, backend, test.pipeline, udpFlow)
 	releaseSecond := holdOne(ctx, backend, test.pipeline, udpFlow)
 	test.stop = func() {
