@@ -191,8 +191,9 @@ func runClient(mode string, arguments []string) (code int) {
 	}
 
 	// the peer mode reports what its sockets see of their peers, the send mode sends one datagram, the connect mode what connect says for tcp and udp,
-	// the ping mode pings an address with ping sockets, the mark mode connects with SO_MARK, the websocket mode talks WebSocket to a host:port
-	if slices.Contains([]string{"peer", "send", "connect", "ping", "mark", "websocket"}, mode) {
+	// the ping mode pings an address with ping sockets, the mark mode connects with SO_MARK, the websocket, redis, smtp, pgsql and stun modes talk
+	// their protocol to a host:port
+	if slices.Contains([]string{"peer", "send", "connect", "ping", "mark", "websocket", "redis", "smtp", "pgsql", "stun"}, mode) {
 		report, reportErr := "", error(nil)
 
 		switch mode {
@@ -200,6 +201,14 @@ func runClient(mode string, arguments []string) (code int) {
 			report, reportErr = reportPeers(target)
 		case "websocket":
 			report, reportErr = talkWebSocket(target)
+		case "redis":
+			report, reportErr = talkRedis(target)
+		case "smtp":
+			report, reportErr = talkSMTP(target)
+		case "pgsql":
+			report, reportErr = talkPostgres(target)
+		case "stun":
+			report, reportErr = talkSTUN(target)
 		case "send":
 			report, reportErr = sendDatagram(target)
 		case "ping":

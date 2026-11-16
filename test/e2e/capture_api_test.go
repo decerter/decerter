@@ -277,7 +277,7 @@ func TestAPIExportPcapPositive(state *testing.T) {
 	}
 }
 
-// Test if decerter run --intercept with the API captures the wire side: a capture started over the API, the live stream and GET /flows/pcap?format=dsb show the edited GET /test to the real server address, decrypted by tshark, for TLS 1.3 and TLS 1.2, and a capture with a process filter has only the flow it takes.
+// Test if decerter run --intercept with the API captures the wire side: a capture started over the API, the live stream, GET /flows/pcap?format=dsb and the one flow of GET /flows/pcap?flow= show the edited GET /test to the real server address, decrypted by tshark, for TLS 1.3 and TLS 1.2, and a capture with a process filter has only the flow it takes.
 func TestRunCaptureAPIPositive(state *testing.T) {
 	tsharkPath, lookErr := exec.LookPath("tshark")
 
@@ -350,8 +350,23 @@ func TestRunCaptureAPIPositive(state *testing.T) {
 		state.Fatalf("Test of the run mode capture failed, cannot export the flows with format=dsb, error: %s", err.Error())
 	}
 
-	// the capture, the dsb export and the filtered capture have the edited requests on the wire, decrypted with their DSB
-	expected := map[string][]string{"all": {port13, port12}, "export": {port13, port12}, "filtered": {port13}}
+	// "Open in Wireshark": one flow without a format is dsb when decerter keeps packets
+	flows := v1.FlowList{}
+	_, err = client.call(state.Context(), http.MethodGet, "/flows?limit=1&filter="+url.QueryEscape("tcp.dstport == "+port13), nil, &flows)
+
+	if (err != nil) || (len(flows.Flows) != 1) {
+		state.Fatalf("Test of the run mode capture failed, cannot find the flow to port %s, flows: %+v, error: %v", port13, flows.Flows, err)
+	}
+
+	paths["flow"] = filepath.Join(directory, "flow.pcapng")
+	err = client.download(state.Context(), fmt.Sprintf("/flows/pcap?flow=%d", flows.Flows[0].ID), paths["flow"])
+
+	if err != nil {
+		state.Fatalf("Test of the run mode capture failed, cannot export flow %d, error: %s", flows.Flows[0].ID, err.Error())
+	}
+
+	// the capture, the dsb export, the one flow and the filtered capture have the edited requests on the wire, decrypted with their DSB
+	expected := map[string][]string{"all": {port13, port12}, "export": {port13, port12}, "flow": {port13}, "filtered": {port13}}
 
 	for name, ports := range expected {
 		requests, tsharkErr := wireRequests(state.Context(), tsharkPath, paths[name], port13, port12)
