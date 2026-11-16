@@ -433,7 +433,7 @@ func runSetup(ctx context.Context, account hostAccount, sdk string, adb string, 
 
 // setup boots the AVD when no emulator runs and the AVD is there; otherwise TestMain runs it against the running emulator later
 func coldSetup(ctx context.Context, account hostAccount, sdk string, adb string) (result setupRun, err error) {
-	probe := emulator{SDK: sdk, ADB: adb, Serial: "", ABI: "", Architecture: "", account: account, process: nil, waitErr: nil, logFile: nil}
+	probe := emulator{SDK: sdk, ADB: adb, Serial: "", ABI: "", Architecture: "", LogPath: "", account: account, process: nil, waitErr: nil, logFile: nil}
 	devices, err := probe.run(ctx, adbTimeout, "devices")
 
 	if err != nil {
@@ -465,15 +465,20 @@ func coldSetup(ctx context.Context, account hostAccount, sdk string, adb string)
 	return
 }
 
-// stop the emulator setup booted and remove its log
+// stop the emulator setup booted and remove its log; the log of an emulator that exited (crashed) during the tests stays
 func stopBooted(result setupRun) (err error) {
 	if result.BootedSerial == "" {
 		return
 	}
 
+	if (result.BootedSerial == device.Serial) && errors.Is(deviceOffline(), errEmulatorExited) {
+		fmt.Fprintf(os.Stderr, "the log of the emulator that exited stays: %s\n", result.BootLog)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), stopTimeout)
 	defer cancel()
-	booted := emulator{SDK: device.SDK, ADB: device.ADB, Serial: result.BootedSerial, ABI: device.ABI, Architecture: device.Architecture, account: device.account, process: nil, waitErr: nil, logFile: nil}
+	booted := emulator{SDK: device.SDK, ADB: device.ADB, Serial: result.BootedSerial, ABI: device.ABI, Architecture: device.Architecture, LogPath: result.BootLog, account: device.account, process: nil, waitErr: nil, logFile: nil}
 	_, err = booted.run(ctx, adbTimeout, "emu", "kill")
 
 	if err != nil {

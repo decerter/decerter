@@ -456,7 +456,14 @@ func installFlutter(state *testing.T, app flutterApp, apk string) {
 		return
 	}
 
-	_, err := device.run(state.Context(), pushTimeout, "install", "-r", "-d", apk)
+	// the install kills a running app, it is stopped from the background first
+	err := device.stopApp(state.Context(), flutterPackage)
+
+	if err != nil {
+		state.Fatalf("Could not stop the Flutter test app, error: %s", err.Error())
+	}
+
+	_, err = device.run(state.Context(), pushTimeout, "install", "-r", "-d", apk)
 
 	if err != nil {
 		state.Fatalf("Could not install the Flutter test app, error: %s", err.Error())
@@ -473,6 +480,12 @@ func installFlutter(state *testing.T, app flutterApp, apk string) {
 // remove the test app from the device at the end
 func uninstallFlutter(ctx context.Context) (err error) {
 	if flutterInstalled == "" {
+		return
+	}
+
+	err = device.stopApp(ctx, flutterPackage)
+
+	if err != nil {
 		return
 	}
 
@@ -497,7 +510,14 @@ func testFlutterSuite(ctx context.Context, server httpsServer, certificateName s
 	}
 
 	id := fmt.Sprintf("run%s-%d", flutterRunPrefix, flutterRun.Add(1))
-	_, err = device.shell(ctx, fmt.Sprintf("am start -S -W -n %s --es url %s --es ca %s --es id %s", flutterActivity, server.url(path), base64.StdEncoding.EncodeToString(certificate), id))
+	// a cold start, stopped from the background instead of am start -S
+	err = device.stopApp(ctx, flutterPackage)
+
+	if err != nil {
+		return
+	}
+
+	_, err = device.shell(ctx, fmt.Sprintf("am start -W -n %s --es url %s --es ca %s --es id %s", flutterActivity, server.url(path), base64.StdEncoding.EncodeToString(certificate), id))
 
 	if err != nil {
 		return
@@ -610,8 +630,15 @@ func TestFlutterKeylogPositive(state *testing.T) {
 			decerter := startDeviceDecerter(state, decerterBinary, "flutter-keylog", "keylog --package "+flutterPackage, keylogReady)
 			waitFlutterLog(state, decerter, flutterHookedLog)
 
-			// an update installs the app into a new directory, decerter finds it there and hooks it
-			_, err := device.run(state.Context(), pushTimeout, "install", "-r", "-d", app.APK)
+			// an update installs the app into a new directory, decerter finds it there and hooks it; the install kills a running app, it is stopped from
+			// the background first
+			err := device.stopApp(state.Context(), flutterPackage)
+
+			if err != nil {
+				state.Fatalf("Could not stop the Flutter test app, error: %s", err.Error())
+			}
+
+			_, err = device.run(state.Context(), pushTimeout, "install", "-r", "-d", app.APK)
 
 			if err != nil {
 				state.Fatalf("Could not update the Flutter test app, error: %s", err.Error())

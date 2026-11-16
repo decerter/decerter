@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 
-// One HTTPS GET with dart:io's HttpClient, the TLS of Dart's BoringSSL inside libflutter.so, then the process exits.
+// One HTTPS GET with dart:io's HttpClient, the TLS of Dart's BoringSSL inside libflutter.so, then the app leaves the screen
+// like Back does and stays until the e2e test stops it: an app that exits while its window is on the screen crashes the
+// emulator's host GL code now and then (emulator 37.2.13).
 // MainActivity hands over the intent extras as entrypoint arguments: the URL, the CA as base64 PEM and an id the
 // e2e test finds the result line by in logcat (tag flutter).
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
+
 Future<void> main(List<String> arguments) async {
+  WidgetsFlutterBinding.ensureInitialized();
   final id = (arguments.length > 2) ? arguments[2] : '';
 
   try {
@@ -27,7 +33,7 @@ Future<void> main(List<String> arguments) async {
     print('decerter-flutter $id error $error');
   }
 
-  exit(0);
+  await SystemNavigator.pop();
 }
 
 bool _isEqual(List<int> first, List<int> second) {

@@ -260,6 +260,13 @@ func prepareChrome(state *testing.T, packageName string, extraFlags string) (uid
 	}
 
 	flags := "_ --ignore-certificate-errors-spki-list=" + strings.Join(digests, ",") + " --ssl-key-log-file=" + chromeKeyLog + " --disable-fre --no-default-browser-check --no-first-run " + extraFlags
+	// pm clear kills a running Chrome, it is stopped from the background first
+	err = device.stopApp(state.Context(), packageName)
+
+	if err != nil {
+		state.Fatalf("Could not stop %s, error: %s", packageName, err.Error())
+	}
+
 	_, err = device.shell(state.Context(), fmt.Sprintf("echo '%s' > %s && chmod 644 %s && pm clear %s && pm grant %s %s", flags, chromeCommandLine, chromeCommandLine, packageName, packageName, notificationPermission))
 
 	if err != nil {
@@ -270,7 +277,13 @@ func prepareChrome(state *testing.T, packageName string, extraFlags string) (uid
 		ctx, cancel := context.WithTimeout(context.Background(), adbTimeout)
 		defer cancel()
 
-		if _, stopErr := device.shell(ctx, "am force-stop "+packageName+" && rm -f "+chromeCommandLine); stopErr != nil {
+		stopErr := device.stopApp(ctx, packageName)
+
+		if stopErr == nil {
+			_, stopErr = device.shell(ctx, "rm -f "+chromeCommandLine)
+		}
+
+		if stopErr != nil {
 			state.Errorf("Could not stop %s, error: %s", packageName, stopErr.Error())
 		}
 	})
@@ -278,15 +291,17 @@ func prepareChrome(state *testing.T, packageName string, extraFlags string) (uid
 	return
 }
 
-// open the url in a new tab of Chrome, isCold stops Chrome first
+// open the url in a new tab of Chrome, isCold stops Chrome first, from the background instead of am start -S
 func openChrome(ctx context.Context, packageName string, address string, isCold bool) (err error) {
-	stop := ""
-
 	if isCold {
-		stop = "-S "
+		err = device.stopApp(ctx, packageName)
+
+		if err != nil {
+			return
+		}
 	}
 
-	_, err = device.shell(ctx, fmt.Sprintf("am start %s-W -a android.intent.action.VIEW -d '%s' -n %s/%s", stop, address, packageName, chromeActivity))
+	_, err = device.shell(ctx, fmt.Sprintf("am start -W -a android.intent.action.VIEW -d '%s' -n %s/%s", address, packageName, chromeActivity))
 	return
 }
 
@@ -738,10 +753,16 @@ func installChromium(state *testing.T, apk string) {
 		return
 	}
 
-	// none may be installed yet
+	// none may be installed yet; an uninstall kills a running ChromePublic, it is stopped from the background first
+	err := device.stopApp(state.Context(), chromiumPackage)
+
+	if err != nil {
+		state.Fatalf("Could not stop %s, error: %s", chromiumPackage, err.Error())
+	}
+
 	_, _ = device.run(state.Context(), adbTimeout, "uninstall", chromiumPackage)
 	chromiumInstalled = ""
-	_, err := device.run(state.Context(), pushTimeout, "install", apk)
+	_, err = device.run(state.Context(), pushTimeout, "install", apk)
 
 	if err != nil {
 		state.Fatalf("Could not install %s, error: %s", apk, err.Error())
@@ -753,6 +774,12 @@ func installChromium(state *testing.T, apk string) {
 // remove ChromePublic from the device at the end if the tests installed it
 func uninstallChromium(ctx context.Context) (err error) {
 	if chromiumInstalled == "" {
+		return
+	}
+
+	err = device.stopApp(ctx, chromiumPackage)
+
+	if err != nil {
 		return
 	}
 
@@ -857,13 +884,20 @@ func TestCronetKeylogPositive(state *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), adbTimeout)
 		defer cancel()
 
-		if _, stopErr := device.shell(ctx, "am force-stop "+youtubePackage); stopErr != nil {
+		if stopErr := device.stopApp(ctx, youtubePackage); stopErr != nil {
 			state.Errorf("Could not stop %s, error: %s", youtubePackage, stopErr.Error())
 		}
 	})
 
-	// the notification permission is granted so no dialog stays on top of YouTube's task, a new cleared task starts YouTube even when one does
-	_, err = device.shell(state.Context(), fmt.Sprintf("pm grant %s %s && am start -S -W -f 0x%x -n $(cmd package resolve-activity --brief -c android.intent.category.LAUNCHER %s | tail -n 1)", youtubePackage, notificationPermission, newClearedTask, youtubePackage))
+	// a running YouTube is stopped from the background instead of am start -S; the notification permission is granted so no dialog stays on top of
+	// YouTube's task, a new cleared task starts YouTube even when one does
+	err = device.stopApp(state.Context(), youtubePackage)
+
+	if err != nil {
+		state.Fatalf("Could not stop %s, error: %s", youtubePackage, err.Error())
+	}
+
+	_, err = device.shell(state.Context(), fmt.Sprintf("pm grant %s %s && am start -W -f 0x%x -n $(cmd package resolve-activity --brief -c android.intent.category.LAUNCHER %s | tail -n 1)", youtubePackage, notificationPermission, newClearedTask, youtubePackage))
 
 	if err != nil {
 		state.Fatalf("Could not start %s, error: %s", youtubePackage, err.Error())

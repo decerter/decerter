@@ -16,6 +16,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -38,6 +39,12 @@ const (
 	// adb emu kill returns at once, the emulator process needs a few seconds
 	stopTimeout  time.Duration = time.Minute
 	pollInterval time.Duration = 250 * time.Millisecond
+	// adb reconnect of an emulator whose transport adb lost, until adbd answers as root again
+	reconnectTimeout time.Duration = time.Minute
+	// the lines of the emulator's log a run that lost it prints
+	logTailLines int = 15
+	// how long an app stays in the background before it is killed, SurfaceFlinger lets go of its last frames
+	appSettleTime time.Duration = time.Second
 )
 
 var (
@@ -47,11 +54,14 @@ var (
 	errUnsupportedImage = errors.New("unsupported emulator image")
 	errBootTimeout      = errors.New("the emulator did not boot in time")
 	errOffline          = errors.New("the emulator went offline")
+	errEmulatorExited   = errors.New("the emulator exited, its console does not answer")
 )
 
 var (
 	// the first adb error that said the emulator of the tests is gone, nil while it is there; the cases after it skip and TestMain fails with this one message
 	offlineErr atomic.Pointer[error]
+	// one reconnect at a time, the other adb calls that lost the emulator wait for it and then find it back
+	reconnectMutex sync.Mutex
 )
 
 // the user who ran sudo: adb and the emulator run as this user, so they use its adb server, adb key and AVD; root when there is none
@@ -60,14 +70,15 @@ type hostAccount struct {
 	Home       string
 }
 
-// the device the tests run on and how to reach it; ABI and Architecture (its GOARCH) come from the running image; process is the emulator the tests
-// started, nil for one that was running already
+// the device the tests run on and how to reach it; ABI and Architecture (its GOARCH) come from the running image; LogPath is the log of an emulator the
+// tests or decerter android setup booted, empty for one that was running already; process is the emulator the tests started, nil for one that was running already
 type emulator struct {
 	SDK          string
 	ADB          string
 	Serial       string
 	ABI          string
 	Architecture string
+	LogPath      string
 	account      hostAccount
 	process      *exec.Cmd
 	waitErr      chan error
@@ -212,7 +223,7 @@ func javaPath(path string) (withJava string) {
 
 // use an emulator adb already knows, or boot the AVD headless; then wait for the boot and make adbd root
 func connectEmulator(ctx context.Context, account hostAccount, sdk string, adb string, logPath string) (device emulator, err error) {
-	device = emulator{SDK: sdk, ADB: adb, Serial: "", ABI: "", Architecture: "", account: account, process: nil, waitErr: nil, logFile: nil}
+	device = emulator{SDK: sdk, ADB: adb, Serial: "", ABI: "", Architecture: "", LogPath: "", account: account, process: nil, waitErr: nil, logFile: nil}
 	devices, devicesErr := device.run(ctx, adbTimeout, "devices")
 
 	if err = devicesErr; err != nil {
@@ -268,6 +279,7 @@ func (device *emulator) start(logPath string) (err error) {
 	}
 
 	device.logFile = logFile
+	device.LogPath = logPath
 	device.Serial = emulatorSerial
 	command := exec.Command(filepath.Join(device.SDK, "emulator", "emulator"), "-avd", avdName, "-port", emulatorPort, "-no-window", "-no-audio", "-no-boot-anim", "-gpu", "swiftshader_indirect", "-no-snapshot", "-no-metrics")
 	command.Env = device.account.environment(device.SDK)
@@ -385,6 +397,15 @@ func (device *emulator) stop() (err error) {
 		return
 	}
 
+	// an emulator that exited is only waited for, its log stays
+	if errors.Is(deviceOffline(), errEmulatorExited) {
+		fmt.Fprintf(os.Stderr, "the log of the emulator that exited stays: %s\n", device.LogPath)
+		// its exit status is the crash the offline error already reported
+		<-device.waitErr
+		err = device.logFile.Close()
+		return
+	}
+
 	defer func() {
 		err = errors.Join(err, device.logFile.Close())
 	}()
@@ -405,8 +426,35 @@ func (device *emulator) stop() (err error) {
 	return
 }
 
-// run adb with the device's serial as the invoking user, output is stdout; the call is killed after timeout
+// run adb with the device's serial as the invoking user, output is stdout; the call is killed after timeout. When adb lost the emulator of the tests
+// while it still runs, adb reconnects it and the call runs once more: adb refused it before it reached the device, so it did nothing yet
 func (device *emulator) run(ctx context.Context, timeout time.Duration, arguments ...string) (output string, err error) {
+	output, stderr, err := device.runOnce(ctx, timeout, arguments...)
+
+	if (err == nil) || !device.isLost(stderr) || (deviceOffline() != nil) {
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "adb lost %s: %s\n", device.Serial, err.Error())
+	reconnectErr := device.reconnect(ctx)
+
+	if reconnectErr != nil {
+		device.setOffline(errors.Join(err, reconnectErr))
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "adb reconnected %s, running adb %s once more\n", device.Serial, strings.Join(arguments, " "))
+	output, stderr, err = device.runOnce(ctx, timeout, arguments...)
+
+	if (err != nil) && device.isLost(stderr) {
+		device.setOffline(err)
+	}
+
+	return
+}
+
+// one adb call with the device's serial as the invoking user, output is stdout
+func (device *emulator) runOnce(ctx context.Context, timeout time.Duration, arguments ...string) (output string, stderr string, err error) {
 	commandCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -419,36 +467,106 @@ func (device *emulator) run(ctx context.Context, timeout time.Duration, argument
 	command.Dir = "/"
 	command.SysProcAttr = &syscall.SysProcAttr{Credential: device.account.Credential}
 	command.WaitDelay = time.Second
-	stdout := &bytes.Buffer{}
-	stderr := &bytes.Buffer{}
-	command.Stdout = stdout
-	command.Stderr = stderr
+	stdoutBuffer := &bytes.Buffer{}
+	stderrBuffer := &bytes.Buffer{}
+	command.Stdout = stdoutBuffer
+	command.Stderr = stderrBuffer
 	err = command.Run()
-	output = stdout.String()
+	output = stdoutBuffer.String()
+	stderr = stderrBuffer.String()
 
 	if err != nil {
-		err = fmt.Errorf("adb %s: %w: %s%s", strings.Join(arguments, " "), err, strings.TrimSpace(stderr.String()), strings.TrimSpace(output))
-		device.checkOffline(stderr.String(), err)
+		err = fmt.Errorf("adb %s: %w: %s%s", strings.Join(arguments, " "), err, strings.TrimSpace(stderr), strings.TrimSpace(output))
 	}
 
 	return
 }
 
-// remember the first adb failure that says the device of the tests went away, once TestMain connected to it: an emulator that dropped off adb doesn't
-// come back by itself, so the cases after it could only fail; during the boot and adb root the same errors are expected and only retried
-func (device *emulator) checkOffline(stderr string, adbErr error) {
+// adb lost the emulator of the tests: its transport is gone, or the emulator is gone from adb's list; only once TestMain connected to it, during the
+// boot and adb root the same errors are expected and only retried
+func (device *emulator) isLost(stderr string) (isLost bool) {
 	if !isTestDevice(device.Serial) {
 		return
 	}
 
-	// adb lost its transport, or the emulator is gone from its list
 	for _, text := range []string{"device offline", "device '" + device.Serial + "' not found", "no devices/emulators found"} {
 		if strings.Contains(stderr, text) {
-			wrapped := fmt.Errorf("%w: %s: %w", errOffline, device.Serial, adbErr)
-			offlineErr.CompareAndSwap(nil, &wrapped)
+			isLost = true
 			return
 		}
 	}
+
+	return
+}
+
+// an emulator whose console still answers runs, adb reconnect drops the host side of its transport and adb connects to it again; done once adbd
+// answers as root again. An emulator that exited (crashed) can't come back, the error says so with the end of its log
+func (device *emulator) reconnect(ctx context.Context) (err error) {
+	reconnectMutex.Lock()
+	defer reconnectMutex.Unlock()
+	reconnectCtx, cancel := context.WithTimeout(ctx, reconnectTimeout)
+	defer cancel()
+
+	// another call reconnected it while this one waited
+	if device.isRoot(reconnectCtx) {
+		return
+	}
+
+	_, _, consoleErr := device.runOnce(reconnectCtx, adbTimeout, "emu", "avd", "name")
+
+	if consoleErr != nil {
+		err = fmt.Errorf("%w: %w%s", errEmulatorExited, consoleErr, device.logTail())
+		return
+	}
+
+	_, _, err = device.runOnce(reconnectCtx, adbTimeout, "reconnect")
+
+	if err != nil {
+		return
+	}
+
+	err = poll(reconnectCtx, func() (isDone bool, pollErr error) {
+		isDone = device.isRoot(reconnectCtx)
+		return
+	})
+
+	if err != nil {
+		err = fmt.Errorf("adb reconnect: %s did not come back in %s: %w", device.Serial, reconnectTimeout, err)
+	}
+
+	return
+}
+
+// adb reaches the emulator and adbd runs as root
+func (device *emulator) isRoot(ctx context.Context) (isRoot bool) {
+	output, _, err := device.runOnce(ctx, adbTimeout, "shell", "id -u")
+	isRoot = (err == nil) && (strings.TrimSpace(output) == "0")
+	return
+}
+
+// the last lines of the emulator's log on their own lines, empty without a log
+func (device *emulator) logTail() (tail string) {
+	if device.LogPath == "" {
+		return
+	}
+
+	data, readErr := os.ReadFile(device.LogPath)
+
+	if readErr != nil {
+		tail = "\ncould not read the emulator's log: " + readErr.Error()
+		return
+	}
+
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	lines = lines[max(0, len(lines)-logTailLines):]
+	tail = fmt.Sprintf("\nthe end of the emulator's log %s:\n%s", device.LogPath, strings.Join(lines, "\n"))
+	return
+}
+
+// remember the first error that lost the emulator of the tests for good: the cases after it skip and TestMain fails with this one message
+func (device *emulator) setOffline(lostErr error) {
+	wrapped := fmt.Errorf("%w: %s: %w", errOffline, device.Serial, lostErr)
+	offlineErr.CompareAndSwap(nil, &wrapped)
 }
 
 // the emulator TestMain connected to, the global device is only set once it booted and adbd is root
@@ -465,6 +583,33 @@ func deviceOffline() (err error) {
 		err = *pointer
 	}
 
+	return
+}
+
+// stop an app from the background: the emulator crashes now and then (a SIGSEGV in its host GL code, libgfxstream_backend.so of emulator 37.2.13)
+// when the GL process of an app on the screen dies, killed by am force-stop, am start -S or pm clear or by its own exit; with the launcher in front
+// first it doesn't. An app that runs but isn't the top activity, or none at all, is only force-stopped
+func (device *emulator) stopApp(ctx context.Context, packageName string) (err error) {
+	output, err := device.shell(ctx, "echo pids=$(pidof "+packageName+"); dumpsys activity activities | grep -m 1 topResumedActivity= || true")
+
+	if err != nil {
+		return
+	}
+
+	pids, top, _ := strings.Cut(output, "\n")
+
+	// without a topResumedActivity line the app may be on the screen
+	if (strings.TrimSpace(strings.TrimPrefix(pids, "pids=")) != "") && ((strings.TrimSpace(top) == "") || strings.Contains(top, " "+packageName+"/")) {
+		_, err = device.shell(ctx, "am start -W -a android.intent.action.MAIN -c android.intent.category.HOME")
+
+		if err != nil {
+			return
+		}
+
+		time.Sleep(appSettleTime)
+	}
+
+	_, err = device.shell(ctx, "am force-stop "+packageName)
 	return
 }
 

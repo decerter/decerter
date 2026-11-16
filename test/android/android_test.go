@@ -216,6 +216,11 @@ func setup() (err error) {
 		return
 	}
 
+	// the log of the emulator setup booted, an emulator that drops off adb points to it
+	if setupResult.BootedSerial == device.Serial {
+		device.LogPath = setupResult.BootLog
+	}
+
 	appUID, err = lookupAppUID(ctx, appPackage)
 
 	if err != nil {
