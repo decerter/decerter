@@ -17,6 +17,10 @@ func decodeFramed(tree *Tree, data []byte, context Context, protocol decoder) {
 		rest := data[offset:]
 
 		// after STARTTLS or an SSLRequest the server took, the bytes are TLS records
+		if (state.mode == starttlsMode) && isTLSStart(rest) {
+			state.isTLS = true
+		}
+
 		if state.isTLS {
 			root := tree.add(nil, protocol.Protocol+".tls", "TLS after "+protocol.Title+" switched to it", strconv.Itoa(len(rest))+" bytes", offset, len(rest))
 			nested := context
@@ -73,7 +77,40 @@ func framedDecode(name string) (decode func(tree *Tree, data []byte, context Con
 	return
 }
 
+// the length of a line from the start of data with its CRLF (a lone LF ends it too), 0 when no line end is there
+func lineLength(data []byte) (length int) {
+	for index, value := range data {
+		if value == '\n' {
+			length = index + 1
+			return
+		}
+	}
+
+	return
+}
+
+// a line without its line end
+func trimLine(line []byte) (text []byte) {
+	text = line
+
+	if (len(text) > 0) && (text[len(text)-1] == '\n') {
+		text = text[:len(text)-1]
+	}
+
+	if (len(text) > 0) && (text[len(text)-1] == '\r') {
+		text = text[:len(text)-1]
+	}
+
+	return
+}
+
 // the hint of a protocol no context names
 func noHint(context Context) (reason string) {
+	return
+}
+
+// a TLS handshake record header: what a stream that switched to TLS goes on with
+func isTLSStart(data []byte) (isTLS bool) {
+	isTLS = (len(data) >= 3) && (data[0] == 22) && (data[1] == 3) && (data[2] <= 4)
 	return
 }
