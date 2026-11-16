@@ -185,6 +185,33 @@ func TestMySQLPositive(state *testing.T) {
 	}
 }
 
+// Test if decode.Decode returns with the expected output for the MySQL commands and length-encoded integers: Use Database, Execute, Close and Reset
+// Statement, Kill, Change User and Set Option of a client; OK packets with 2-, 3- and 8-byte affected rows, an auth switch, LOCAL INFILE and auth more data
+// of a server.
+func TestMySQLCommandsPositive(state *testing.T) {
+	client := join(mysqlPacket(0, join([]byte{0x02}, []byte("shop"))), mysqlPacket(0, join([]byte{0x17}, little32(9), []byte{0}, little32(1))), mysqlPacket(0, join([]byte{0x19}, little32(9))),
+		mysqlPacket(0, join([]byte{0x1a}, little32(9))), mysqlPacket(0, join([]byte{0x0c}, little32(77))), mysqlPacket(0, join([]byte{0x11}, []byte("eve\x00"))), mysqlPacket(0, join([]byte{0x1b}, little16(1))),
+		mysqlPacket(2, []byte{1, 2, 3}))
+	result := mustDecode(state, client, streamContext(3306, v1.UpDirection, true), "")
+	expected := `MySQL Use Database "shop"; MySQL Execute Statement id 9; MySQL Close Statement id 9; MySQL Reset Statement id 9; MySQL Kill Server Thread 77; MySQL Change User "eve"; MySQL Set Option; MySQL auth data`
+
+	if (len(errorsOf(result.Tree)) != 0) || (result.Summary != expected) {
+		state.Errorf("Test of the MySQL commands failed, summary: %s, errors: %v", result.Summary, errorsOf(result.Tree))
+	}
+
+	server := join(mysqlPacket(1, join([]byte{0xfe}, []byte("mysql_native_password\x00"), make([]byte, 20))), mysqlPacket(3, join([]byte{0x01}, []byte("more"))), mysqlPacket(1, []byte{0, 0xfc, 0x10, 0x27, 0, 2, 0, 0, 0}),
+		mysqlPacket(1, []byte{0, 0xfd, 1, 0, 1, 0xfb, 2, 0, 0, 0}), mysqlPacket(1, join([]byte{0, 0xfe}, []byte{0, 0, 0, 0, 1, 0, 0, 0}, []byte{0}, []byte{2, 0, 0, 0})),
+		mysqlPacket(1, join([]byte{0xfb}, []byte("/tmp/data.csv"))))
+	result = mustDecode(state, server, streamContext(3306, v1.DownDirection, true), "")
+	expected = `MySQL auth switch request "mysql_native_password"; MySQL auth more data; MySQL OK, 10000 rows; MySQL OK, 65537 rows; MySQL OK, 4294967296 rows; MySQL LOCAL INFILE "/tmp/data.csv"`
+
+	if (len(errorsOf(result.Tree)) != 0) || (result.Summary != expected) {
+		state.Errorf("Test of the MySQL server packets failed, summary: %s, errors: %v", result.Summary, errorsOf(result.Tree))
+	}
+
+	checkValues(state, "the MySQL OK packets", result, map[string]string{"mysql.insert_id#1": "NULL", "mysql.affected_rows#2": "4294967296"})
+}
+
 // Test if decode.Decode returns with the expected errors for MySQL: a packet cut in one read, a length-encoded string past its packet, a string without
 // its zero byte.
 func TestMySQLNegative(state *testing.T) {
