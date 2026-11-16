@@ -27,8 +27,9 @@ const state = {
   exchangeId: null,
   exchangeSide: 'request',
   exchangeOffset: 0,
-  // the decode tree of the shown message and exchange body, see decodePanes
-  decodes: { message: null, exchange: null },
+  // the decode tree of the shown message, exchange body and flow handshake, see decodePanes
+  decodes: { message: null, exchange: null, handshake: null },
+  handshakeDirection: 'up',
 };
 
 // the rows live events may grow a list to: the newest flows, the first messages and exchanges of the shown flow; More reads on past them
@@ -445,6 +446,7 @@ async function selectFlow(id) {
   state.flows.set(flow.id, flow);
   renderFlowInfo(flow);
   renderFlows();
+  await loadHandshake(flow);
   const list = await call('GET', `/flows/${id}/messages`);
   state.messages = list.messages;
   state.messagesCursor = list.next_cursor || '';
@@ -460,8 +462,8 @@ function renderFlowInfo(flow) {
     ['command', flow.process.cmdline],
     ['executable', flow.process.exe],
     ['layer', flow.layer || 'no messages yet'],
-    ['up', `${formatBytes(flow.up.bytes)}, ${flow.up.messages} messages`],
-    ['down', `${formatBytes(flow.down.bytes)}, ${flow.down.messages} messages`],
+    ['up', trafficText(flow.up)],
+    ['down', trafficText(flow.down)],
   ];
 
   if (flow.tls) {
@@ -473,6 +475,37 @@ function renderFlowInfo(flow) {
   }
 
   byId('flow-info').replaceChildren(...fields.flatMap(([name, value]) => [el('dt', {}, name), el('dd', {}, value || '')]));
+}
+
+function trafficText(traffic) {
+  return [formatBytes(traffic.bytes), `${traffic.messages} messages`, traffic.handshake_bytes ? `${formatBytes(traffic.handshake_bytes)} of handshake records` : ''].filter(Boolean).join(', ');
+}
+
+// the handshake records the history kept of a TLS or DTLS flow, GET /flows/{id}/decode: the tree of one direction and all its bytes (at most 16 KiB), no paging
+async function loadHandshake(flow) {
+  const traffic = state.handshakeDirection === 'down' ? flow.down : flow.up;
+  const isKept = Boolean(flow.up.handshake_bytes || flow.down.handshake_bytes);
+  byId('handshake-view').hidden = !isKept;
+
+  if (!isKept) {
+    state.decodes.handshake = null;
+    return;
+  }
+
+  if (!traffic.handshake_bytes) {
+    state.decodes.handshake = { key: '', as: '', result: null, error: `no ${state.handshakeDirection === 'down' ? 'server' : 'client'} handshake records kept`, selected: null, nodes: new Map(), ids: new Map(), elements: new Map() };
+    renderDecode('handshake');
+    byId('handshake-bytes').replaceChildren();
+    byId('handshake-range').textContent = '';
+    return;
+  }
+
+  // the records of an open flow are decoded again when it kept more
+  const decoded = await loadDecode('handshake', `${flow.id} ${state.handshakeDirection} ${traffic.handshake_bytes}`, `/flows/${flow.id}/decode?part=handshake&direction=${state.handshakeDirection}`);
+  const data = decoded.result ? decoded.result.data : null;
+  byId('handshake-bytes').replaceChildren(data ? byteSpans(bytesOfHex(data.hex), data.offset, 'hex') : '');
+  byId('handshake-range').textContent = data ? `${data.total} bytes${decoded.result.cut ? ', cut at 16 KiB' : ''}` : '';
+  markBytes('handshake');
 }
 
 async function moreMessages() {
@@ -545,6 +578,7 @@ function renderPayload() {
 const decodePanes = {
   message: { select: 'message-decode-as', summary: 'message-decode-summary', reason: 'message-decode-reason', tree: 'message-decode-tree' },
   exchange: { select: 'exchange-decode-as', summary: 'exchange-decode-summary', reason: 'exchange-decode-reason', tree: 'exchange-decode-tree' },
+  handshake: { select: 'handshake-decode-as', summary: 'handshake-decode-summary', reason: 'handshake-decode-reason', tree: 'handshake-decode-tree' },
 };
 
 // the decode of key (the message or exchange side it is of), kept while key stays
@@ -628,10 +662,14 @@ function renderDecode(kind) {
   byId(pane.tree).replaceChildren(...(result.tree || []).map((node) => item(node, 0)));
 }
 
-// the pre whose spans the offsets of kind's tree count in: the payload, the body, or the bytes of a request target
+// the pre whose spans the offsets of kind's tree count in: the payload, the body, the bytes of a request target or the handshake records
 function bytesOf(kind) {
   if (kind === 'message') {
     return byId('payload');
+  }
+
+  if (kind === 'handshake') {
+    return byId('handshake-bytes');
   }
 
   const decoded = state.decodes.exchange;
@@ -660,6 +698,18 @@ async function selectNode(kind, id, isPaging) {
   }
 
   row.scrollIntoView({ block: 'nearest' });
+
+  // the handshake shows all its bytes, scroll to the first marked one
+  if (kind === 'handshake') {
+    markBytes(kind);
+    const first = bytesOf(kind).querySelector('.hl');
+
+    if (isPaging && first) {
+      first.scrollIntoView({ block: 'nearest' });
+    }
+
+    return;
+  }
 
   if (isPaging && node.length > 0 && !markBytes(kind)) {
     const start = Math.floor(node.offset / windowLength) * windowLength;
@@ -1097,6 +1147,19 @@ function start() {
     state.decodes.exchange = null;
     return selectExchange(state.exchangeId, state.exchangeOffset);
   }));
+  byId('handshake-decode-as').addEventListener('change', action(() => {
+    state.decodes.handshake = null;
+    return loadHandshake(state.flows.get(state.flowId));
+  }));
+
+  for (const radio of document.querySelectorAll('input[name="handshake-direction"]')) {
+    radio.addEventListener('change', action(() => {
+      state.handshakeDirection = radio.value;
+      return loadHandshake(state.flows.get(state.flowId));
+    }));
+  }
+
+  byId('handshake-bytes').addEventListener('click', (event) => onByteClick('handshake', event));
   byId('payload').addEventListener('click', (event) => onByteClick('message', event));
   byId('exchange-body').addEventListener('click', (event) => onByteClick('exchange', event));
   byId('exchange-decoded').addEventListener('click', (event) => onByteClick('exchange', event));

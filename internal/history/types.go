@@ -33,6 +33,8 @@ const (
 	maxInterimHeads int = 16
 	// a head the exchange limits have no room for keeps its start line only, with at most this much of its target
 	maxCutTarget int = 256
+	// the bytes of the handshake records one direction of a TLS or DTLS flow keeps, counted in the payload limits
+	MaxHandshakeBytes int = 16 << 10
 )
 
 // how much the history keeps: flows, messages and payload bytes in total and per flow, exchanges and their bytes in total and per flow
@@ -55,6 +57,8 @@ type Counters struct {
 }
 
 // values is what the scope filter knew of the flow when it was decided, clientRandom the one of its ClientHello, zero without one
+// handshake is by tlsrecord.Direction: its handshake, alert and change cipher spec records in their kept form (tlsrecord.AppendKept), isHandshakeCut
+// when a record did not fit
 // session comes from the messages once the record layer has it; traffic is by tlsrecord.Direction
 // upstreamCookie is the proxy's upstream socket of a flow of run mode, zero in capture mode
 type flowRecord struct {
@@ -75,6 +79,8 @@ type flowRecord struct {
 	exchangeIDs    []uint64
 	exchangeBytes  int64
 	http           *filter.HTTPValues
+	handshake      [2][]byte
+	isHandshakeCut [2]bool
 }
 
 // one exchange of a flow: its request and final response by api.Side, the 1xx responses before it; bytes is what it keeps of heads and bodies

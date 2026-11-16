@@ -3,6 +3,7 @@
 package tlsrecord
 
 import (
+	"encoding/binary"
 	"fmt"
 )
 
@@ -59,9 +60,11 @@ const (
 // Action and Raw are only set by an intercepting conn: Raw is the record as it came, header included, for ForwardAction and SealAction
 // a held record also carries what Encrypter needs: the write protection of its keys, the record header and the TLS 1.3 padding
 // a DTLS record has its Epoch and Sequence from its header, Datagram counts the datagrams of its direction and tells which records came in one; header holds its type and version
+// Version is the version of the record header as it came (the legacy 0x0303 of TLS 1.3, 0xfefd of DTLS 1.2)
 type Record struct {
 	Direction   Direction
 	ContentType ContentType
+	Version     uint16
 	Decrypted   bool
 	Epoch       uint16
 	Sequence    uint64
@@ -145,5 +148,21 @@ func VersionName(version uint16) (name string) {
 		name = fmt.Sprintf("0x%04x", version)
 	}
 
+	return
+}
+
+// the record as the history keeps a handshake: a record header with the content type (the inner one of a decrypted TLS 1.3 record), the version of the
+// header as it came and the length of the payload, then the payload, the plaintext of a decrypted record; a DTLS record has its 13-byte header with
+// its epoch and sequence number
+func AppendKept(buffer []byte, record Record, isDTLS bool) (kept []byte) {
+	kept = append(buffer, byte(record.ContentType), byte(record.Version>>8), byte(record.Version))
+
+	if isDTLS {
+		kept = binary.BigEndian.AppendUint16(kept, record.Epoch)
+		kept = append(kept, byte(record.Sequence>>40), byte(record.Sequence>>32), byte(record.Sequence>>24), byte(record.Sequence>>16), byte(record.Sequence>>8), byte(record.Sequence))
+	}
+
+	kept = binary.BigEndian.AppendUint16(kept, uint16(len(record.Payload)))
+	kept = append(kept, record.Payload...)
 	return
 }

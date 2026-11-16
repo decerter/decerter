@@ -32,6 +32,27 @@
   <section id="detail-pane">
     <h2 id="flow-title">No flow selected</h2>
     <dl id="flow-info"></dl>
+    <div id="handshake-view" hidden>
+      <div class="row toolbar">
+        <h3>Handshake</h3>
+        <label><input type="radio" name="handshake-direction" value="up" checked> client</label>
+        <label><input type="radio" name="handshake-direction" value="down"> server</label>
+        <span id="handshake-range" class="muted"></span>
+      </div>
+      <div class="decode-split">
+        <div id="handshake-decode" class="decode">
+          <div class="row">
+            <label>decode as <select id="handshake-decode-as" aria-label="decode the handshake records as"><option value="">auto</option></select></label>
+          </div>
+          <p id="handshake-decode-summary" class="decode-summary"></p>
+          <p id="handshake-decode-reason" class="muted"></p>
+          <ul id="handshake-decode-tree" class="tree" aria-label="decode tree of the handshake records"></ul>
+        </div>
+        <div class="decode-bytes">
+          <pre id="handshake-bytes" class="payload handshake-bytes"></pre>
+        </div>
+      </div>
+    </div>
     <table id="messages-table" hidden>
       <thead><tr><th>#</th><th>time</th><th>dir</th><th>layer</th><th class="number">length</th><th>verdict</th></tr></thead>
       <tbody id="messages"></tbody>

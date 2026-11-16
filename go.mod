@@ -23,6 +23,7 @@ require (
 	github.com/spf13/viper v1.21.0
 	golang.org/x/arch v0.33.0
 	golang.org/x/net v0.62.0
+	google.golang.org/protobuf v1.36.12
 )
 
 require (

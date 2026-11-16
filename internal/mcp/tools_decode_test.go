@@ -14,7 +14,8 @@ import (
 )
 
 // Test if decode_message and decode_exchange_body return with the expected output: the note, decerter's metadata outside the marker, the summary and tree as JSON inside it
-// with every string escaped again (a marker and a raw escape byte in a value), as and original passed on, max_nodes cutting the tree and a request target's bytes in their own marker.
+// with every string escaped again (a marker and a raw escape byte in a value), as and original passed on, max_nodes cutting the tree, a request target's bytes in their own marker
+// and decode_flow's handshake bytes in theirs only with data.
 func TestDecodeToolsPositive(state *testing.T) {
 	session := connect(state, startFakeAPI(state), state.TempDir(), false)
 	metadata := DecodeResult{}
@@ -57,9 +58,30 @@ func TestDecodeToolsPositive(state *testing.T) {
 		(inMarker(text, "x3-response-target") != "</u>") || (len(tree.Tree) != 1) {
 		state.Errorf("Test of decode_exchange_body failed, the tree and the target bytes should be in their markers, metadata: %+v, error: %v, text: %s", metadata, treeErr, text)
 	}
+
+	// decode_flow: the direction passed on, the handshake bytes only with data
+	for _, isData := range []bool{false, true} {
+		metadata = DecodeResult{}
+		text, isError = call(state, session, "decode_flow", map[string]any{"id": 7, "direction": "down", "data": isData, "hex": true, "as": "tls"}, &metadata)
+		tree = DecodeTree{}
+		treeErr = json.Unmarshal([]byte(inMarker(text, "f7-down-decode")), &tree)
+		handshake := inMarker(text, "f7-down-handshake")
+
+		if isError || (treeErr != nil) || (metadata.FlowID != 7) || (metadata.Direction != v1.DownDirection) || !metadata.HandshakeCut || (metadata.Source != v1.HandshakeDecodeSource) || (len(tree.Tree) != 1) ||
+			(metadata.Candidates[0].Reason != "as=tls original=") || ((metadata.Data != nil) != isData) || ((handshake == `\x16\x03\x01\x00\x01<`) != isData) {
+			state.Errorf("Test of decode_flow failed, data %v, the tree should be in its marker and the bytes only with data, metadata: %+v, error: %v, text: %s", isData, metadata, treeErr, text)
+		}
+	}
+
+	metadata = DecodeResult{}
+	text, isError = call(state, session, "decode_flow", map[string]any{"id": 7}, &metadata)
+
+	if isError || !strings.Contains(text, "f7-up-decode") || (metadata.Direction != v1.UpDirection) {
+		state.Errorf("Test of decode_flow failed, the direction should be up by default, metadata: %+v, text: %s", metadata, text)
+	}
 }
 
-// Test if decode_message and decode_exchange_body return with the expected errors: an unknown message and a max_nodes out of its bounds.
+// Test if decode_message, decode_exchange_body and decode_flow return with the expected errors: a max_nodes out of its bounds, an unknown side or direction, a flow without handshake records.
 func TestDecodeToolsNegative(state *testing.T) {
 	session := connect(state, startFakeAPI(state), state.TempDir(), false)
 
@@ -73,5 +95,13 @@ func TestDecodeToolsNegative(state *testing.T) {
 
 	if text, isError := call(state, session, "decode_exchange_body", map[string]any{"id": 3, "side": "trailer"}, nil); !isError {
 		state.Errorf("Test of decode_exchange_body failed, side trailer should be refused, text: %s", text)
+	}
+
+	if text, isError := call(state, session, "decode_flow", map[string]any{"id": 8}, nil); !isError || !strings.Contains(text, "no handshake records") {
+		state.Errorf("Test of decode_flow failed, a flow without handshake records should be an error, text: %s", text)
+	}
+
+	if text, isError := call(state, session, "decode_flow", map[string]any{"id": 7, "direction": "sideways"}, nil); !isError {
+		state.Errorf("Test of decode_flow failed, direction sideways should be refused, text: %s", text)
 	}
 }

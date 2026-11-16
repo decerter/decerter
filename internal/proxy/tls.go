@@ -154,6 +154,8 @@ func stopOrPrint(conn *tlsrecord.Conn, observer *TLSObserver, records []tlsrecor
 	session := conn.Session()
 
 	for _, record := range records {
+		observer.recorder.KeepHandshake(observer.interceptFlow.ID, record, false)
+
 		if !record.Decrypted || (record.ContentType != tlsrecord.ApplicationDataContentType) {
 			continue
 		}

@@ -4,6 +4,7 @@ package tlsrecord
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 )
 
@@ -349,6 +350,7 @@ func forwardRecord(direction Direction, raw []byte) (record Record) {
 	record = Record{
 		Direction:   direction,
 		ContentType: ContentType(raw[0]),
+		Version:     binary.BigEndian.Uint16(raw[1:]),
 		Decrypted:   false,
 		Sequence:    0,
 		Length:      len(raw),
@@ -413,6 +415,7 @@ func (conn *Conn) process(half *half, records []Record) (result []Record, err er
 		record := Record{
 			Direction:   half.direction,
 			ContentType: contentType,
+			Version:     binary.BigEndian.Uint16(header[1:]),
 			Decrypted:   false,
 			Sequence:    0,
 			Length:      length,
@@ -457,6 +460,7 @@ func (conn *Conn) open(half *half, contentType ContentType, header []byte, paylo
 	record = Record{
 		Direction:   half.direction,
 		ContentType: contentType,
+		Version:     binary.BigEndian.Uint16(header[1:]),
 		Decrypted:   true,
 		Sequence:    half.sequence,
 		Length:      len(header) + len(payload),

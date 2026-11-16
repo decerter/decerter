@@ -463,3 +463,17 @@ func messageOf(record *httpRecord) (message api.HTTPMessage) {
 
 	return
 }
+
+// the newest exchange of a flow, the one an HTTP/1 Upgrade ends with
+func (history *History) LastExchange(flowID uint64) (exchange api.Exchange, found bool) {
+	history.mutex.RLock()
+	defer history.mutex.RUnlock()
+	flow, isFlow := history.flows[flowID]
+
+	if !isFlow || (len(flow.exchangeIDs) == 0) {
+		return
+	}
+
+	exchange, found = exchangeView(history.exchanges[flow.exchangeIDs[len(flow.exchangeIDs)-1]]), true
+	return
+}

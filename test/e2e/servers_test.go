@@ -184,6 +184,9 @@ func (server testServer) handle(writer http.ResponseWriter, request *http.Reques
 	case grpcPath:
 		server.answerGRPC(writer, request, received)
 		return
+	case grpcProtoPath:
+		server.answerGRPCProto(writer, request, received)
+		return
 	default:
 	}
 

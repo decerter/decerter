@@ -78,6 +78,51 @@ func decodeExchangeBody(client Client) (handle sdk.ToolHandlerFor[DecodeExchange
 	return
 }
 
+// the decode tree of the handshake records of one direction of a TLS or DTLS flow, in the marker f<id>-<direction>-decode; the bytes only with data, escaped
+// in the marker f<id>-<direction>-handshake
+func decodeFlow(client Client) (handle sdk.ToolHandlerFor[DecodeFlowInput, any]) {
+	handle = func(ctx context.Context, request *sdk.CallToolRequest, input DecodeFlowInput) (result *sdk.CallToolResult, output any, err error) {
+		direction := input.Direction
+
+		if direction == "" {
+			direction = v1.UpDirection
+		}
+
+		query := decodeQuery(input.As, false)
+		query.Set("part", string(v1.HandshakeFlowPart))
+		query.Set("direction", string(direction))
+		decoded := v1.Decode{}
+		err = client.getJSON(ctx, "/flows/"+strconv.FormatUint(input.ID, 10)+"/decode", query, &decoded)
+
+		if err != nil {
+			return
+		}
+
+		metadata, tree := splitDecode(decoded, input.MaxNodes)
+		id := "f" + strconv.FormatUint(decoded.FlowID, 10) + "-" + string(direction)
+		payloads, err := decodePayloads(id, tree)
+
+		if err != nil {
+			return
+		}
+
+		if input.Data && (decoded.Data != nil) {
+			data, windowErr := apiWindow(*decoded.Data)
+
+			if err = windowErr; err != nil {
+				return
+			}
+
+			metadata.Data = new(data.metadata(input.Hex))
+			payloads = append(payloads, Wrap(id+"-handshake", data.PayloadEscaped))
+		}
+
+		result, err = untrustedResult(metadata, payloads, true)
+		return
+	}
+	return
+}
+
 func decodeQuery(as string, isOriginal bool) (query url.Values) {
 	query = url.Values{}
 
@@ -96,20 +141,23 @@ func decodeQuery(as string, isOriginal bool) (query url.Values) {
 func splitDecode(decoded v1.Decode, maxNodes int) (metadata DecodeResult, tree DecodeTree) {
 	budget := maxNodes
 	metadata = DecodeResult{
-		MessageID:  decoded.MessageID,
-		ExchangeID: decoded.ExchangeID,
-		Side:       decoded.Side,
-		Source:     decoded.Source,
-		Protocol:   escapeDecoded(decoded.Protocol),
-		Length:     decoded.Length,
-		Total:      decoded.Total,
-		Truncated:  decoded.Truncated,
-		Nodes:      0,
-		Cut:        false,
-		Candidates: []v1.DecodeCandidate{},
-		Error:      escapeDecoded(decoded.Error),
-		Protocols:  []string{},
-		Data:       nil,
+		MessageID:    decoded.MessageID,
+		ExchangeID:   decoded.ExchangeID,
+		Side:         decoded.Side,
+		FlowID:       decoded.FlowID,
+		Direction:    decoded.Direction,
+		HandshakeCut: decoded.Cut,
+		Source:       decoded.Source,
+		Protocol:     escapeDecoded(decoded.Protocol),
+		Length:       decoded.Length,
+		Total:        decoded.Total,
+		Truncated:    decoded.Truncated,
+		Nodes:        0,
+		Cut:          false,
+		Candidates:   []v1.DecodeCandidate{},
+		Error:        escapeDecoded(decoded.Error),
+		Protocols:    []string{},
+		Data:         nil,
 	}
 
 	for _, candidate := range decoded.Candidates {

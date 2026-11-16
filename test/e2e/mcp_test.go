@@ -41,7 +41,7 @@ const (
 )
 
 var (
-	readTools  = []string{"decode_exchange_body", "decode_message", "download_pcap", "export_keylog", "export_pcap", "get_exchange", "get_exchange_body", "get_flow", "get_message", "list_captures", "list_exchanges", "list_flows", "list_held", "list_messages", "list_rules", "status", "tail_events"}
+	readTools  = []string{"decode_exchange_body", "decode_flow", "decode_message", "download_pcap", "export_keylog", "export_pcap", "get_exchange", "get_exchange_body", "get_flow", "get_message", "list_captures", "list_exchanges", "list_flows", "list_held", "list_messages", "list_rules", "status", "tail_events"}
 	writeTools = []string{"add_rule", "delete_rule", "drop_held", "edit_held", "forward_held", "set_intercept", "start_capture", "stop_capture"}
 )
 

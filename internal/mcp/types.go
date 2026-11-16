@@ -207,23 +207,26 @@ type ExchangeBodyResult struct {
 	Original   *PayloadWindow `json:"original,omitzero"`
 }
 
-// decode_message and decode_exchange_body: what decerter says about the decode; the tree itself (DecodeTree) is in its marker, it comes from the traffic
+// decode_message, decode_exchange_body and decode_flow: what decerter says about the decode; the tree itself (DecodeTree) is in its marker, it comes from the traffic
 // Nodes counts the nodes of the tree, Cut is true when max_nodes left some out; Data is the window of the bytes a request target carried, which the offsets count from
 type DecodeResult struct {
-	MessageID  uint64               `json:"message_id,omitzero"`
-	ExchangeID uint64               `json:"exchange_id,omitzero"`
-	Side       v1.Side              `json:"side,omitzero"`
-	Source     v1.DecodeSource      `json:"source" jsonschema:"the bytes the offsets count from: payload (get_message's), body (get_exchange_body's) or target (data)"`
-	Protocol   string               `json:"protocol"`
-	Length     int                  `json:"length"`
-	Total      int                  `json:"total"`
-	Truncated  bool                 `json:"truncated"`
-	Nodes      int                  `json:"nodes"`
-	Cut        bool                 `json:"cut,omitzero"`
-	Candidates []v1.DecodeCandidate `json:"candidates"`
-	Error      string               `json:"error,omitzero"`
-	Protocols  []string             `json:"protocols"`
-	Data       *PayloadWindow       `json:"data,omitzero"`
+	MessageID    uint64               `json:"message_id,omitzero"`
+	ExchangeID   uint64               `json:"exchange_id,omitzero"`
+	Side         v1.Side              `json:"side,omitzero"`
+	FlowID       uint64               `json:"flow_id,omitzero"`
+	Direction    v1.Direction         `json:"direction,omitzero"`
+	HandshakeCut bool                 `json:"handshake_cut,omitzero" jsonschema:"a handshake record did not fit the 16 KiB decerter keeps per direction"`
+	Source       v1.DecodeSource      `json:"source" jsonschema:"the bytes the offsets count from: payload (get_message's), body (get_exchange_body's), target or handshake (data)"`
+	Protocol     string               `json:"protocol"`
+	Length       int                  `json:"length"`
+	Total        int                  `json:"total"`
+	Truncated    bool                 `json:"truncated"`
+	Nodes        int                  `json:"nodes"`
+	Cut          bool                 `json:"cut,omitzero"`
+	Candidates   []v1.DecodeCandidate `json:"candidates"`
+	Error        string               `json:"error,omitzero"`
+	Protocols    []string             `json:"protocols"`
+	Data         *PayloadWindow       `json:"data,omitzero"`
 }
 
 // the part of a decode that comes from the traffic, as JSON inside its marker: the summary line and the tree, every string escaped
@@ -411,7 +414,7 @@ type GetExchangeBodyInput struct {
 
 type DecodeMessageInput struct {
 	ID       uint64 `json:"id" jsonschema:"the message id"`
-	As       string `json:"as,omitzero" jsonschema:"Decode As: a protocol of protocols (dns, raw for none); empty lets decerter choose by context, port and the bytes"`
+	As       string `json:"as,omitzero" jsonschema:"Decode As: a protocol of protocols (dns, tls, websocket, protobuf, raw for none ...); empty lets decerter choose by context, port and the bytes"`
 	Original bool   `json:"original,omitzero" jsonschema:"decode what the peer sent when a rule or an edit changed the message"`
 	MaxNodes int    `json:"max_nodes,omitzero" jsonschema:"the nodes of the tree this call returns, in tree order; cut says when some were left out"`
 }
@@ -419,10 +422,19 @@ type DecodeMessageInput struct {
 type DecodeExchangeBodyInput struct {
 	ID       uint64  `json:"id" jsonschema:"the exchange id from list_exchanges"`
 	Side     v1.Side `json:"side,omitzero" jsonschema:"request (default) or response"`
-	As       string  `json:"as,omitzero" jsonschema:"Decode As: a protocol of protocols (dns, raw for none); empty lets decerter choose by content type, ALPN and the bytes"`
+	As       string  `json:"as,omitzero" jsonschema:"Decode As: a protocol of protocols (dns, grpc, protobuf, websocket, raw for none ...); empty lets decerter choose by content type, ALPN and the bytes"`
 	Original bool    `json:"original,omitzero" jsonschema:"decode the body the peer sent when a rule or an edit of layer http changed it"`
 	MaxNodes int     `json:"max_nodes,omitzero" jsonschema:"the nodes of the tree this call returns, in tree order; cut says when some were left out"`
 	Hex      bool    `json:"hex,omitzero" jsonschema:"also return data (the bytes of a request target) as lowercase hex in payload_hex"`
+}
+
+type DecodeFlowInput struct {
+	ID        uint64       `json:"id" jsonschema:"the flow id from list_flows"`
+	Direction v1.Direction `json:"direction,omitzero" jsonschema:"up (default): the client's handshake records, down: the server's"`
+	As        string       `json:"as,omitzero" jsonschema:"Decode As: a protocol of protocols (tls, dtls, raw for none); empty takes tls, dtls for a udp flow"`
+	MaxNodes  int          `json:"max_nodes,omitzero" jsonschema:"the nodes of the tree this call returns, in tree order; cut says when some were left out"`
+	Data      bool         `json:"data,omitzero" jsonschema:"also return the handshake bytes, escaped in the marker f<id>-<direction>-handshake (at most 16 KiB)"`
+	Hex       bool         `json:"hex,omitzero" jsonschema:"with data, also return the bytes as lowercase hex in payload_hex"`
 }
 
 type ListHeldInput struct {

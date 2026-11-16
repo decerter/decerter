@@ -197,7 +197,7 @@ func handleTCP(ctx context.Context, client *net.TCPConn, bpfMaps map[bpf.BpfMapN
 	}
 
 	if pipeline != nil {
-		upBytes, downBytes := interceptTCP(ctx, client, upstream, opening, interceptFlow, pipeline, secretsBpfMaps, flowHTTP, logger)
+		upBytes, downBytes := interceptTCP(ctx, client, upstream, opening, interceptFlow, pipeline, secretsBpfMaps, flowHTTP, recorder, logger)
 		recorder.CloseFlow(flowID, history.Counters{Bytes: upBytes, Datagrams: 0}, history.Counters{Bytes: downBytes, Datagrams: 0})
 		printFlow(flow, cmdline, clientAddressPort, strconv.FormatInt(upBytes, 10)+"B", strconv.FormatInt(downBytes, 10)+"B", time.Since(startTime))
 		return

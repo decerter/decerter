@@ -60,6 +60,7 @@ func routes() (operations []route) {
 		{method: http.MethodGet, path: "/flows", operationID: "listFlows", handle: listFlows},
 		{method: http.MethodGet, path: "/flows/{id}", operationID: "getFlow", handle: getFlow},
 		{method: http.MethodGet, path: "/flows/{id}/messages", operationID: "listMessages", handle: listMessages},
+		{method: http.MethodGet, path: "/flows/{id}/decode", operationID: "decodeFlow", handle: decodeFlow},
 		{method: http.MethodGet, path: "/messages/{id}", operationID: "getMessage", handle: getMessage},
 		{method: http.MethodGet, path: "/messages/{id}/decode", operationID: "decodeMessage", handle: decodeMessage},
 		{method: http.MethodGet, path: "/flows/{id}/exchanges", operationID: "listExchanges", handle: listExchanges},

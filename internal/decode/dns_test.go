@@ -172,7 +172,7 @@ func TestTransportsPositive(state *testing.T) {
 	}
 
 	// DoH POST: the content type, no port
-	doh := Context{Transport: BodyTransport, Layer: "", Direction: v1.UpDirection, ServerPort: 8443, ALPN: "h2", ContentType: "application/dns-message", Upgrade: "", Method: "POST", Target: "/dns-query"}
+	doh := Context{Transport: BodyTransport, Layer: "", Direction: v1.UpDirection, ServerPort: 8443, ALPN: "h2", ContentType: "application/dns-message", Upgrade: "", Method: "POST", Target: "/dns-query", Encoding: "", Extensions: "", Handshake: false}
 	result = mustDecode(state, query, doh, "")
 
 	if (result.Protocol != dnsProtocol) || (result.Candidates[0].Basis != v1.ContextDecodeBasis) || (result.Candidates[0].Reason != "content type application/dns-message is DNS over HTTPS") {
@@ -212,7 +212,7 @@ func TestTransportsPositive(state *testing.T) {
 	// Decode As raw over the port
 	result = mustDecode(state, query, udpContext, RawProtocol)
 
-	if (result.Protocol != RawProtocol) || (len(result.Tree) != 1) || (result.Tree[0].Length != len(query)) || (result.Candidates[0].Basis != v1.OverrideDecodeBasis) || !slices.Equal(result.Protocols, []string{"dns", "raw"}) {
+	if (result.Protocol != RawProtocol) || (len(result.Tree) != 1) || (result.Tree[0].Length != len(query)) || (result.Candidates[0].Basis != v1.OverrideDecodeBasis) || !slices.Equal(result.Protocols, []string{"dns", "dtls", "grpc", "protobuf", "tls", "websocket", "raw"}) {
 		state.Errorf("Test of Decode As raw failed, the tree should be one raw node, result: %+v", result)
 	}
 }
@@ -274,7 +274,7 @@ func TestMalformedNegative(state *testing.T) {
 func TestDecodeNegative(state *testing.T) {
 	_, err := Decode([]byte{1}, udpContext, "nosuch")
 
-	if (err == nil) || !strings.Contains(err.Error(), `as "nosuch", valid values: dns, raw`) {
+	if (err == nil) || !strings.Contains(err.Error(), `as "nosuch", valid values: dns, dtls, grpc, protobuf, tls, websocket, raw`) {
 		state.Errorf("Test of decode.Decode failed, an unknown as should be an error, error: %v", err)
 	}
 

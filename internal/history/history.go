@@ -96,6 +96,8 @@ func (history *History) openFlow(cookie uint64, values filter.Values, clientRand
 		exchangeIDs:    nil,
 		exchangeBytes:  0,
 		http:           nil,
+		handshake:      [2][]byte{},
+		isHandshakeCut: [2]bool{},
 	}
 	history.flows[record.id] = record
 	history.order = append(history.order, record.id)
@@ -552,6 +554,9 @@ func flowView(record *flowRecord) (flow api.Flow) {
 		PayloadBytes: record.payloadBytes,
 		Truncated:    record.isTruncated,
 	}
+
+	flow.Up.HandshakeBytes = len(record.handshake[tlsrecord.ClientDirection])
+	flow.Down.HandshakeBytes = len(record.handshake[tlsrecord.ServerDirection])
 
 	if !record.isOpen {
 		flow.State = api.ClosedFlowState

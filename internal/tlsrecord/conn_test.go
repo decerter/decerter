@@ -339,6 +339,11 @@ func feedSession(limit int, chunks []chunk, secrets tlsrecord.Secrets, held bool
 	isSet := false
 	collect := func(records []tlsrecord.Record) {
 		for _, record := range records {
+			// every record has the version of its header, 3.1 to 3.3
+			if (record.Version < 0x0301) || (record.Version > tlsrecord.VersionTLS12) {
+				err = errors.Join(err, fmt.Errorf("record.Version was not of a record header: 0x%04x", record.Version))
+			}
+
 			if record.Decrypted && (record.ContentType == tlsrecord.ApplicationDataContentType) {
 				plain[record.Direction] = append(plain[record.Direction], record.Payload...)
 				order = append(order, record.Direction)

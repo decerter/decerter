@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/decerter/decerter/internal/bpf"
+	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/output"
 	"github.com/decerter/decerter/internal/tlsrecord"
@@ -98,11 +99,12 @@ type interception struct {
 	spinGroup   *sync.WaitGroup
 	stats       [2]sendStats
 	http        *httpFlow
+	recorder    *history.History
 	logger      *slog.Logger
 }
 
-// an interception of a tcp flow, undecided until its first bytes
-func newInterception(flow intercept.Flow, pipeline *intercept.Pipeline, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, httpFlow *httpFlow, logger *slog.Logger) (flowInterception *interception) {
+// an interception of a tcp flow, undecided until its first bytes; recorder keeps the handshake records of a TLS flow, nil keeps none
+func newInterception(flow intercept.Flow, pipeline *intercept.Pipeline, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, httpFlow *httpFlow, recorder *history.History, logger *slog.Logger) (flowInterception *interception) {
 	flowInterception = &interception{
 		flow:      flow,
 		pipeline:  pipeline,
@@ -110,6 +112,7 @@ func newInterception(flow intercept.Flow, pipeline *intercept.Pipeline, secretsB
 		conn:      tlsrecord.New(maxHoldBytes, true),
 		spinGroup: &sync.WaitGroup{},
 		http:      httpFlow,
+		recorder:  recorder,
 		logger:    logger,
 	}
 	hooks := secretsHooks{
@@ -132,11 +135,11 @@ func newInterception(flow intercept.Flow, pipeline *intercept.Pipeline, secretsB
 // TLS needs secretsBpfMaps, without them a TLS flow is relayed raw; plain tcp goes through the rules either way
 // opening are the bytes read before the scope was decided, they are taken first in the order they came
 // the rules get a context that ends with the flow, so a message held for the API is let go when the flow is aborted
-// httpFlow is the HTTP layer of the flow after the record rules, nil without one
-func interceptTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn, opening []TLSChunk, flow intercept.Flow, pipeline *intercept.Pipeline, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, httpFlow *httpFlow, logger *slog.Logger) (upBytes int64, downBytes int64) {
+// httpFlow is the HTTP layer of the flow after the record rules, nil without one; recorder keeps the handshake records, nil keeps none
+func interceptTCP(ctx context.Context, client *net.TCPConn, upstream *net.TCPConn, opening []TLSChunk, flow intercept.Flow, pipeline *intercept.Pipeline, secretsBpfMaps map[bpf.BpfMapName]*ebpf.Map, httpFlow *httpFlow, recorder *history.History, logger *slog.Logger) (upBytes int64, downBytes int64) {
 	flowCtx, cancelFlow := context.WithCancel(ctx)
 	defer cancelFlow()
-	interception := newInterception(flow, pipeline, secretsBpfMaps, httpFlow, logger)
+	interception := newInterception(flow, pipeline, secretsBpfMaps, httpFlow, recorder, logger)
 
 	if httpFlow != nil {
 		httpFlow.notify = interception.wakeHTTP
@@ -363,11 +366,12 @@ func (interception *interception) giveUp(reason error) {
 	interception.mode = rawInterceptMode
 }
 
-// records with something to send or to print go to the queue of their direction
+// records with something to send or to print go to the queue of their direction, the history keeps a copy of the handshake records
 func (interception *interception) pushRecords(records []tlsrecord.Record) {
 	session := interception.conn.Session()
 
 	for _, record := range records {
+		interception.recorder.KeepHandshake(interception.flow.ID, record, false)
 		isApplicationData := record.Decrypted && (record.ContentType == tlsrecord.ApplicationDataContentType)
 
 		if (record.Action == tlsrecord.ShowAction) && !isApplicationData {

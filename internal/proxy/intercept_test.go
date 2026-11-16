@@ -124,7 +124,7 @@ func interceptTLS(state *testing.T, testCase interceptCase) (result interceptRes
 		go func() {
 			hello := readClientOpening(proxyClient)
 			opening := []TLSChunk{{direction: tlsrecord.ClientDirection, data: hello.data}}
-			upBytes, downBytes := interceptTCP(state.Context(), proxyClient, proxyUpstream, opening, flow, pipeline, secretsMaps, flowHTTP, logger)
+			upBytes, downBytes := interceptTCP(state.Context(), proxyClient, proxyUpstream, opening, flow, pipeline, secretsMaps, flowHTTP, nil, logger)
 
 			// as handleTCP does, an aborted flow ends for its peers here
 			if closeErr := errors.Join(proxyClient.Close(), proxyUpstream.Close()); closeErr != nil {
@@ -298,7 +298,7 @@ func TestInterceptTLSNegative(state *testing.T) {
 
 // an interception of flow 1 as interceptTCP makes it, without its sockets
 func newTestInterception(secretsMaps map[bpf.BpfMapName]*ebpf.Map, pipeline *intercept.Pipeline, flowHTTP *httpFlow, logger *slog.Logger) (flowInterception *interception) {
-	flowInterception = newInterception(intercept.FlowOf(1, 1, testFlow, testClient, filter.Values{}), pipeline, secretsMaps, flowHTTP, logger)
+	flowInterception = newInterception(intercept.FlowOf(1, 1, testFlow, testClient, filter.Values{}), pipeline, secretsMaps, flowHTTP, nil, logger)
 	return
 }
 
@@ -474,7 +474,7 @@ func TestInterceptTCPNegative(state *testing.T) {
 
 	// the proxy in the middle
 	go func() {
-		upBytes, downBytes := interceptTCP(state.Context(), proxyClient, proxyUpstream, nil, intercept.FlowOf(1, 1, testFlow, testClient, filter.Values{}), intercept.New(nil, nil, nil), nil, nil, logger)
+		upBytes, downBytes := interceptTCP(state.Context(), proxyClient, proxyUpstream, nil, intercept.FlowOf(1, 1, testFlow, testClient, filter.Values{}), intercept.New(nil, nil, nil), nil, nil, nil, logger)
 		doneChannel <- [2]int64{upBytes, downBytes}
 	}()
 

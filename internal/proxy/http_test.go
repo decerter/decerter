@@ -178,7 +178,7 @@ func TestInterceptHTTPNegative(state *testing.T) {
 
 	// the proxy in the middle
 	go func() {
-		interceptTCP(state.Context(), proxyClient, proxyUpstream, nil, flow, pipeline, nil, flowHTTP, logger)
+		interceptTCP(state.Context(), proxyClient, proxyUpstream, nil, flow, pipeline, nil, flowHTTP, nil, logger)
 		close(doneChannel)
 	}()
 

@@ -199,6 +199,8 @@ func (dtls *dtlsInterception) show(records []tlsrecord.Record) {
 	session := dtls.conn.Session()
 
 	for _, record := range records {
+		dtls.recorder.KeepHandshake(dtls.flow.ID, record, true)
+
 		if !record.Decrypted || (record.ContentType != tlsrecord.ApplicationDataContentType) {
 			continue
 		}
@@ -221,6 +223,7 @@ func (dtls *dtlsInterception) pushRecords(records []tlsrecord.Record) {
 	session := dtls.conn.Session()
 
 	for _, record := range records {
+		dtls.recorder.KeepHandshake(dtls.flow.ID, record, true)
 		isApplicationData := record.Decrypted && (record.ContentType == tlsrecord.ApplicationDataContentType)
 
 		if (record.Action == tlsrecord.ShowAction) && !isApplicationData {

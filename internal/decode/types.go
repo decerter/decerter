@@ -23,6 +23,10 @@ const (
 	RawProtocol string = "raw"
 	// \xNN of a byte the last pass finds outside printable ASCII
 	hexDigits string = "0123456789abcdef"
+	// the bytes one value shows of a text field (a protobuf string, a WebSocket text frame), the node still spans the whole field
+	maxTextBytes int = 1024
+	// the bytes a decoder inflates of one compressed payload (gRPC gzip, WebSocket permessage-deflate)
+	maxInflatedBytes int = 1 << 20
 )
 
 // how a payload came, which decides its framing
@@ -38,7 +42,9 @@ const (
 )
 
 // what is known about a payload besides its bytes: the layer and port of its flow, the TLS ALPN, and for an HTTP body the fields of its message
-// ContentType, Upgrade, Method and Target are only set for a body; Target is the request target of the exchange
+// ContentType, Method, Target and Encoding are only set for a body; Target is the request target of the exchange, Encoding its grpc-encoding
+// Upgrade is the protocol an HTTP/1 Upgrade (101) switched the flow to, for a message after it, or the :protocol of an HTTP/2 extended CONNECT for its body;
+// Extensions is the Sec-WebSocket-Extensions the server answered it with; Handshake is set for the handshake records the history kept of a TLS or DTLS flow
 type Context struct {
 	Transport   Transport
 	Layer       v1.Layer
@@ -49,6 +55,9 @@ type Context struct {
 	Upgrade     string
 	Method      string
 	Target      string
+	Encoding    string
+	Extensions  string
+	Handshake   bool
 }
 
 // a port a protocol is known by, on a record layer (tcp, tls, udp, dtls)
@@ -140,4 +149,106 @@ type rdataReader struct {
 	offset  int
 	end     int
 	isShort bool
+}
+
+// one run of bytes a decoder reads that lies elsewhere in the source: bytes from..from+length are source bytes at..at+length
+type segment struct {
+	from   int
+	at     int
+	length int
+}
+
+// where the nodes of the bytes a decoder reads go in the source: at base on, through segments when the bytes were put together from pieces
+// (a TLS handshake message over records), or every node spans the fixed bytes when the bytes are not in the source (inflated)
+type placement struct {
+	base        int
+	segments    []segment
+	isFixed     bool
+	fixedOffset int
+	fixedLength int
+}
+
+// fields read in order from data: offset is the next byte, end the end of the fields; place puts them into the source
+// isShort is set by the first field that does not fit, the fields after it are left out
+type cursor struct {
+	tree    *Tree
+	parent  *node
+	data    []byte
+	offset  int
+	end     int
+	place   placement
+	isShort bool
+}
+
+// what the extensions of a hello may hold
+type helloKind uint8
+
+const (
+	clientHelloKind         helloKind = 1
+	serverHelloKind         helloKind = 2
+	helloRetryKind          helloKind = 3
+	encryptedExtensionsKind helloKind = 4
+	certificateKind         helloKind = 5
+	newSessionTicketKind    helloKind = 6
+	certificateRequestKind  helloKind = 7
+)
+
+// one decode of TLS or DTLS records: isKept for the handshake decerter kept (decrypted records are plaintext there), version and cipherSuite as a ServerHello
+// of the decode selected them; isEncrypted once the records on the wire are protected; pending is the start of a handshake message that goes on in the next
+// record with its total length (0 while its header is cut) and its pieces; summary lists the messages
+type tlsState struct {
+	isDTLS       bool
+	isKept       bool
+	version      uint16
+	cipherSuite  uint16
+	isEncrypted  bool
+	pending      []byte
+	pendingTotal int
+	segments     []segment
+	summary      []string
+}
+
+// what a hello says for its summary and its fingerprints: the values in the order they came, GREASE values included
+// selectedVersion is the supported_versions of a ServerHello, selected the version it agrees on
+type helloInfo struct {
+	version         uint16
+	ciphers         []uint16
+	extensions      []uint16
+	groups          []uint16
+	pointFormats    []uint16
+	signatures      []uint16
+	alpn            []string
+	firstALPN       []byte
+	versions        []uint16
+	serverName      string
+	hasServerName   bool
+	selectedVersion uint16
+	selected        uint16
+}
+
+// the header of one WebSocket frame: start is its first byte, payloadStart the first byte of its payload, key the masking key when isMasked
+type websocketFrame struct {
+	start        int
+	isFin        bool
+	rsv          byte
+	opcode       byte
+	isMasked     bool
+	length       uint64
+	lengthBytes  int
+	key          [4]byte
+	payloadStart int
+}
+
+// one decode of WebSocket frames: the message that goes on over frames (its opcode, 0 for none, isCompressed, the payload of its frames in joined and
+// where they are in parts, firstStart its first frame), the frames so far and the summary of each
+type websocketState struct {
+	isDeflate    bool
+	opcode       byte
+	isCompressed bool
+	parts        []segment
+	joined       []byte
+	firstStart   int
+	frames       int
+	summary      []string
+	context      Context
 }

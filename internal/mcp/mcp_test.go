@@ -145,6 +145,17 @@ func startFakeAPI(state *testing.T) (target ui.Target) {
 		result.Data = &v1.Payload{Offset: 0, Length: 4, Total: 4, Hex: "3c2f753e", Escaped: "not used"}
 		writeJSON(writer, http.StatusOK, result)
 	})
+	mux.HandleFunc("GET /api/v1/flows/{id}/decode", func(writer http.ResponseWriter, request *http.Request) {
+		if (request.PathValue("id") != "7") || (request.URL.Query().Get("part") != "handshake") {
+			writeJSON(writer, http.StatusNotFound, v1.Error{Error: "not found: no handshake records of flow " + request.PathValue("id")})
+			return
+		}
+
+		result := decoded(request)
+		result.FlowID, result.Direction, result.Cut, result.Source = 7, v1.Direction(request.URL.Query().Get("direction")), true, v1.HandshakeDecodeSource
+		result.Data = &v1.Payload{Offset: 0, Length: 6, Total: 6, Hex: "16030100013c", Escaped: "not used"}
+		writeJSON(writer, http.StatusOK, result)
+	})
 	mux.HandleFunc("GET /api/v1/holds", func(writer http.ResponseWriter, request *http.Request) {
 		holds := v1.HoldList{Holds: []v1.Hold{}}
 
@@ -345,12 +356,12 @@ func inMarker(text string, id string) (escaped string) {
 }
 
 // the read tools whose results have traffic data
-var trafficTools = []string{"decode_exchange_body", "decode_message", "get_exchange", "get_exchange_body", "get_flow", "get_message", "list_exchanges", "list_flows", "list_held", "tail_events"}
+var trafficTools = []string{"decode_exchange_body", "decode_flow", "decode_message", "get_exchange", "get_exchange_body", "get_flow", "get_message", "list_exchanges", "list_flows", "list_held", "tail_events"}
 
 // Test if the server without --allow-write lists exactly the read tools, each annotated read-only and closed-world, those with traffic data without an output schema, with the bounds of their arguments, and its instructions say that --allow-write adds the write tools.
 func TestListToolsPositive(state *testing.T) {
 	session := connect(state, startFakeAPI(state), state.TempDir(), false)
-	expected := []string{"decode_exchange_body", "decode_message", "download_pcap", "export_keylog", "export_pcap", "get_exchange", "get_exchange_body", "get_flow", "get_message", "list_captures", "list_exchanges", "list_flows", "list_held", "list_messages", "list_rules", "status", "tail_events"}
+	expected := []string{"decode_exchange_body", "decode_flow", "decode_message", "download_pcap", "export_keylog", "export_pcap", "get_exchange", "get_exchange_body", "get_flow", "get_message", "list_captures", "list_exchanges", "list_flows", "list_held", "list_messages", "list_rules", "status", "tail_events"}
 	names := []string{}
 
 	for tool, err := range session.Tools(state.Context(), nil) {

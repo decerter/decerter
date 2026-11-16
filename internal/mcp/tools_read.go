@@ -21,7 +21,8 @@ import (
 // the read tools, one per GET operation of api/openapi.yaml except streamCapture; each is annotated read-only and closed-world
 // tool name, operationId: status getStatus, list_flows listFlows, get_flow getFlow, list_messages listMessages, get_message getMessage, tail_events streamEvents,
 // list_held listHolds, list_rules listRules, export_keylog exportKeylog, export_pcap exportPcap, list_captures listCaptures, download_pcap downloadCapture,
-// list_exchanges listExchanges, get_exchange getExchange, get_exchange_body getExchangeBody, decode_message decodeMessage, decode_exchange_body decodeExchangeBody
+// list_exchanges listExchanges, get_exchange getExchange, get_exchange_body getExchangeBody, decode_message decodeMessage, decode_exchange_body decodeExchangeBody,
+// decode_flow decodeFlow
 func addReadTools(server *sdk.Server, client Client, output Output) (err error) {
 	payloadBounds := []integerProperty{
 		{Name: "offset", Minimum: 0, Maximum: -1, Default: 0},
@@ -77,14 +78,22 @@ func addReadTools(server *sdk.Server, client Client, output Output) (err error) 
 
 	err = addTool(server, readTool("decode_message", "Decode message", "One message's payload decoded like Wireshark's packet details, on request: the protocol decerter chose and why (candidates: as, the context such as the TLS ALPN, the server port, sniffing the bytes; protocols lists what as takes), "+
 		"then in the marker m<id>-decode the summary line and the tree as JSON, each node with a filter-style name (dns.qry.name), label, value, offset and length in the payload's bytes (get_message's offsets), its error and children. "+
-		"Bytes no decoder takes are a raw node. A tcp or tls message is a stream read: DNS over TCP and TLS takes the 2-byte length of each message. "+trafficText), decodeMessage(client), []integerProperty{{Name: "max_nodes", Minimum: 1, Maximum: maxDecodeNodes, Default: defaultDecodeNodes}}, nil)
+		"Bytes no decoder takes are a raw node. A tcp or tls message is a stream read: DNS over TCP and TLS takes the 2-byte length of each message; after an HTTP Upgrade to websocket the reads are WebSocket frames, unmasked, a binary one decoded as the protocol its bytes sniff as. "+trafficText), decodeMessage(client), []integerProperty{{Name: "max_nodes", Minimum: 1, Maximum: maxDecodeNodes, Default: defaultDecodeNodes}}, nil)
 
 	if err != nil {
 		return
 	}
 
-	err = addTool(server, readTool("decode_exchange_body", "Decode exchange body", "The request or response body of an HTTP exchange decoded like decode_message, by its content type (application/dns-message is DoH): the offsets are get_exchange_body's. "+
+	err = addTool(server, readTool("decode_exchange_body", "Decode exchange body", "The request or response body of an HTTP exchange decoded like decode_message, by its content type (application/dns-message is DoH, application/grpc* gRPC with schema-less protobuf messages, application/x-protobuf protobuf) or the :protocol websocket of an HTTP/2 extended CONNECT: the offsets are get_exchange_body's. "+
 		"A request without a body whose target carries the message (the dns parameter of a DoH GET) is decoded from there, source is target and those bytes are escaped in the marker x<id>-request-target, the offsets count from their first byte. "+trafficText), decodeExchangeBody(client), []integerProperty{{Name: "max_nodes", Minimum: 1, Maximum: maxDecodeNodes, Default: defaultDecodeNodes}}, []enumProperty{{Name: "side", Values: []any{v1.RequestSide, v1.ResponseSide}}})
+
+	if err != nil {
+		return
+	}
+
+	err = addTool(server, readTool("decode_flow", "Decode flow handshake", "The handshake records decerter kept of one direction of a TLS or DTLS flow (up: ClientHello; down: ServerHello, certificates, the TLS 1.3 messages decerter decrypted, alerts), decoded like decode_message: "+
+		"version, random, session id, cipher suites by IANA name, every extension (server_name, ALPN, supported_versions, supported_groups, signature_algorithms, key_share, pre_shared_key, early_data, ECH, status_request, ...), JA3, JA3S and JA4, and each certificate's subject, issuer, validity and names. "+
+		"The tree is in the marker f<id>-<direction>-decode, the offsets count in the handshake bytes, which come only with data. Not found for a flow without handshake records (plain tcp or udp, or a flow decerter did not read the records of). "+trafficText), decodeFlow(client), []integerProperty{{Name: "max_nodes", Minimum: 1, Maximum: maxDecodeNodes, Default: defaultDecodeNodes}}, []enumProperty{{Name: "direction", Values: []any{v1.UpDirection, v1.DownDirection}}})
 
 	if err != nil {
 		return

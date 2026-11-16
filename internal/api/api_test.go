@@ -52,6 +52,14 @@ var (
 	// a DNS query for example.com A and its answer 93.184.216.34, the name of the answer compressed
 	testDNSQuery  = []byte{0xbe, 0xef, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0, 7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0, 0, 1, 0, 1}
 	testDNSAnswer = slices.Concat([]byte{0xbe, 0xef, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0}, testDNSQuery[12:], []byte{0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 0x0e, 0x10, 0, 4, 93, 184, 216, 34})
+	// a ClientHello for example.com with one suite and the server_name extension, a ServerHello that selects the suite, a fatal alert
+	testClientHello = slices.Concat([]byte{1, 0, 0, 59, 3, 3}, make([]byte, 32), []byte{0, 0, 2, 0x13, 0x01, 1, 0, 0, 16, 0, 0, 0, 12, 0, 10, 0, 0, 7}, []byte("example"))
+	testServerHello = slices.Concat([]byte{2, 0, 0, 40, 3, 3}, make([]byte, 32), []byte{0, 0x13, 0x01, 0, 0, 0})
+	// a gRPC message whose protobuf has field 1 "hello" and field 2 150
+	testGRPCBody = []byte{0, 0, 0, 0, 10, 0x0a, 5, 'h', 'e', 'l', 'l', 'o', 0x10, 0x96, 0x01}
+	// a WebSocket text frame "hi" masked with 01 02 03 04, a server text frame "hello" and a close 1000
+	testClientFrame  = []byte{0x81, 0x82, 1, 2, 3, 4, 'h' ^ 1, 'i' ^ 2}
+	testServerFrames = []byte{0x81, 5, 'h', 'e', 'l', 'l', 'o', 0x88, 2, 0x03, 0xe8}
 )
 
 // one request against the test server: Status is what it must answer, IsInvalid marks a request the spec itself refuses, only its response is checked
@@ -78,6 +86,10 @@ type testBackend struct {
 	dnsQuery uint64
 	dohPost  uint64
 	dohGet   uint64
+	grpcCall uint64
+	wsFlow   uint64
+	wsUp     uint64
+	wsDown   uint64
 	stop     func()
 	pipeline *intercept.Pipeline
 }
@@ -197,6 +209,16 @@ func TestHandlerPositive(state *testing.T) {
 		{Method: http.MethodGet, Path: fmt.Sprintf("/messages/%d/decode?original=maybe", test.dnsQuery), Status: http.StatusBadRequest, IsInvalid: true},
 		{Method: http.MethodGet, Path: "/messages/999/decode", Status: http.StatusNotFound},
 		{Method: http.MethodGet, Path: fmt.Sprintf("/exchanges/%d/decode", test.dohPost), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/exchanges/%d/decode", test.grpcCall), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/messages/%d/decode", test.wsUp), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode", test.tlsFlow), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode?part=handshake&direction=down&as=raw", test.tlsFlow), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode?part=stream", test.tlsFlow), Status: http.StatusBadRequest, IsInvalid: true},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode?direction=sideways", test.tlsFlow), Status: http.StatusBadRequest, IsInvalid: true},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode?as=nosuch", test.tlsFlow), Status: http.StatusBadRequest},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/%d/decode", test.udpFlow), Status: http.StatusNotFound},
+		{Method: http.MethodGet, Path: "/flows/999/decode", Status: http.StatusNotFound},
+		{Method: http.MethodGet, Path: "/flows/x/decode", Status: http.StatusBadRequest, IsInvalid: true},
 		{Method: http.MethodGet, Path: fmt.Sprintf("/exchanges/%d/decode?side=response&as=dns", test.dohPost), Status: http.StatusOK},
 		{Method: http.MethodGet, Path: fmt.Sprintf("/exchanges/%d/decode", test.dohGet), Status: http.StatusOK},
 		{Method: http.MethodGet, Path: fmt.Sprintf("/exchanges/%d/decode?side=response&original=true", test.exchange), Status: http.StatusOK},
@@ -1042,7 +1064,30 @@ func newTestBackend(ctx context.Context) (test testBackend, err error) {
 	dohRequest.Method, dohRequest.Target, dohRequest.Headers = "GET", "/dns-query?dns="+base64.RawURLEncoding.EncodeToString(testDNSQuery), []v1.Header{{Name: ":method", Value: "GET"}}
 	test.dohGet = backend.History.OpenStream(test.tlsFlow, "HTTP/2", history.Stream{ID: 5, PromisedBy: 0}, v1.RequestSide, dohRequest)
 	backend.History.EndMessage(test.dohGet, v1.RequestSide, history.HTTPEnd{State: v1.CompleteHTTPState, Trailers: nil, Note: "", Edit: nil})
+	// a gRPC call on the same flow
+	grpcRequest := v1.HTTPMessage{HTTPHead: v1.HTTPHead{Method: "POST", Target: "/decerter.Echo/Say", Version: "HTTP/2", Headers: []v1.Header{{Name: ":method", Value: "POST"}, {Name: "content-type", Value: "application/grpc"}}}, URL: "https://example.com/decerter.Echo/Say", Time: time.Now(), Framing: v1.FramesFraming, State: v1.HeadHTTPState}
+	test.grpcCall = backend.History.OpenStream(test.tlsFlow, "HTTP/2", history.Stream{ID: 7, PromisedBy: 0}, v1.RequestSide, grpcRequest)
+	backend.History.AppendBody(test.grpcCall, v1.RequestSide, testGRPCBody)
+	backend.History.EndMessage(test.grpcCall, v1.RequestSide, history.HTTPEnd{State: v1.CompleteHTTPState, Trailers: nil, Note: "", Edit: nil})
+	// the handshake records of the flow as the record layer gave them
+	backend.History.KeepHandshake(test.tlsFlow, tlsrecord.Record{Direction: tlsrecord.ClientDirection, ContentType: tlsrecord.HandshakeContentType, Version: 0x0301, Payload: testClientHello}, false)
+	backend.History.KeepHandshake(test.tlsFlow, tlsrecord.Record{Direction: tlsrecord.ServerDirection, ContentType: tlsrecord.HandshakeContentType, Version: 0x0303, Payload: testServerHello}, false)
+	backend.History.KeepHandshake(test.tlsFlow, tlsrecord.Record{Direction: tlsrecord.ServerDirection, ContentType: tlsrecord.AlertContentType, Version: 0x0303, Decrypted: true, Payload: []byte{2, 40}}, false)
 	backend.History.CloseFlow(test.tlsFlow, history.Counters{Bytes: 100, Datagrams: 0}, history.Counters{Bytes: 200, Datagrams: 0})
+	// a plain tcp flow that switches to WebSocket: the upgrade exchange, then a frame each way
+	wsValues := filter.Values{PID: 44, UID: 1001, GID: 1001, Comm: "curl", IPProtocol: syscall.IPPROTO_TCP, Source: netip.MustParseAddrPort("[::ffff:127.0.0.1]:40001"), Destination: netip.MustParseAddrPort("127.0.0.1:8080"), TLS: filter.AbsentTLSState}
+	test.wsFlow = backend.History.OpenFlow(9, wsValues, [32]byte{})
+	wsFlow := intercept.FlowOf(test.wsFlow, 9, redirectFlow(wsValues), wsValues.Source, wsValues)
+	upgrade := backend.History.OpenExchange(test.wsFlow, "HTTP/1.1", v1.RequestSide, v1.HTTPMessage{HTTPHead: v1.HTTPHead{Method: "GET", Target: "/chat", Version: "HTTP/1.1", Headers: []v1.Header{{Name: "Upgrade", Value: "websocket"}}}, URL: "http://127.0.0.1:8080/chat", Time: time.Now(), Framing: v1.NoneFraming, State: v1.HeadHTTPState})
+	backend.History.EndMessage(upgrade, v1.RequestSide, history.HTTPEnd{State: v1.CompleteHTTPState, Trailers: nil, Note: "", Edit: nil})
+	backend.History.AddHead(upgrade, v1.ResponseSide, v1.HTTPMessage{HTTPHead: v1.HTTPHead{Version: "HTTP/1.1", Status: 101, Reason: "Switching Protocols", Headers: []v1.Header{{Name: "Upgrade", Value: "websocket"}, {Name: "Connection", Value: "Upgrade"}}}, Time: time.Now(), Framing: v1.NoneFraming, State: v1.HeadHTTPState}, false)
+	backend.History.EndMessage(upgrade, v1.ResponseSide, history.HTTPEnd{State: v1.CompleteHTTPState, Trailers: nil, Note: "", Edit: nil})
+	wsUp := test.pipeline.Message(wsFlow, tlsrecord.ClientDirection, intercept.TCPLayer, testClientFrame)
+	test.wsUp = wsUp.ID
+	backend.History.Record(wsUp, intercept.Result{Plain: testClientFrame, Verdict: intercept.ForwardVerdict, Changed: false}, intercept.RulesOrigin)
+	wsDown := test.pipeline.Message(wsFlow, tlsrecord.ServerDirection, intercept.TCPLayer, testServerFrames)
+	test.wsDown = wsDown.ID
+	backend.History.Record(wsDown, intercept.Result{Plain: testServerFrames, Verdict: intercept.ForwardVerdict, Changed: false}, intercept.RulesOrigin)
 	// an open udp flow whose TLS state was never read
 	udpValues := filter.Values{PID: 43, UID: 1001, GID: 1001, Comm: "dig", IPProtocol: syscall.IPPROTO_UDP, Source: netip.MustParseAddrPort("[::ffff:127.0.0.1]:5353"), Destination: netip.MustParseAddrPort("127.0.0.1:53"), TLS: filter.UnknownTLSState}
 	test.udpFlow = backend.History.OpenFlow(8, udpValues, [32]byte{})

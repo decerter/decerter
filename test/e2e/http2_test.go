@@ -191,13 +191,15 @@ func runClient(mode string, arguments []string) (code int) {
 	}
 
 	// the peer mode reports what its sockets see of their peers, the send mode sends one datagram, the connect mode what connect says for tcp and udp,
-	// the ping mode pings an address with ping sockets, the mark mode connects with SO_MARK
-	if slices.Contains([]string{"peer", "send", "connect", "ping", "mark"}, mode) {
+	// the ping mode pings an address with ping sockets, the mark mode connects with SO_MARK, the websocket mode talks WebSocket to a host:port
+	if slices.Contains([]string{"peer", "send", "connect", "ping", "mark", "websocket"}, mode) {
 		report, reportErr := "", error(nil)
 
 		switch mode {
 		case "peer":
 			report, reportErr = reportPeers(target)
+		case "websocket":
+			report, reportErr = talkWebSocket(target)
 		case "send":
 			report, reportErr = sendDatagram(target)
 		case "ping":

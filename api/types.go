@@ -181,6 +181,16 @@ const (
 	BodyDecodeSource DecodeSource = "body"
 	// bytes in the request target, the dns parameter of a DoH GET: they are in Data, since no other operation has them
 	TargetDecodeSource DecodeSource = "target"
+	// the handshake records the history kept of one direction of a TLS or DTLS flow (GET /api/v1/flows/{id}/decode): they are in Data
+	HandshakeDecodeSource DecodeSource = "handshake"
+)
+
+// which bytes of a flow GET /api/v1/flows/{id}/decode decodes
+type FlowPart string
+
+const (
+	// the handshake, alert and change cipher spec records of one direction, the plaintext of the ones decerter decrypted, at most 16 KiB
+	HandshakeFlowPart FlowPart = "handshake"
 )
 
 type EventType string
@@ -299,9 +309,10 @@ type TLSInfo struct {
 
 // one direction of a flow: Bytes and Datagrams (udp) are what the proxy sent on, known when the flow is closed; Messages counts its messages in the history
 type Traffic struct {
-	Bytes     int64 `json:"bytes"`
-	Datagrams int64 `json:"datagrams"`
-	Messages  int   `json:"messages"`
+	Bytes          int64 `json:"bytes"`
+	Datagrams      int64 `json:"datagrams"`
+	Messages       int   `json:"messages"`
+	HandshakeBytes int   `json:"handshake_bytes,omitzero"`
 }
 
 // one flow of the history: a redirected tcp connection or udp session in scope
@@ -547,16 +558,19 @@ type Error struct {
 	Error string `json:"error"`
 }
 
-// GET /api/v1/messages/{id}/decode and GET /api/v1/exchanges/{id}/decode: the payload as a tree of fields, decoded on request
+// GET /api/v1/messages/{id}/decode, GET /api/v1/exchanges/{id}/decode and GET /api/v1/flows/{id}/decode: the payload as a tree of fields, decoded on request
 // Protocol is the decoder that made the tree, raw when none took the bytes; Candidates are every protocol that might be it with the reason, the first one taken
 // Offset and Length of each node are bytes of the source from its first byte, the same offsets as the payload window of the source's own operation; Length is
 // how many bytes of the source were decoded, Total how many there are; Truncated is true when the input or the tree reached a limit
 // every string that comes from the traffic (names, text, unknown bytes) is escaped like Payload.Escaped; Error says why a decoder failed, the tree is raw then
-// Protocols are the values as takes
+// Protocols are the values as takes; FlowID, Direction and Cut are set for a flow's handshake, Cut when a record did not fit the 16 KiB decerter keeps
 type Decode struct {
 	MessageID  uint64            `json:"message_id,omitzero"`
 	ExchangeID uint64            `json:"exchange_id,omitzero"`
 	Side       Side              `json:"side,omitzero"`
+	FlowID     uint64            `json:"flow_id,omitzero"`
+	Direction  Direction         `json:"direction,omitzero"`
+	Cut        bool              `json:"cut,omitzero"`
 	Source     DecodeSource      `json:"source"`
 	Protocol   string            `json:"protocol"`
 	Summary    string            `json:"summary"`

@@ -680,6 +680,11 @@ func feedDTLS(datagrams []dtlsDatagram, secrets Secrets, isSecretsFirst bool) (p
 		if record.Decrypted && (record.ContentType == ApplicationDataContentType) {
 			plain[record.Direction] = append(plain[record.Direction], record.Payload...)
 		}
+
+		// every record has the version of its header, DTLS 1.0 or 1.2
+		if (record.Version != VersionDTLS12) && (record.Version != 0xfeff) {
+			err = errors.Join(err, fmt.Errorf("record.Version was not of a record header: 0x%04x", record.Version))
+		}
 	}
 
 	return

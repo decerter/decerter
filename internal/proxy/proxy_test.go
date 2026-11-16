@@ -461,7 +461,7 @@ func relayWith(state *testing.T, request []byte, response []byte, pipeline *inte
 
 	// the proxy in the middle
 	go func() {
-		upBytes, downBytes := interceptTCP(state.Context(), proxyClient, proxyUpstream, nil, flow, pipeline, nil, flowHTTP, logger)
+		upBytes, downBytes := interceptTCP(state.Context(), proxyClient, proxyUpstream, nil, flow, pipeline, nil, flowHTTP, nil, logger)
 		doneChannel <- [2]int64{upBytes, downBytes}
 	}()
 

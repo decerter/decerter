@@ -42,7 +42,7 @@ func FuzzDNS(fuzz *testing.F) {
 		fuzz.Add(seed)
 	}
 
-	doh := Context{Transport: BodyTransport, Layer: "", Direction: v1.UpDirection, ServerPort: 443, ALPN: "h2", ContentType: "application/dns-message", Upgrade: "", Method: "POST", Target: "/dns-query"}
+	doh := Context{Transport: BodyTransport, Layer: "", Direction: v1.UpDirection, ServerPort: 443, ALPN: "h2", ContentType: "application/dns-message", Upgrade: "", Method: "POST", Target: "/dns-query", Encoding: "", Extensions: "", Handshake: false}
 	contexts := []Context{udpContext, tcpContext, dotContext, mdnsContext, otherUDP, doh}
 
 	fuzz.Fuzz(func(state *testing.T, data []byte) {

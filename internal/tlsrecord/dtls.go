@@ -153,6 +153,7 @@ func (conn *DTLSConn) Feed(direction Direction, datagram []byte) (records []Reco
 		record := Record{
 			Direction:   direction,
 			ContentType: contentType,
+			Version:     binary.BigEndian.Uint16(rest[1:]),
 			Decrypted:   false,
 			Epoch:       epoch,
 			Sequence:    sequence,
@@ -423,6 +424,7 @@ func forwardDTLSTail(direction Direction, datagram uint64, tail []byte) (forward
 	forwarded = Record{
 		Direction:   direction,
 		ContentType: 0,
+		Version:     0,
 		Decrypted:   false,
 		Epoch:       0,
 		Sequence:    0,
