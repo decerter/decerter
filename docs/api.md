@@ -29,7 +29,7 @@ The host in the URL is `decerter`, `localhost` or a loopback address (with or wi
 | `GET /flows` | listFlows | flows of the history, newest first; `filter`, `limit`, `cursor` |
 | `GET /flows/{id}` | getFlow | one flow: process, addresses, TLS fields, counters |
 | `GET /flows/{id}/messages` | listMessages | a flow's messages without payloads |
-| `GET /flows/{id}/decode` | decodeFlow | the handshake records kept of one direction of a TLS or DTLS flow as a tree of fields: hellos with every extension, JA3/JA3S/JA4, certificates; `part=handshake`, `direction`, `as` ([decoders](decode.md#tls-handshake)) |
+| `GET /flows/{id}/decode` | decodeFlow | `part=handshake`: the handshake records kept of one direction of a TLS or DTLS flow as a tree of fields (hellos with every extension, JA3/JA3S/JA4, certificates); `part=stream`: one direction of a TCP flow joined, so a PDU split over reads decodes as one, with `segments` mapping it back to the messages ([stream reassembly](decode.md#stream-reassembly)); `direction`, `as`, `original`, `offset`, `length` |
 | `GET /messages/{id}` | getMessage | one message with a window of its payload (`offset`, `length`), as hex and escaped text, and the original when it was edited |
 | `GET /messages/{id}/decode` | decodeMessage | the payload decoded into a tree of fields ([decoders](decode.md)); `as`, `original` |
 | `GET /flows/{id}/exchanges` | listExchanges | a flow's HTTP exchanges without bodies ([HTTP layer](http.md)) |
@@ -46,7 +46,7 @@ The host in the URL is `decerter`, `localhost` or a loopback address (with or wi
 | `POST /rules` | addRule | add a rule |
 | `DELETE /rules/{id}` | deleteRule | delete a rule |
 | `GET /keylog` | exportKeylog | NSS key log of the TLS and DTLS sessions in the history |
-| `GET /flows/pcap` | exportPcap | the history as pcapng: `format=plaintext` (synthesized packets) or `format=dsb` (captured packets with secrets); the header `Decerter-Flows` counts the flows the filter took |
+| `GET /flows/pcap` | exportPcap | the history as pcapng: `format=plaintext` (synthesized packets) or `format=dsb` (captured packets with secrets); `flow=<id>` gives one flow for Wireshark, `dsb` by default when decerter keeps packets ([Wireshark](decode.md#wireshark)); the header `Decerter-Flows` counts the flows the filter took |
 | `GET /captures` | listCaptures | the API's captures ([capture](capture.md#capture-api)) |
 | `POST /captures` | startCapture | start one with its own filter and format |
 | `POST /captures/{id}/stop` | stopCapture | stop it |
@@ -69,6 +69,8 @@ api -X DELETE http://decerter/api/v1/rules/1
 
 api 'http://decerter/api/v1/keylog?filter=tls' > keys.log                     # NSS key log of the TLS sessions in the history
 api -o flows.pcapng 'http://decerter/api/v1/flows/pcap?format=plaintext'      # the history as synthesized packets, edits as they went on
+api -o flow.pcapng 'http://decerter/api/v1/flows/pcap?flow=5'                 # one flow for Wireshark, with its TLS secrets when decerter keeps packets
+api 'http://decerter/api/v1/flows/5/decode?part=stream&direction=down&length=0' # the server's side of flow 5 decoded as one stream
 ```
 
 Holding and rules need `--intercept`. The rules of the code run first (the identity rule of `--intercept`), then the API rules in the order they were added, then the hold queue, so a held message shows what goes on the wire.

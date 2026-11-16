@@ -25,12 +25,12 @@ Always registered, each annotated `readOnlyHint`:
 | `get_exchange_body` | `GET /exchanges/{id}/body` | `id`, `side` (`request`, `response`), `offset` (0), `length` (4096, at most 16384), `hex` |
 | `decode_message` | `GET /messages/{id}/decode` | `id`, `as` (Decode As: a protocol of `protocols`, `raw` for none), `original`, `max_nodes` (2000, at most 10000); the [decode tree](decode.md) of the whole payload |
 | `decode_exchange_body` | `GET /exchanges/{id}/decode` | `id`, `side`, `as`, `original`, `max_nodes`, `hex`; the tree of a body (DoH, gRPC, protobuf, WebSocket over an extended CONNECT), or of a DoH GET's `dns` parameter |
-| `decode_flow` | `GET /flows/{id}/decode` | `id`, `direction` (up, the default, or down), `as`, `max_nodes`, `data`, `hex`; the tree of the TLS or DTLS handshake records decerter kept of one direction: hellos with every extension, JA3/JA3S/JA4, certificates |
+| `decode_flow` | `GET /flows/{id}/decode` | `id`, `part` (`handshake`, the default, or `stream`), `direction` (up, the default, or down), `as`, `original`, `offset`, `length`, `max_nodes`, `data`, `hex`; `handshake` is the tree of the TLS or DTLS handshake records decerter kept of one direction (hellos with every extension, JA3/JA3S/JA4, certificates), `stream` the tree of one direction of a TCP flow joined, so a PDU split over reads decodes as one; the metadata has the `segments` that map stream offsets to messages and the `note` of a cut stream |
 | `tail_events` | `GET /events` | `seconds` (10, at most 60), `max_events` (100, at most 200), `types`, `full` (whole events instead of the short form) |
 | `list_held` | `GET /holds` | `id` (one held message), `offset` (0), `length` (4096 bytes for the whole call, at most 16384), `limit` (20 held messages, at most 100; `more` counts the rest), `hex` |
 | `list_rules` | `GET /rules` | |
 | `export_keylog` | `GET /keylog` | `filter`; the result counts the `sessions` and `lines` of the file |
-| `export_pcap` | `GET /flows/pcap` | `filter`, `format` (`plaintext`, or `dsb`); the result counts the `flows` the filter took (the API's `Decerter-Flows` header), the `packets` and the `sessions` with secrets |
+| `export_pcap` | `GET /flows/pcap` | `filter`, `format` (`plaintext`, or `dsb`), `flow_id` (one flow, the file to open in Wireshark: `dsb` by default when decerter keeps packets, named `decerter-flow-<id>-<time>.pcapng`); the result counts the `flows` the filter took (the API's `Decerter-Flows` header), the `packets` and the `sessions` with secrets |
 | `list_captures` | `GET /captures` | |
 | `download_pcap` | `GET /captures/{id}/pcap` | `id`; the result counts the `packets` and the `sessions` with secrets |
 
