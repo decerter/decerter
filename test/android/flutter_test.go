@@ -8,7 +8,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -484,7 +483,14 @@ func uninstallFlutter(ctx context.Context) (err error) {
 // start the app (a cold start, the activity is stopped first) with the server's url for path, then read its result line from logcat:
 // the body and what the server received have to be expected, with the server's TLS version
 func testFlutter(ctx context.Context, server httpsServer, path string, expected string) (err error) {
-	certificate, err := os.ReadFile(filepath.Join("..", "e2e", "assets", "server_rsa.crt"))
+	err = testFlutterSuite(ctx, server, "server_rsa", path, expected, expected)
+	return
+}
+
+// testFlutter with the certificate of assets the server has: the server has to receive receivedPath over its TLS version and, for a pinned server,
+// its suite, and the app has to get body
+func testFlutterSuite(ctx context.Context, server httpsServer, certificateName string, path string, receivedPath string, body string) (err error) {
+	certificate, err := os.ReadFile(filepath.Join("..", "e2e", "assets", certificateName+".crt"))
 
 	if err != nil {
 		return
@@ -524,8 +530,8 @@ func testFlutter(ctx context.Context, server httpsServer, path string, expected 
 		return
 	}
 
-	if result != "status 200 body "+expected {
-		err = fmt.Errorf("the Flutter app should get the body %q from port %s, result: %s", expected, server.Port, result)
+	if result != "status 200 body "+body {
+		err = fmt.Errorf("the Flutter app should get the body %q from port %s, result: %s", body, server.Port, result)
 		return
 	}
 
@@ -535,10 +541,7 @@ func testFlutter(ctx context.Context, server httpsServer, path string, expected 
 		return
 	}
 
-	if (request.Path != expected) || (request.Version != server.MaxVersion) {
-		err = fmt.Errorf("the server on port %s should receive %s over %s, request: %+v", server.Port, expected, tls.VersionName(server.MaxVersion), request)
-	}
-
+	err = server.check(request, receivedPath)
 	return
 }
 
@@ -727,6 +730,31 @@ func TestFlutterRewritePositive(state *testing.T) {
 			stopDeviceDecerter(state, decerter, true)
 		})
 	}
+}
+
+// Test if rules added over the API rewrite both directions of the Flutter app's dart:io call with the suites of flutterSuiteNames, for the last
+// Flutter release of decerter_E2E_FLUTTER: GET / becomes GET /test at the server over the suite it is pinned to, and its answer /test becomes /TEST in the app.
+func TestFlutterCipherSuitesPositive(state *testing.T) {
+	apps := requireFlutter(state)
+	app := apps[len(apps)-1]
+	installFlutter(state, app, app.APK)
+	decerter := startDeviceDecerter(state, decerterBinary, "flutter-suites", apiArguments(flutterPackage), redirectReady)
+	waitFlutterLog(state, decerter, flutterHookedLog)
+	client := forwardAPI(state)
+	addDeviceRules(state, client, suiteRuleRequests("GET / ", "GET /test ", "/test", "/TEST"))
+
+	for _, suite := range suitesOf(state, smallSuiteNames...) {
+		state.Run(suite.Name, func(state *testing.T) {
+			server := startSuiteServer(state, suite)
+			err := testFlutterSuite(state.Context(), server, suite.Certificate, "/", "/test", "/TEST")
+
+			if err != nil {
+				state.Errorf("Test of the Flutter %s suite %s failed, error: %s", app.Version, suite.Name, err.Error())
+			}
+		})
+	}
+
+	stopDeviceDecerter(state, decerter, true)
 }
 
 // Test if a Flutter app whose engine prints an unknown Dart version is relayed but not decrypted, and decerter says why, for each Flutter release.

@@ -38,6 +38,7 @@ const (
 	decerterPackage  string = "github.com/decerter/decerter/cmd/decerter"
 	dexName      string = "decerter-https.dex"
 	caName       string = "ca.crt"
+	ecdsaCAName  string = "ca-ecdsa.crt"
 	// what decerter logs once it is attached, per mode
 	redirectReady string = `"msg":"Redirecting flows"`
 	captureReady  string = `"msg":"Capturing packets"`
@@ -405,19 +406,37 @@ func pushFiles(ctx context.Context) (err error) {
 		}
 	}
 
-	certificatePath, absErr := filepath.Abs(filepath.Join("..", "e2e", "assets", "server_rsa.crt"))
+	// the dex trusts the server's certificate as its CA, for each certificate of the servers
+	for _, certificate := range []string{"server_rsa", "server_ecdsa"} {
+		certificatePath, absErr := filepath.Abs(filepath.Join("..", "e2e", "assets", certificate+".crt"))
 
-	if err = absErr; err != nil {
-		return
+		if err = absErr; err != nil {
+			return
+		}
+
+		err = device.push(ctx, certificatePath, deviceDirectory+"/"+caFile(certificate), "644")
+
+		if err != nil {
+			return
+		}
 	}
 
-	err = device.push(ctx, certificatePath, deviceDirectory+"/"+caName, "644")
-
-	if (err != nil) || (dexSkipReason != "") {
+	if dexSkipReason != "" {
 		return
 	}
 
 	err = device.push(ctx, filepath.Join(workDirectory, dexName), deviceDirectory+"/"+dexName, "644")
+	return
+}
+
+// the CA file on the device of a certificate of assets
+func caFile(certificate string) (name string) {
+	name = caName
+
+	if certificate == "server_ecdsa" {
+		name = ecdsaCAName
+	}
+
 	return
 }
 

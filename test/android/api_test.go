@@ -171,6 +171,48 @@ func TestHoldPositive(state *testing.T) {
 	stopDeviceDecerter(state, decerter, true)
 }
 
+// Test if rules added over the API rewrite both directions of a Conscrypt call with every suite of androidSuites: GET / becomes GET /test at the
+// server, its answer /test becomes /TEST at the dex, and server and dex have to name the suite the server is pinned to.
+func TestRewriteCipherSuitesPositive(state *testing.T) {
+	requireDex(state)
+	decerter := startDeviceDecerter(state, decerterBinary, "rewrite-suites", apiArguments(appPackage), redirectReady)
+	client := forwardAPI(state)
+	addDeviceRules(state, client, suiteRuleRequests("GET / ", "GET /test ", "/test", "/TEST"))
+
+	for _, suite := range androidSuites {
+		state.Run(suite.Name+" "+suite.Certificate, func(state *testing.T) {
+			server := startSuiteServer(state, suite)
+			err := testDexSuite(state.Context(), appUID, server, suite.Certificate, "/", "/test", "/TEST")
+
+			if err != nil {
+				state.Errorf("Test of the Conscrypt suite %s failed, error: %s", suite.Name, err.Error())
+			}
+		})
+	}
+
+	stopDeviceDecerter(state, decerter, true)
+}
+
+// a record rule of each direction: up replaces upFind with upReplace, down downFind with downReplace
+func suiteRuleRequests(upFind string, upReplace string, downFind string, downReplace string) (requests []v1.RuleRequest) {
+	requests = []v1.RuleRequest{
+		{Filter: "tls", Direction: v1.UpDirection, Layer: v1.TLSLayer, Find: v1.Value{Type: v1.TextValueType, Value: upFind}, Replace: v1.Value{Type: v1.TextValueType, Value: upReplace}},
+		{Filter: "tls", Direction: v1.DownDirection, Layer: v1.TLSLayer, Find: v1.Value{Type: v1.TextValueType, Value: downFind}, Replace: v1.Value{Type: v1.TextValueType, Value: downReplace}},
+	}
+	return
+}
+
+// add the rules over adb forward, the test stops at one that is refused
+func addDeviceRules(state *testing.T, client apiClient, requests []v1.RuleRequest) {
+	for _, request := range requests {
+		status, err := client.call(state.Context(), http.MethodPost, "/rules", request, nil)
+
+		if (err != nil) || (status != http.StatusCreated) {
+			state.Fatalf("Could not add the rule %+v over adb forward, status: %d, error: %v", request, status, err)
+		}
+	}
+}
+
 // decerter run with --intercept, --package and the API on its abstract socket, debug logs name the uid of every api client
 func apiArguments(packageName string) (arguments string) {
 	arguments = "--log-level debug run --intercept --api-socket " + apiSocket + " --package " + packageName + " --dst-cidr " + hostCIDR

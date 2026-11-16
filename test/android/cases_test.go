@@ -621,15 +621,24 @@ func testEcho(ctx context.Context, uid uint32, protocol string, port string) (er
 
 // run the dex as uid against path on the server: the body and what the server received have to be expected, with the server's TLS version
 func testDex(ctx context.Context, uid uint32, server httpsServer, path string, expected string) (err error) {
-	command := fmt.Sprintf("su %d,%d,%d timeout %s app_process -Djava.class.path=%s/%s /system/bin DecerterHttps %s %s/%s 2>&1", uid, uid, inetGroup, dexTimeout, deviceDirectory, dexName, server.url(path), deviceDirectory, caName)
+	err = testDexSuite(ctx, uid, server, "server_rsa", path, expected, expected)
+	return
+}
+
+// run the dex as uid against path on the server, trusting the certificate of assets: the server has to receive receivedPath over its TLS version and
+// suite, and the dex has to print the suite of a pinned server and the body
+func testDexSuite(ctx context.Context, uid uint32, server httpsServer, certificate string, path string, receivedPath string, body string) (err error) {
+	command := fmt.Sprintf("su %d,%d,%d timeout %s app_process -Djava.class.path=%s/%s /system/bin DecerterHttps %s %s/%s 2>&1", uid, uid, inetGroup, dexTimeout, deviceDirectory, dexName, server.url(path), deviceDirectory, caFile(certificate))
 	output, err := device.shell(ctx, command)
 
 	if err != nil {
 		return
 	}
 
-	if !slices.Contains(strings.Split(output, "\n"), "body "+expected) {
-		err = fmt.Errorf("the dex should get the body %q from port %s, output:\n%s", expected, server.Port, output)
+	lines := strings.Split(output, "\n")
+
+	if !slices.Contains(lines, "body "+body) || ((server.CipherSuite != 0) && !slices.Contains(lines, "status 200 cipher "+tls.CipherSuiteName(server.CipherSuite))) {
+		err = fmt.Errorf("the dex should get the body %q from port %s over %s, output:\n%s", body, server.Port, suiteName(server.CipherSuite), output)
 		return
 	}
 
@@ -639,10 +648,7 @@ func testDex(ctx context.Context, uid uint32, server httpsServer, path string, e
 		return
 	}
 
-	if (request.Path != expected) || (request.Version != server.MaxVersion) {
-		err = fmt.Errorf("the server on port %s should receive %s over %s, request: %+v", server.Port, expected, tls.VersionName(server.MaxVersion), request)
-	}
-
+	err = server.check(request, receivedPath)
 	return
 }
 

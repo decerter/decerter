@@ -245,15 +245,21 @@ func prepareChrome(state *testing.T, packageName string, extraFlags string) (uid
 		state.Skipf("Skipping the Chrome case, %s", err.Error())
 	}
 
-	pair, err := tls.LoadX509KeyPair(filepath.Join("..", "e2e", "assets", "server_rsa.crt"), filepath.Join("..", "e2e", "assets", "server_rsa.key"))
+	// Chrome takes the certificates without a CA by the SHA-256 of their keys, the first word of the file is the program name
+	digests := []string{}
 
-	if err != nil {
-		state.Fatalf("Could not load the server certificate, error: %s", err.Error())
+	for _, certificate := range []string{"server_rsa", "server_ecdsa"} {
+		pair, loadErr := tls.LoadX509KeyPair(filepath.Join("..", "e2e", "assets", certificate+".crt"), filepath.Join("..", "e2e", "assets", certificate+".key"))
+
+		if loadErr != nil {
+			state.Fatalf("Could not load the server certificate, error: %s", loadErr.Error())
+		}
+
+		digest := sha256.Sum256(pair.Leaf.RawSubjectPublicKeyInfo)
+		digests = append(digests, base64.StdEncoding.EncodeToString(digest[:]))
 	}
 
-	// Chrome takes the certificate without a CA by the SHA-256 of its key, the first word of the file is the program name
-	digest := sha256.Sum256(pair.Leaf.RawSubjectPublicKeyInfo)
-	flags := "_ --ignore-certificate-errors-spki-list=" + base64.StdEncoding.EncodeToString(digest[:]) + " --ssl-key-log-file=" + chromeKeyLog + " --disable-fre --no-default-browser-check --no-first-run " + extraFlags
+	flags := "_ --ignore-certificate-errors-spki-list=" + strings.Join(digests, ",") + " --ssl-key-log-file=" + chromeKeyLog + " --disable-fre --no-default-browser-check --no-first-run " + extraFlags
 	_, err = device.shell(state.Context(), fmt.Sprintf("echo '%s' > %s && chmod 644 %s && pm clear %s && pm grant %s %s", flags, chromeCommandLine, chromeCommandLine, packageName, packageName, notificationPermission))
 
 	if err != nil {
@@ -292,20 +298,27 @@ func loadChrome(ctx context.Context, packageName string, server httpsServer, pat
 		return
 	}
 
+	request, err := waitRequest(ctx, packageName, server, expected)
+
+	if err == nil {
+		err = server.check(request, expected)
+	}
+
+	return
+}
+
+// wait until the server got a request for expected from Chrome, the requests for other paths are skipped
+func waitRequest(ctx context.Context, packageName string, server httpsServer, expected string) (request receivedRequest, err error) {
 	loadCtx, cancel := context.WithTimeout(ctx, chromeTimeout)
 	defer cancel()
 	seen := []receivedRequest{}
 
 	for {
 		select {
-		case request := <-server.requests:
+		case request = <-server.requests:
 			if request.Path != expected {
 				seen = append(seen, request)
 				continue
-			}
-
-			if request.Version != server.MaxVersion {
-				err = fmt.Errorf("the server on port %s should receive %s over %s, request: %+v", server.Port, expected, tls.VersionName(server.MaxVersion), request)
 			}
 
 			return
@@ -605,6 +618,55 @@ func TestChromeRewritePositive(state *testing.T) {
 		if err != nil {
 			state.Errorf("Test of the Chrome rewrite failed, error: %s", err.Error())
 		}
+	}
+
+	stopDeviceDecerter(state, decerter, true)
+}
+
+// Test if rules added over the API of decerter run --block-quic rewrite both directions of page loads with the suites of smallSuiteNames in Chrome and
+// of chromiumSuiteNames in ChromePublic: GET /chrome becomes GET /chrome-up at the server, over the suite it is pinned to, and the image of the page it
+// answers becomes another one, which Chrome then asks the server for.
+func TestChromeCipherSuitesPositive(state *testing.T) {
+	state.Run("chrome", func(state *testing.T) {
+		testChromeSuites(state, chromePackage, suitesOf(state, smallSuiteNames...))
+	})
+
+	state.Run("chromepublic", func(state *testing.T) {
+		requireChromium(state)
+		installChromium(state, chromiumAPK)
+		testChromeSuites(state, chromiumPackage, suitesOf(state, chromiumSuiteNames...))
+	})
+}
+
+// one decerter run for the package, a pinned server and a page load per suite, the first one starts Chrome
+func testChromeSuites(state *testing.T, packageName string, suites []androidSuite) {
+	prepareChrome(state, packageName, "")
+	decerter := startDeviceDecerter(state, decerterBinary, "chrome-suites", apiArguments(packageName)+" --block-quic", redirectReady)
+	waitAppLog(state, decerter, packageName, keylogReady)
+	client := forwardAPI(state)
+	addDeviceRules(state, client, suiteRuleRequests("GET /chrome ", "GET "+chromePagePath+" ", chromeImagePath, chromeEditedImagePath))
+
+	for index, suite := range suites {
+		state.Run(suite.Name, func(state *testing.T) {
+			server := startSuiteServer(state, suite)
+			err := openChrome(state.Context(), packageName, server.url("/chrome"), index == 0)
+
+			for _, path := range []string{chromePagePath, chromeEditedImagePath} {
+				if err != nil {
+					break
+				}
+
+				request, waitErr := waitRequest(state.Context(), packageName, server, path)
+
+				if err = waitErr; err == nil {
+					err = server.check(request, path)
+				}
+			}
+
+			if err != nil {
+				state.Errorf("Test of the %s suite %s failed, error: %s", packageName, suite.Name, err.Error())
+			}
+		})
 	}
 
 	stopDeviceDecerter(state, decerter, true)
