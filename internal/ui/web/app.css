@@ -73,6 +73,11 @@ main {
   padding: 1em;
 }
 
+/* a wide flow table scrolls in its own column instead of running under the flow view */
+#flows-pane {
+  overflow-x: auto;
+}
+
 section {
   min-width: 0;
 }
