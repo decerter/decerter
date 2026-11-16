@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 
 	v1 "github.com/decerter/decerter/api"
 	"github.com/decerter/decerter/internal/capture"
 	"github.com/decerter/decerter/internal/filter"
+	"github.com/decerter/decerter/internal/history"
 )
 
 const (
@@ -147,11 +149,23 @@ func exportPcap(backend *Backend, writer http.ResponseWriter, request *http.Requ
 		return
 	}
 
+	flowID, hasFlow, err := queryFlow(request)
+
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err, logger)
+		return
+	}
+
 	format := v1.CaptureFormat(request.URL.Query().Get("format"))
 
 	switch format {
 	case "":
 		format = v1.PlaintextCaptureFormat
+
+		// one flow for Wireshark: its packets with the TLS secrets when decerter keeps packets
+		if hasFlow && (backend.Captures != nil) {
+			format = v1.DSBCaptureFormat
+		}
 	case
 		v1.PlaintextCaptureFormat,
 		v1.DSBCaptureFormat:
@@ -168,8 +182,20 @@ func exportPcap(backend *Backend, writer http.ResponseWriter, request *http.Requ
 	}
 
 	flows := backend.History.Export(scope)
+	name := "decerter-flows.pcapng"
+
+	if hasFlow {
+		flows = slices.DeleteFunc(flows, func(flow history.ExportFlow) (isOther bool) { isOther = flow.Flow.ID != flowID; return })
+		name = fmt.Sprintf("decerter-flow-%d.pcapng", flowID)
+
+		if len(flows) == 0 {
+			writeError(writer, http.StatusNotFound, fmt.Errorf("%w: flow %d", ErrNotFound, flowID), logger)
+			return
+		}
+	}
+
 	writer.Header().Set("Content-Type", pcapngMediaType)
-	writer.Header().Set("Content-Disposition", `attachment; filename="decerter-flows.pcapng"`)
+	writer.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
 	writer.Header().Set(v1.FlowsHeader, strconv.Itoa(len(flows)))
 	writer.WriteHeader(http.StatusOK)
 	output := &exportWriter{writer: writer, writeErr: nil}
@@ -200,6 +226,25 @@ func exportPcap(backend *Backend, writer http.ResponseWriter, request *http.Requ
 
 	// the status is sent: the connection is cut without the end of the body, so the client sees a failed download and not a short file
 	panic(http.ErrAbortHandler)
+}
+
+// the flow query parameter of the pcap export: one flow by its id
+func queryFlow(request *http.Request) (id uint64, hasFlow bool, err error) {
+	text := request.URL.Query().Get("flow")
+
+	if text == "" {
+		return
+	}
+
+	id, err = strconv.ParseUint(text, 10, 64)
+
+	if err != nil {
+		err = fmt.Errorf("%w: flow %q", ErrBadRequest, text)
+		return
+	}
+
+	hasFlow = true
+	return
 }
 
 func (output *exportWriter) Write(data []byte) (count int, err error) {

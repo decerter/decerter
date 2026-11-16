@@ -273,6 +273,11 @@ func TestHandlerPositive(state *testing.T) {
 		{Method: http.MethodGet, Path: "/flows/pcap?format=plaintext&filter=tls", Status: http.StatusOK},
 		{Method: http.MethodGet, Path: "/flows/pcap?format=dsb", Status: http.StatusConflict},
 		{Method: http.MethodGet, Path: "/flows/pcap?format=pcap", Status: http.StatusBadRequest, IsInvalid: true},
+		// one flow for Wireshark: plaintext without captures
+		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/pcap?flow=%d", test.dnsTCP), Status: http.StatusOK},
+		{Method: http.MethodGet, Path: fmt.Sprintf("/flows/pcap?flow=%d&format=dsb", test.dnsTCP), Status: http.StatusConflict},
+		{Method: http.MethodGet, Path: "/flows/pcap?flow=99999", Status: http.StatusNotFound},
+		{Method: http.MethodGet, Path: "/flows/pcap?flow=x", Status: http.StatusBadRequest, IsInvalid: true},
 		{Method: http.MethodGet, Path: "/captures", Status: http.StatusOK},
 		{Method: http.MethodPost, Path: "/captures", Body: `{"plaintext": true}`, Status: http.StatusConflict},
 		{Method: http.MethodPost, Path: "/captures/1/stop", Status: http.StatusConflict},

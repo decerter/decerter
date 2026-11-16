@@ -367,6 +367,12 @@ textarea {
   background: var(--highlight);
 }
 
+/* a download of the flow view */
+a.action-link {
+  color: inherit;
+  text-decoration: underline;
+}
+
 /* a message a stream node has bytes in */
 button.link {
   border: none;

@@ -124,7 +124,7 @@ func addReadTools(server *sdk.Server, client Client, output Output) (err error) 
 		return
 	}
 
-	err = addTool(server, readTool("export_pcap", "Export pcap", "Write the flows of the history the filter takes as pcapng into a new file in decerter mcp's output directory: format plaintext (synthesized decrypted packets; on decerter run from the history, the app's side) or dsb (packets as captured with their TLS secrets; on decerter run the proxy's upstream packets, the wire side after the edits). Returns only the path, size, SHA-256 and the count of flows taken, packets and sessions with secrets; packets 0 is a file without packets."), exportPcap(client, output), nil, []enumProperty{{Name: "format", Values: []any{v1.PlaintextCaptureFormat, v1.DSBCaptureFormat}}})
+	err = addTool(server, readTool("export_pcap", "Export pcap", "Write the flows of the history the filter takes (or the one flow of flow_id, to open in Wireshark) as pcapng into a new file in decerter mcp's output directory: format plaintext (synthesized decrypted packets; on decerter run from the history, the app's side) or dsb (packets as captured with their TLS secrets; on decerter run the proxy's upstream packets, the wire side after the edits). Returns only the path, size, SHA-256 and the count of flows taken, packets and sessions with secrets; packets 0 is a file without packets."), exportPcap(client, output), nil, []enumProperty{{Name: "format", Values: []any{v1.PlaintextCaptureFormat, v1.DSBCaptureFormat}}})
 
 	if err != nil {
 		return
@@ -666,8 +666,15 @@ func exportPcap(client Client, output Output) (handle sdk.ToolHandlerFor[ExportP
 			query.Set("format", string(input.Format))
 		}
 
+		name := "flows"
+
+		if input.FlowID != 0 {
+			query.Set("flow", strconv.FormatUint(input.FlowID, 10))
+			name = "flow-" + strconv.FormatUint(input.FlowID, 10)
+		}
+
 		counter := &pcapngCounter{}
-		fileResult, header, err := client.download(ctx, "/flows/pcap", query, pcapngMediaType, output, "flows", "pcapng", counter)
+		fileResult, header, err := client.download(ctx, "/flows/pcap", query, pcapngMediaType, output, name, "pcapng", counter)
 		file.FileResult, file.Packets, file.Sessions = fileResult, counter.packets, counter.secrets
 
 		if err != nil {

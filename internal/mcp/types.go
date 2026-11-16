@@ -457,7 +457,8 @@ type ExportKeylogInput struct {
 
 type ExportPcapInput struct {
 	Filter string           `json:"filter,omitzero" jsonschema:"a filter in the language of decerter --filter; empty takes every flow"`
-	Format v1.CaptureFormat `json:"format,omitzero" jsonschema:"plaintext (default, synthesized decrypted packets) or dsb (the packets as captured with their TLS secrets; on decerter run the proxy's upstream packets, the wire side after the edits)"`
+	Format v1.CaptureFormat `json:"format,omitzero" jsonschema:"plaintext (default, synthesized decrypted packets) or dsb (the packets as captured with their TLS secrets; on decerter run the proxy's upstream packets, the wire side after the edits); with flow_id the default is dsb when decerter keeps packets"`
+	FlowID uint64           `json:"flow_id,omitzero" jsonschema:"one flow by its id from list_flows, the file to open in Wireshark; with captures its format defaults to dsb so Wireshark decrypts the TLS"`
 }
 
 type DownloadPcapInput struct {

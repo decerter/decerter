@@ -96,6 +96,7 @@ func TestCaptureHandlerPositive(state *testing.T) {
 		{Method: http.MethodGet, Path: "/captures/x/pcap", Status: http.StatusBadRequest, IsInvalid: true},
 		{Method: http.MethodGet, Path: "/flows/pcap?format=dsb", Status: http.StatusOK},
 		{Method: http.MethodGet, Path: "/flows/pcap?format=plaintext&filter=tls", Status: http.StatusOK},
+		{Method: http.MethodGet, Path: "/flows/pcap?flow=99999", Status: http.StatusNotFound},
 		{Method: http.MethodGet, Path: "/captures/stream?plaintext=maybe", Status: http.StatusBadRequest, IsInvalid: true},
 		{Method: http.MethodGet, Path: "/captures/stream?filter=http.host+%3D%3D+%22a%22", Status: http.StatusBadRequest},
 		{Method: http.MethodGet, Path: "/keylog", Status: http.StatusConflict},

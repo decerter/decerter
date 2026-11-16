@@ -195,7 +195,8 @@ paths:
           in: query
           description: |
             "Decode As": the protocol to decode with (a value of `protocols`, `raw` for none); absent takes tls, or dtls
-            for a udp flow. A value that names no protocol is 400.
+            for a udp flow, for `part=handshake`, and chooses by the flow's ports, ALPN and the bytes for `part=stream`.
+            A value that names no protocol is 400.
           schema:
             type: string
         - name: original
@@ -732,18 +733,29 @@ paths:
         still there, `format=plaintext` synthesized and decrypted like a plaintext capture. The file is written after
         the 200: when writing it fails, the connection is cut before the end of the body, so the download fails instead
         of giving a short file.
+        `flow` takes one flow by its id, for "Open in Wireshark": its format is `dsb` when decerter keeps packets (on
+        `decerter capture`, and on `decerter run` with capture programs), so Wireshark decrypts its TLS with the DSB, else
+        `plaintext`; the filter applies too, a flow it does not take is a 404. UDP sessions of one app socket share
+        their upstream socket, so their dsb packets come together.
       parameters:
         - $ref: "#/components/parameters/Filter"
         - name: format
           in: query
           schema:
             $ref: "#/components/schemas/CaptureFormat"
+        - name: flow
+          in: query
+          description: One flow by its id; the default format is then dsb when decerter keeps packets
+          schema:
+            type: integer
+            format: uint64
+            minimum: 1
       responses:
         "200":
           description: A pcapng file
           headers:
             Content-Disposition:
-              description: attachment; filename="decerter-flows.pcapng"
+              description: attachment; filename="decerter-flows.pcapng", or "decerter-flow-<id>.pcapng" for one flow
               schema:
                 type: string
             Decerter-Flows:
@@ -759,6 +771,8 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
         "409":
           $ref: "#/components/responses/Conflict"
   /captures:

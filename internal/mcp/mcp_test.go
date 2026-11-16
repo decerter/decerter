@@ -198,6 +198,11 @@ func startFakeAPI(state *testing.T) (target ui.Target) {
 		writeBody(writer, "text/plain; charset=utf-8", testSecret)
 	})
 	mux.HandleFunc("GET /api/v1/flows/pcap", func(writer http.ResponseWriter, request *http.Request) {
+		if flow := request.URL.Query().Get("flow"); (flow != "") && (flow != "7") {
+			writeJSON(writer, http.StatusNotFound, v1.Error{Error: "not found: flow " + flow})
+			return
+		}
+
 		switch request.URL.Query().Get("format") {
 		case "", string(v1.PlaintextCaptureFormat):
 			writer.Header().Set(v1.FlowsHeader, "3")
@@ -603,6 +608,7 @@ func TestExportToolsPositive(state *testing.T) {
 		{Name: "export_keylog", Arguments: map[string]any{"filter": "tls"}, Prefix: "decerter-keylog-", Content: testSecret},
 		{Name: "export_keylog", Arguments: nil, Prefix: "decerter-keylog-", Content: testSecret},
 		{Name: "export_pcap", Arguments: map[string]any{"format": "plaintext"}, Prefix: "decerter-flows-", Content: testPcapng},
+		{Name: "export_pcap", Arguments: map[string]any{"flow_id": 7}, Prefix: "decerter-flow-7-", Content: testPcapng},
 		{Name: "download_pcap", Arguments: map[string]any{"id": 1}, Prefix: "decerter-capture-1-", Content: testPcapng},
 	}
 	paths := map[string]bool{}
@@ -672,6 +678,7 @@ func TestReadToolsNegative(state *testing.T) {
 		{Session: session, Name: "get_flow", Arguments: map[string]any{"id": 8}, Text: "the decerter api answered with an error: GET /flows/8: 404 Not Found: no flow 8"},
 		{Session: session, Name: "export_keylog", Arguments: map[string]any{"filter": "conflict"}, Text: "409 Conflict: no tls secrets"},
 		{Session: session, Name: "export_pcap", Arguments: map[string]any{"format": "dsb"}, Text: "format=dsb needs decerter capture"},
+		{Session: session, Name: "export_pcap", Arguments: map[string]any{"flow_id": 8}, Text: "404 Not Found: not found: flow 8"},
 		{Session: session, Name: "download_pcap", Arguments: map[string]any{"id": 2}, Text: "capture is running, stop it first"},
 		{Session: session, Name: "list_held", Arguments: map[string]any{"id": 99}, Text: "no such held message: 99"},
 		{Session: session, Name: "list_flows", Arguments: map[string]any{"limit": 101}, Text: "maximum"},

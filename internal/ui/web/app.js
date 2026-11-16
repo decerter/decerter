@@ -477,6 +477,11 @@ function renderFlowInfo(flow) {
   }
 
   byId('flow-info').replaceChildren(...fields.flatMap(([name, value]) => [el('dt', {}, name), el('dd', {}, value || '')]));
+  // GET /flows/pcap?flow=: the browser downloads the file, Wireshark opens it
+  const pcap = byId('flow-pcap');
+  pcap.href = `${api}/flows/pcap?flow=${flow.id}`;
+  pcap.download = `decerter-flow-${flow.id}.pcapng`;
+  byId('flow-actions').hidden = false;
 }
 
 function trafficText(traffic) {
