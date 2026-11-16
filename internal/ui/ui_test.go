@@ -616,7 +616,8 @@ func TestInterceptLayersPositive(state *testing.T) {
 	}
 }
 
-// Test if the page pages the exchanges of a flow like its messages and caps what live events add to the lists: the flows, the messages and the exchanges.
+// Test if the page pages the exchanges of a flow like its messages and caps what live events add to the lists: the flows, the messages and the exchanges;
+// the cap on the flows never trims the rows More read or the selected one, and moves More's cursor only while no page of More was read.
 func TestListBoundsPositive(state *testing.T) {
 	page, err := webFiles.ReadFile("web/index.html")
 
@@ -632,7 +633,7 @@ func TestListBoundsPositive(state *testing.T) {
 
 	// the body of a function of app.js, up to the next line that closes a top-level block
 	bodyOf := func(name string) (body string) {
-		match := regexp.MustCompile(`(?s)\nfunction ` + name + `\(.*?\n\}\n`).Find(script)
+		match := regexp.MustCompile(`(?s)\n(?:async )?function ` + name + `\(.*?\n\}\n`).Find(script)
 		body = string(match)
 		return
 	}
@@ -646,6 +647,10 @@ func TestListBoundsPositive(state *testing.T) {
 		{name: "the next page of exchanges by the cursor", text: string(script), pattern: `/flows/\$\{state.flowId\}/exchanges\?cursor=\$\{encodeURIComponent\(state.exchangesCursor\)\}`},
 		{name: "the button shown while there is a next page", text: string(script), pattern: `byId\('more-exchanges'\).hidden = !state.exchangesCursor;`},
 		{name: "flow events trim the flows", text: bodyOf("onFlow"), pattern: `trimFlows\(\);`},
+		{name: "the rows More read and the selected one kept", text: bodyOf("trimFlows"), pattern: `filter\(\(id\) => !state\.pagedFlows\.has\(id\) && id !== state\.flowId\)`},
+		{name: "the cursor moved only without rows of More", text: bodyOf("trimFlows"), pattern: `if \(state\.pagedFlows\.size === 0\) \{\n    state\.flowsCursor = `},
+		{name: "the rows More read marked", text: bodyOf("moreFlows"), pattern: `state\.pagedFlows\.add\(flow\.id\);`},
+		{name: "the marks cleared with the list", text: bodyOf("loadFlows"), pattern: `state\.flows\.clear\(\);\n    state\.pagedFlows\.clear\(\);`},
 		{name: "message events stop at the cap", text: bodyOf("onMessage"), pattern: `state.messages.length >= maxListRows`},
 		{name: "exchange events stop at the cap", text: bodyOf("onExchange"), pattern: `state.exchanges.length >= maxListRows`},
 	}

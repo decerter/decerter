@@ -14,6 +14,8 @@ const state = {
   filter: '',
   flows: new Map(),
   flowsCursor: '',
+  // the flows More read, live events never trim them
+  pagedFlows: new Set(),
   flowId: null,
   messages: [],
   messagesCursor: '',
@@ -357,6 +359,7 @@ async function loadFlows(isReset) {
 
   if (isReset) {
     state.flows.clear();
+    state.pagedFlows.clear();
     state.flowsCursor = list.next_cursor || '';
   }
 
@@ -368,19 +371,22 @@ async function loadFlows(isReset) {
   renderFlows();
 }
 
-// the newest flows up to the cap: a cursor of the flow list is the id of the oldest flow of a page, so More reads on from the oldest one kept
+// the newest flows of the first page and of live events up to the cap; the rows More read and the selected one stay
+// a cursor of the flow list is the id of the oldest flow of a page: without rows of More, More reads on from the oldest one kept, with them it goes on after them
 function trimFlows() {
-  if (state.flows.size <= maxListRows) {
+  const ids = [...state.flows.keys()].filter((id) => !state.pagedFlows.has(id) && id !== state.flowId).sort((a, b) => b - a);
+
+  if (ids.length <= maxListRows) {
     return;
   }
-
-  const ids = [...state.flows.keys()].sort((a, b) => b - a);
 
   for (const id of ids.slice(maxListRows)) {
     state.flows.delete(id);
   }
 
-  state.flowsCursor = `${ids[maxListRows - 1]}`;
+  if (state.pagedFlows.size === 0) {
+    state.flowsCursor = `${ids[maxListRows - 1]}`;
+  }
 }
 
 async function moreFlows() {
@@ -389,6 +395,7 @@ async function moreFlows() {
 
   for (const flow of list.flows) {
     state.flows.set(flow.id, flow);
+    state.pagedFlows.add(flow.id);
   }
 
   renderFlows();
