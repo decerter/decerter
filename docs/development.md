@@ -62,6 +62,25 @@ coverage/merged.out      the profiles together, without the code that is not han
 
 Left out of the numbers: the bpf2go output (`*_bpfel.go`, `*_bpfeb.go`), the generated offset tables (`*_gen.go`), `cmd/decerter` (its `main` only calls `cmd.Execute`) and the helpers under `test/`. The BPF C programs have no Go coverage; the e2e tests cover them, the redirect and capture paths in `test/e2e/redirect_test.go`. Without `COVERAGE_ANDROID=1` the Android e2e tests are not in the numbers, so `app/boringssl.go`, the netd hook sharing of `internal/attach` and what `internal/android` does over adb count only as far as the unit tests reach them.
 
+## SPDX license identifiers
+Every source file starts with an SPDX line for its license:
+
+| Files | License | First line |
+|---|---|---|
+| Go userspace, tools, tests (also the C and C++ of `tools/offsetgen` and the Java, Kotlin and Dart of the Android test apps), Makefile, scripts, YAML | `AGPL-3.0-only` | `// SPDX-License-Identifier: AGPL-3.0-only` (`#` in Makefile, scripts and YAML) |
+| BPF C programs and headers we write (`bpf/**/*.{c,h}`) | `GPL-2.0-only OR MIT` | `// SPDX-License-Identifier: GPL-2.0-only OR MIT` |
+| Minimal UI page (`internal/ui/web/*.{html,js,css}`) | `AGPL-3.0-only` | `<!-- SPDX-License-Identifier: AGPL-3.0-only -->` right after the doctype in HTML, `// …` in JS, `/* … */` in CSS |
+| Control API contract (`api/openapi.yaml`) and its Go types (`api/types.go`) | `MIT` | `# SPDX-License-Identifier: MIT` in the YAML, `// SPDX-License-Identifier: MIT` in Go |
+| Vendored libbpf headers (`bpf/include/bpf/*`) | `LGPL-2.1 OR BSD-2-Clause` | unchanged, kept exactly as shipped by libbpf |
+| Kernel type header (`bpf/vmlinux.h`, `make generate-vmlinux`) | `GPL-2.0-only`, the Linux kernel's types | none, kept exactly as bpftool dumps it |
+| Generated code (bpf2go output) | `AGPL-3.0-only` | none needed, the file is generated from AGPL inputs |
+| Generated offset tables (`internal/tls/*/*offsets_gen.go`) | `AGPL-3.0-only` | `// SPDX-License-Identifier: AGPL-3.0-only`, written by `tools/offsetgen` |
+| Go files with code derived from the Go standard library (`internal/tlsrecord/{cipher,keyschedule}.go`) | `AGPL-3.0-only AND BSD-3-Clause` | `// SPDX-License-Identifier: AGPL-3.0-only AND BSD-3-Clause`, then the copyright notice of the Go authors; their license is `internal/tlsrecord/LICENSE-Go.txt` |
+
+In files that need a first line of their own, such as a script shebang or the HTML doctype, the SPDX line comes right after it.
+
+`make license-check` checks these lines in every `.go`, `.c`, `.h`, `.cc`, `.java`, `.kt`, `.dart`, `.sh`, `.yaml` and `.yml` file, Makefile and the HTML, JS and CSS of `internal/ui/web` (`tools/licensecheck/spdx.sh`), and runs [go-licenses](https://github.com/google/go-licenses) on the dependencies: a new dependency must have a license on the `ALLOWED_LICENSES` list of the Makefile, all of which can be combined with `AGPL-3.0-only`.
+
 ## BPF objects
 The BPF objects are built from the committed `bpf/vmlinux.h`, bpftool's dump of the dev box's kernel types (7.0.3), so every build sees the same kernel types; CO-RE relocates them to the running kernel when decerter loads. Regenerating them needs clang-21 and llvm-strip-21:
 
@@ -127,7 +146,7 @@ act can't run `e2e-linux` (it needs root on a real kernel, act's job runs in a c
 A release is a pushed tag. On a clean `main` that CI passed:
 
 ```sh
-./tools/release/version.sh            # v0.0.0-<n>-g<hash> before the first tag
+./tools/release/version.sh                # v0.0.0-<n>-g<hash> before the first tag
 git tag -a v0.1.0 -m "decerter v0.1.0"    # the message becomes the release notes
 git push origin v0.1.0
 ```

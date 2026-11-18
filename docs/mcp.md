@@ -2,9 +2,9 @@
 `decerter mcp` is a [Model Context Protocol](https://modelcontextprotocol.io/) server on stdin and stdout, built on the official Go SDK. Like [`decerter ui`](ui.md) it is only a client of the [control API](api.md), so an LLM can do nothing curl on the socket can't.
 
 ```sh
-sudo ./decerter run --uid 1001 --intercept --api-socket /run/decerter/api.sock   # or decerter capture --api-socket …
-claude mcp add decerter -- /path/to/decerter mcp                                  # as your user in the group decerter, read tools only
-claude mcp add decerter -- /path/to/decerter mcp --allow-write                    # plus intercept, held messages, rules and captures
+sudo ./decerter run --uid 1001 --intercept --api-socket /run/decerter/api.sock        # or decerter capture --api-socket …
+claude mcp add decerter -- /path/to/decerter mcp                                      # as your user in the group decerter, read tools only
+claude mcp add decerter -- /path/to/decerter mcp --allow-write                        # plus intercept, held messages, rules and captures
 claude mcp add decerter -- /path/to/decerter mcp --output-dir /tmp/decerter-exports   # where the export tools write
 ```
 

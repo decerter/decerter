@@ -7,10 +7,10 @@ The [quickstart](../README.md#quickstart-android) goes through `decerter android
 `decerter android setup` runs on the Linux host as your user, not as root: adb and the emulator belong to your user, and adb as root would start a second adb server.
 
 ```sh
-./decerter android setup --package com.example.app                  # the one running device or emulator
+./decerter android setup --package com.example.app                      # the one running device or emulator
 ./decerter android setup --avd decerter-a15 --package com.example.app   # boot the AVD first, without a window
 ./decerter android setup --serial 0A1B2C3D --binary ./decerter-arm64 --port 8080
-./decerter android setup --remove --serial emulator-5554            # undo it
+./decerter android setup --remove --serial emulator-5554                # undo it
 ```
 
 What it does:
@@ -66,7 +66,7 @@ Without `decerter android setup`, the same steps with adb:
 
 ```sh
 adb root                    # the emulator's adbd as root; its su takes no -c, so decerter runs directly in adb shell
-adb push decerter /data/local/tmp/decerter                  # decerter-arm64 for an arm64 device
+adb push decerter /data/local/tmp/decerter          # decerter-arm64 for an arm64 device
 adb shell pm list packages -U | grep chrome         # an app's uid for --uid, e.g. uid:10145
 
 # run mode, stdout and the logs in the adb shell

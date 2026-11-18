@@ -270,3 +270,4 @@ The proxy of `run` listens on port 15001 of `lo` (`--port`), TCP and UDP; a UDP 
 - `bpf/vmlinux.h` is bpftool's dump of the Linux kernel's types (`GPL-2.0-only`), only compiled into the BPF programs.
 - `internal/tlsrecord/cipher.go` and `internal/tlsrecord/keyschedule.go` contain code derived from Go's `crypto/tls` and keep the Go authors' notice (`AGPL-3.0-only AND BSD-3-Clause`); the BSD license is `LICENSE-Go.txt` in the release tarball and `internal/tlsrecord/LICENSE-Go.txt` in the repository.
 - The dependencies are under MIT, BSD-3-Clause and Apache-2.0; `make license-check` fails on one that isn't allowed, and each release tarball carries their license texts in `THIRD_PARTY_NOTICES`.
+- Questions: [decerter.dev@gmail.com](mailto:decerter.dev@gmail.com)

@@ -35,9 +35,9 @@ sudo ./decerter capture --uid 1001 --api-socket /run/decerter/api.sock
 api() { sudo curl -s --unix-socket /run/decerter/api.sock -H 'Content-Type: application/json' "$@"; }
 
 api -X POST -d '{"filter": "tcp.dstport == 443"}' http://decerter/api/v1/captures    # {"plaintext": true} for decrypted packets
-api http://decerter/api/v1/captures                                                 # id, filter, format, state, size
+api http://decerter/api/v1/captures                                                  # id, filter, format, state, size
 api -X POST http://decerter/api/v1/captures/1/stop
-api -o capture.pcapng http://decerter/api/v1/captures/1/pcap                        # a running capture answers 409
+api -o capture.pcapng http://decerter/api/v1/captures/1/pcap                         # a running capture answers 409
 tshark -r capture.pcapng -Y http
 
 # the live stream, the same as -w - for as long as the client reads; ?filter= and ?plaintext=true work here too
