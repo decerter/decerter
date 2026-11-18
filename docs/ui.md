@@ -18,6 +18,8 @@ The page (HTML, CSS and vanilla JS embedded in the binary, no build step):
 - intercept on and off with a filter, a direction and the layer (every record layer, one of tcp, tls, udp and dtls, or whole HTTP messages);
 - the held messages, to edit as escaped text (`\r`, `\n`, `\t`, `\\`, `\xNN`; line breaks are only layout) or as hex, and to forward or drop.
 
+The page is dark, with its fonts (Kode Mono, Inter, JetBrains Mono, OFL-1.1) and favicon embedded too, so it looks the same offline and loads nothing from another site.
+
 There is no rules editor; rules are added with curl or a script. The full UI is the separate decerter-pro.
 
 ## Access

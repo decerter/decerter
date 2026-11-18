@@ -5,21 +5,23 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>decerter</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="app.css">
 <script type="module" src="app.js"></script>
 </head>
 <body>
 <header>
-  <h1>decerter</h1>
+  <h1 class="logo" aria-label="decerter"><img class="logo-icon" src="favicon.svg" alt="" width="32" height="32"><span class="wordmark" aria-hidden="true"><span class="de">de</span><span class="cert">cert</span><span class="er">er</span></span></h1>
   <span id="status">connecting…</span>
   <span id="live" class="badge off">offline</span>
 </header>
 <p id="error" class="error" hidden></p>
 <main>
   <section id="flows-pane">
+    <h2>Flows</h2>
     <form id="flow-filter" class="row">
       <input id="filter" type="text" spellcheck="false" autocomplete="off" placeholder='filter, e.g. proc.comm == "curl" &amp;&amp; tcp.dstport == 443' aria-label="flow filter">
-      <button type="submit">Filter</button>
+      <button type="submit" class="primary">Filter</button>
     </form>
     <table>
       <thead><tr><th>#</th><th>state</th><th>proto</th><th>process</th><th>destination</th><th>server name</th><th class="number">up</th><th class="number">down</th></tr></thead>
@@ -155,7 +157,7 @@
           <option value="dtls">dtls records only</option>
           <option value="http">whole http messages</option>
         </select>
-        <button type="submit">Apply</button>
+        <button type="submit" class="primary">Apply</button>
       </div>
     </form>
     <p id="intercept-state" class="muted"></p>
@@ -173,7 +175,7 @@
       <p id="editor-hint" class="muted"></p>
       <div class="row">
         <button id="editor-save" type="button">Save</button>
-        <button id="editor-forward" type="button">Save and forward</button>
+        <button id="editor-forward" type="button" class="positive">Save and forward</button>
         <button id="editor-drop" type="button" class="danger">Drop</button>
         <button id="editor-close" type="button">Close</button>
       </div>

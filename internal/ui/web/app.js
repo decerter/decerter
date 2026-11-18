@@ -426,7 +426,7 @@ function renderFlows() {
   const rows = [...state.flows.values()].sort((a, b) => b.id - a.id).map((flow) => {
     const row = el('tr', { class: flow.id === state.flowId ? 'selected' : '', onclick: action(() => selectFlow(flow.id)) },
       el('td', {}, flow.id),
-      el('td', {}, flow.state),
+      el('td', {}, stateBadge(flow.state)),
       el('td', {}, flow.layer && flow.layer !== flow.protocol ? `${flow.protocol}/${flow.layer}` : flow.protocol),
       el('td', {}, `${flow.process.comm} (${flow.process.uid})`),
       el('td', {}, flow.destination),
@@ -438,6 +438,13 @@ function renderFlows() {
   byId('flows').replaceChildren(...rows);
   byId('no-flows').hidden = rows.length > 0;
   byId('more-flows').hidden = !state.flowsCursor;
+}
+
+// the state of a flow as a pill: an open flow is active, a closed one muted
+function stateBadge(flowState) {
+  const pill = el('span', { class: 'pill' }, flowState);
+  pill.classList.add(flowState === 'open' ? 'active' : 'idle');
+  return pill;
 }
 
 // a flow and its messages
@@ -1088,7 +1095,7 @@ function renderHolds() {
     el('div', { class: 'preview' }, escapeBytes(bytesOfHex(hold.payload.hex.slice(0, 160))).split('\n')[0]),
     el('div', { class: 'row' },
       el('button', { type: 'button', onclick: action(() => openEditor(hold.id)) }, 'Edit'),
-      el('button', { type: 'button', onclick: action(() => release(hold.id, 'forward')) }, 'Forward'),
+      el('button', { type: 'button', class: 'positive', onclick: action(() => release(hold.id, 'forward')) }, 'Forward'),
       el('button', { type: 'button', class: 'danger', onclick: action(() => release(hold.id, 'drop')) }, 'Drop'))));
   byId('holds').replaceChildren(...items);
   byId('held-count').textContent = state.holds.length ? `(${state.holds.length})` : '';

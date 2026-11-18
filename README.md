@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/logo.svg" alt="decerter" width="440"></p>
+
 # decerter
 An eBPF intercepting proxy that reads and edits the live TCP, UDP, TLS and DTLS traffic of selected local processes, with no CA certificate and no change to the app.
 
@@ -270,4 +272,5 @@ The proxy of `run` listens on port 15001 of `lo` (`--port`), TCP and UDP; a UDP 
 - `bpf/vmlinux.h` is bpftool's dump of the Linux kernel's types (`GPL-2.0-only`), only compiled into the BPF programs.
 - `internal/tlsrecord/cipher.go` and `internal/tlsrecord/keyschedule.go` contain code derived from Go's `crypto/tls` and keep the Go authors' notice (`AGPL-3.0-only AND BSD-3-Clause`); the BSD license is `LICENSE-Go.txt` in the release tarball and `internal/tlsrecord/LICENSE-Go.txt` in the repository.
 - The dependencies are under MIT, BSD-3-Clause and Apache-2.0; `make license-check` fails on one that isn't allowed, and each release tarball carries their license texts in `THIRD_PARTY_NOTICES`.
+- The fonts of the UI page (Kode Mono, Inter, JetBrains Mono) are vendored under the SIL Open Font License 1.1 (`OFL-1.1`), its text in [internal/ui/web/fonts/OFL.txt](internal/ui/web/fonts/OFL.txt) and `LICENSE-fonts.txt` in the release tarball.
 - Questions: [decerter.dev@gmail.com](mailto:decerter.dev@gmail.com)

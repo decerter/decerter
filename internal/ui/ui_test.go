@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -107,6 +108,9 @@ func TestGuardPositive(state *testing.T) {
 		{Request: uiRequest{Method: http.MethodGet, Path: "/"}, ContentType: "text/html", Text: `<script type="module" src="app.js"></script>`},
 		{Request: uiRequest{Method: http.MethodGet, Path: "/app.js"}, ContentType: "text/javascript", Text: "new EventSource("},
 		{Request: uiRequest{Method: http.MethodGet, Path: "/app.css"}, ContentType: "text/css", Text: "--background"},
+		{Request: uiRequest{Method: http.MethodGet, Path: "/favicon.svg"}, ContentType: "image/svg+xml", Text: "<svg "},
+		{Request: uiRequest{Method: http.MethodGet, Path: "/fonts/inter-400-700-latin.woff2"}, ContentType: "font/woff2", Text: "wOF2"},
+		{Request: uiRequest{Method: http.MethodGet, Path: "/fonts/OFL.txt"}, ContentType: "text/plain", Text: "SIL OPEN FONT LICENSE"},
 		// the browser's own request, typed into the address bar or a reload
 		{Request: uiRequest{Method: http.MethodGet, Path: "/", Headers: map[string]string{"Sec-Fetch-Site": "none"}}, ContentType: "text/html", Text: "<title>decerter</title>"},
 		{Request: uiRequest{Method: http.MethodGet, Path: "/api/v1/status", Headers: map[string]string{"Origin": "http://" + current.host, "Referer": "http://" + current.host + "/", "Sec-Fetch-Site": "same-origin"}}, ContentType: "application/json", Text: `"mode":"run"`},
@@ -178,6 +182,8 @@ func TestGuardNegative(state *testing.T) {
 		// no cookie
 		{Method: http.MethodGet, Path: "/", Cookie: "-"},
 		{Method: http.MethodGet, Path: "/app.js", Cookie: "-"},
+		{Method: http.MethodGet, Path: "/favicon.svg", Cookie: "-"},
+		{Method: http.MethodGet, Path: "/fonts/kode-mono-700-latin.woff2", Cookie: "-"},
 		{Method: http.MethodGet, Path: "/api/v1/status", Cookie: "-"},
 		{Method: http.MethodGet, Path: "/api/v1/events", Cookie: "-"},
 		{Method: http.MethodPut, Path: "/api/v1/intercept", Cookie: "-", Headers: map[string]string{"Origin": "http://" + current.host}, Body: `{"enabled": true}`},
@@ -544,19 +550,33 @@ func TestTokenPositive(state *testing.T) {
 	}
 }
 
-// Test if the page has its SPDX line, no inline script, style or event handler, and its script never writes HTML.
+// Test if the page has its SPDX line, no inline script, style or event handler, its script never writes HTML, its style loads nothing but its own fonts, and the favicon is a plain image.
 func TestWebPositive(state *testing.T) {
 	forbidden := map[string]*regexp.Regexp{
-		"web/index.html": regexp.MustCompile(`<script(\s[^>]*)?>[^<]|<script(?:\s+type="module")?>|\sstyle=|\son[a-z]+=|<style|javascript:`),
-		"web/app.js":     regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function|setAttribute\(\s*'on|\.style\.|setAttribute\(\s*'style`),
-		"web/app.css":    regexp.MustCompile(`@import|url\(`),
+		"web/index.html":  regexp.MustCompile(`<script(\s[^>]*)?>[^<]|<script(?:\s+type="module")?>|\sstyle=|\son[a-z]+=|<style|javascript:`),
+		"web/app.js":      regexp.MustCompile(`innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\(|new Function|setAttribute\(\s*'on|\.style\.|setAttribute\(\s*'style`),
+		"web/app.css":     regexp.MustCompile(`@import|url\(`),
+		"web/favicon.svg": regexp.MustCompile(`(?i)<script|\son[a-z]+=|href=|url\(|<style|\sstyle=|<image|<foreignObject|<use|<text|@import|data:`),
 	}
+	// the stylesheet names the embedded fonts, a file of the page each
+	fontURL := regexp.MustCompile(`url\("(fonts/[a-z0-9-]+\.woff2)"\) format\("woff2"\)`)
 
 	for name, pattern := range forbidden {
 		content, err := webFiles.ReadFile(name)
 
 		if err != nil {
 			state.Fatalf("Could not read %s, error: %s", name, err.Error())
+		}
+
+		if name == "web/app.css" {
+			for _, font := range fontURL.FindAllSubmatch(content, -1) {
+				if !slices.ContainsFunc(pageFiles, func(file pageFile) bool { return file.Name == string(font[1]) }) {
+					state.Errorf("Test of the page failed, app.css loads %s, which the page does not serve", font[1])
+					return
+				}
+			}
+
+			content = fontURL.ReplaceAll(content, nil)
 		}
 
 		if !strings.Contains(strings.Join(strings.SplitN(string(content), "\n", 3)[:2], "\n"), "SPDX-License-Identifier: AGPL-3.0-only") {
@@ -566,6 +586,69 @@ func TestWebPositive(state *testing.T) {
 
 		if match := pattern.Find(content); match != nil {
 			state.Errorf("Test of the page failed, %s has %q", name, match)
+			return
+		}
+	}
+}
+
+// Test if every file of the web directory is a file of the page and served at its own path, each font is WOFF2 and its license names the three fonts.
+func TestPageFilesPositive(state *testing.T) {
+	var embedded []string
+	err := fs.WalkDir(webFiles, webDirectory, func(name string, entry fs.DirEntry, walkErr error) (err error) {
+		if err = walkErr; err != nil {
+			return
+		}
+
+		if !entry.IsDir() {
+			embedded = append(embedded, strings.TrimPrefix(name, webDirectory+"/"))
+		}
+
+		return
+	})
+
+	if err != nil {
+		state.Fatalf("Could not walk the web directory, error: %s", err.Error())
+	}
+
+	var served []string
+
+	for _, file := range pageFiles {
+		served = append(served, file.Name)
+
+		if (file.Name != "index.html") && (file.Path != "/"+file.Name) {
+			state.Errorf("Test of the page files failed, %s should be served at /%s, path: %s", file.Name, file.Name, file.Path)
+			return
+		}
+
+		content, readErr := webFiles.ReadFile(webDirectory + "/" + file.Name)
+
+		if err = readErr; err != nil {
+			state.Fatalf("Could not read %s, error: %s", file.Name, err.Error())
+		}
+
+		if strings.HasSuffix(file.Name, ".woff2") && ((file.ContentType != "font/woff2") || !strings.HasPrefix(string(content), "wOF2")) {
+			state.Errorf("Test of the page files failed, %s should be WOFF2 served as font/woff2, type: %s, start: %q", file.Name, file.ContentType, content[:min(4, len(content))])
+			return
+		}
+	}
+
+	slices.Sort(embedded)
+	slices.Sort(served)
+
+	if !slices.Equal(embedded, served) {
+		state.Errorf("Test of the page files failed, every embedded file should be served, embedded: %v, served: %v", embedded, served)
+		return
+	}
+
+	license, err := webFiles.ReadFile(webDirectory + "/fonts/OFL.txt")
+
+	if err != nil {
+		state.Fatalf("Could not read the font license, error: %s", err.Error())
+	}
+
+	for _, text := range []string{"SIL OPEN FONT LICENSE Version 1.1", "Copyright 2023 The Kode Mono Project Authors", "Copyright (c) 2016 The Inter Project Authors", "Copyright 2020 The JetBrains Mono Project Authors"} {
+		if !strings.Contains(string(license), text) {
+			state.Errorf("Test of the page files failed, fonts/OFL.txt should have %q", text)
 			return
 		}
 	}

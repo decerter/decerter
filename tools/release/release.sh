@@ -8,7 +8,8 @@
 # of that binary's dependencies with go-licenses (the full license texts, per architecture since their dependencies
 # could differ), and packs decerter_<version>_linux_<arch>.tar.gz in DIST (default dist) with one top-level directory:
 # decerter, LICENSE, LICENSE-Go.txt (the BSD license of the Go standard library and of the parts of internal/tlsrecord
-# derived from crypto/tls), README.md, THIRD_PARTY_NOTICES, docs/ and api/openapi.yaml. Then SHA256SUMS of both.
+# derived from crypto/tls), LICENSE-fonts.txt (the OFL of the fonts the ui page embeds), README.md, THIRD_PARTY_NOTICES,
+# docs/ and api/openapi.yaml. Then SHA256SUMS of both.
 #
 # The tarballs are reproducible from the same commit and Go toolchain: entries sorted by name, owner and group 0,
 # every mtime the commit time, fixed modes, gzip without a name or time stamp.
@@ -61,7 +62,8 @@ for arch in $ARCHITECTURES; do
 
 	cp LICENSE README.md "$directory/"
 	cp internal/tlsrecord/LICENSE-Go.txt "$directory/LICENSE-Go.txt"
-	cp docs/*.md "$directory/docs/"
+	cp internal/ui/web/fonts/OFL.txt "$directory/LICENSE-fonts.txt"
+	cp docs/*.md docs/*.svg "$directory/docs/"
 	cp api/openapi.yaml "$directory/api/"
 	find "$directory" -type d -exec chmod 0755 {} +
 	find "$directory" -type f -exec chmod 0644 {} +

@@ -59,6 +59,13 @@ type Credentials struct {
 	codeDeadline time.Time
 }
 
+// a file of the page: its name in the web directory, the path it is served at under the secret path and its Content-Type
+type pageFile struct {
+	Name        string
+	Path        string
+	ContentType string
+}
+
 func (target Target) String() (text string) {
 	text = string(target.Network) + ":" + target.Address
 	return

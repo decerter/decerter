@@ -15,12 +15,24 @@ import (
 	v1 "github.com/decerter/decerter/api"
 )
 
-// the page: index.html, app.js and app.css, vanilla JS with no build step
+// the page: index.html, app.js, app.css, the favicon and the fonts with their license, vanilla JS with no build step
 //
 //go:embed web
 var webFiles embed.FS
 
 var (
+	// the files of the page by the path they are served at under the secret path; the Content-Type is set, so it does not depend on the host's mime.types
+	// a unit test checks that every embedded file is here
+	pageFiles = []pageFile{
+		{Name: "index.html", Path: "/{$}", ContentType: "text/html; charset=utf-8"},
+		{Name: "app.js", Path: "/app.js", ContentType: "text/javascript; charset=utf-8"},
+		{Name: "app.css", Path: "/app.css", ContentType: "text/css; charset=utf-8"},
+		{Name: "favicon.svg", Path: "/favicon.svg", ContentType: "image/svg+xml"},
+		{Name: "fonts/inter-400-700-latin.woff2", Path: "/fonts/inter-400-700-latin.woff2", ContentType: "font/woff2"},
+		{Name: "fonts/jetbrains-mono-400-700-latin.woff2", Path: "/fonts/jetbrains-mono-400-700-latin.woff2", ContentType: "font/woff2"},
+		{Name: "fonts/kode-mono-700-latin.woff2", Path: "/fonts/kode-mono-700-latin.woff2", ContentType: "font/woff2"},
+		{Name: "fonts/OFL.txt", Path: "/fonts/OFL.txt", ContentType: "text/plain; charset=utf-8"},
+	}
 	// runs the opener with the URL until it is done, a variable so the tests start no browser
 	runOpener = func(opener string, address string) (err error) {
 		err = exec.Command(opener, address).Run()
@@ -45,9 +57,11 @@ func Listen() (listener net.Listener, host string, err error) {
 // the paths of the mux are below the secret path, the guard takes it off
 func Handler(target Target, credentials *Credentials, host string, logger *slog.Logger) (handler http.Handler) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", serveFile(webDirectory+"/index.html"))
-	mux.HandleFunc("GET /app.js", serveFile(webDirectory+"/app.js"))
-	mux.HandleFunc("GET /app.css", serveFile(webDirectory+"/app.css"))
+
+	for _, file := range pageFiles {
+		mux.HandleFunc(http.MethodGet+" "+file.Path, serveFile(webDirectory+"/"+file.Name, file.ContentType))
+	}
+
 	proxy := newProxy(target, logger)
 
 	// the methods of api/openapi.yaml; a pattern per method, "GET /" and a bare "/api/v1/" would overlap
@@ -59,8 +73,9 @@ func Handler(target Target, credentials *Credentials, host string, logger *slog.
 	return
 }
 
-func serveFile(name string) (handle http.HandlerFunc) {
+func serveFile(name string, contentType string) (handle http.HandlerFunc) {
 	handle = func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", contentType)
 		http.ServeFileFS(writer, request, webFiles, name)
 	}
 	return

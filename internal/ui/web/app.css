@@ -1,34 +1,52 @@
 /* SPDX-License-Identifier: AGPL-3.0-only */
 
-:root {
-  color-scheme: light dark;
-  --background: #fdfdfc;
-  --panel: #f3f3f1;
-  --text: #1d1d1b;
-  --muted: #6b6b66;
-  --border: #d6d6d1;
-  --accent: #b7791f;
-  --selected: #fbe8c4;
-  --danger: #b42318;
-  --up: #1f6fb2;
-  --down: #2f7d32;
-  --highlight: #ffd36b;
+/* the fonts are embedded with the page (OFL-1.1, fonts/OFL.txt), so it looks the same offline */
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/inter-400-700-latin.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #161615;
-    --panel: #20201e;
-    --text: #e8e8e3;
-    --muted: #9a9a93;
-    --border: #3a3a36;
-    --accent: #e0a440;
-    --selected: #4a3a1c;
-    --danger: #f0776c;
-    --up: #6aaee8;
-    --down: #7cc47f;
-    --highlight: #7a5a12;
-  }
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/jetbrains-mono-400-700-latin.woff2") format("woff2");
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Kode Mono";
+  src: url("fonts/kode-mono-700-latin.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* Lagoon, dark only */
+:root {
+  color-scheme: dark;
+  --background: #0c1429;
+  --panel: #121d39;
+  --border: #212f55;
+  --text: #e7eaf8;
+  --muted: #949fbf;
+  --accent: #5dd2ec;
+  --ok: #b2f075;
+  --cert: #5a6c92;
+  --selected: rgba(93, 210, 236, 0.14);
+  --hover: rgba(93, 210, 236, 0.07);
+  --ok-tint: rgba(178, 240, 117, 0.14);
+  --muted-tint: rgba(148, 159, 191, 0.14);
+  --danger: #ff7a93;
+  --danger-tint: rgba(255, 122, 147, 0.1);
+  --up: var(--accent);
+  --down: var(--ok);
+  --highlight: #f5d76e;
+  --sans: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
 }
 
 * {
@@ -37,55 +55,91 @@
 
 body {
   margin: 0;
-  font: 14px/1.4 system-ui, sans-serif;
+  font: 400 14px/1.45 var(--sans);
   background: var(--background);
   color: var(--text);
 }
 
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
 header {
   display: flex;
-  gap: 1em;
-  align-items: baseline;
-  padding: 0.5em 1em;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  align-items: center;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--border);
 }
 
-h1 {
+/* the logo: the icon and the wordmark, de cert er with cert struck through */
+h1.logo {
+  display: flex;
+  gap: 10px;
+  align-items: center;
   margin: 0;
-  font-size: 1.3em;
-  color: var(--accent);
+}
+
+.logo-icon {
+  display: block;
+  width: 32px;
+  height: 32px;
+}
+
+.wordmark {
+  font: 700 24px/1 "Kode Mono", ui-monospace, monospace;
+  color: var(--text);
+}
+
+.wordmark .cert {
+  color: var(--cert);
+  text-decoration: line-through;
+  text-decoration-color: var(--accent);
+  text-decoration-thickness: 0.1em;
+}
+
+#status {
+  flex: 1 1 20em;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 13px;
 }
 
 h2 {
-  margin: 0.2em 0 0.5em;
-  font-size: 1.1em;
+  margin: 0 0 12px;
+  font-size: 16px;
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
 h3 {
   margin: 0;
-  font-size: 1em;
+  font-size: 14px;
+  font-weight: 600;
 }
 
 main {
   display: grid;
   grid-template-columns: minmax(0, 5fr) minmax(0, 5fr) minmax(0, 3fr);
-  gap: 1em;
-  padding: 1em;
-}
-
-/* a wide flow table scrolls in its own column instead of running under the flow view */
-#flows-pane {
-  overflow-x: auto;
+  gap: 16px;
+  padding: 16px;
+  align-items: start;
 }
 
 section {
   min-width: 0;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px;
 }
 
-#intercept-pane {
-  background: var(--panel);
-  padding: 0.8em;
-  border-radius: 6px;
+/* a wide table scrolls in its own panel instead of running under the next one or widening the page */
+#flows-pane,
+#detail-pane {
+  overflow-x: auto;
 }
 
 @media (max-width: 1100px) {
@@ -94,15 +148,26 @@ section {
   }
 }
 
+@media (max-width: 600px) {
+  main {
+    gap: 12px;
+    padding: 12px;
+  }
+
+  section {
+    padding: 12px;
+  }
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.9em;
+  font: 400 13px/1.4 var(--mono);
 }
 
 th,
 td {
-  padding: 0.25em 0.4em;
+  padding: 6px 8px;
   text-align: left;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
@@ -111,12 +176,21 @@ td {
   max-width: 16em;
 }
 
+th {
+  font: 600 12px/1.4 var(--sans);
+  color: var(--muted);
+}
+
 tbody tr {
   cursor: pointer;
 }
 
-tbody tr:hover,
-.selected {
+tbody tr:hover {
+  background: var(--hover);
+}
+
+.selected,
+tbody tr.selected:hover {
   background: var(--selected);
 }
 
@@ -135,8 +209,8 @@ td.down {
 dl {
   display: grid;
   grid-template-columns: max-content minmax(0, 1fr);
-  gap: 0.1em 1em;
-  margin: 0 0 1em;
+  gap: 4px 16px;
+  margin: 0 0 12px;
 }
 
 dt {
@@ -150,14 +224,23 @@ dd {
 
 .row {
   display: flex;
-  gap: 0.5em;
+  gap: 8px;
   align-items: center;
   flex-wrap: wrap;
-  margin: 0.4em 0;
+  margin: 8px 0;
 }
 
 .toolbar {
-  margin-top: 1em;
+  margin-top: 16px;
+}
+
+label {
+  cursor: pointer;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
 }
 
 input[type="text"],
@@ -167,25 +250,48 @@ textarea {
   color: inherit;
   background: var(--background);
   border: 1px solid var(--border);
-  border-radius: 4px;
-  padding: 0.3em 0.4em;
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+input[type="text"],
+select {
+  min-height: 44px;
+}
+
+input[type="text"]:focus,
+select:focus,
+textarea:focus {
+  border-color: var(--accent);
 }
 
 input[type="text"] {
   flex: 1;
   min-width: 10em;
   width: 100%;
-  font-family: ui-monospace, monospace;
+  font-family: var(--mono);
+  font-size: 13px;
 }
 
+input::placeholder,
+textarea::placeholder {
+  color: var(--muted);
+}
+
+/* buttons: primary filled, positive and danger outlined in their colour, the others in the line colour */
 button {
-  font: inherit;
-  padding: 0.25em 0.8em;
+  min-height: 44px;
+  padding: 0 16px;
+  font: 600 14px/1.2 var(--sans);
+  color: var(--text);
+  background: transparent;
   border: 1px solid var(--border);
-  border-radius: 4px;
-  background: var(--panel);
-  color: inherit;
+  border-radius: 8px;
   cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--muted);
 }
 
 button:disabled {
@@ -193,22 +299,49 @@ button:disabled {
   opacity: 0.5;
 }
 
+button.primary {
+  color: var(--background);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+button.primary:hover:not(:disabled) {
+  border-color: var(--text);
+}
+
+button.positive {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+button.positive:hover:not(:disabled) {
+  background: var(--ok-tint);
+  border-color: var(--ok);
+}
+
 button.danger {
   color: var(--danger);
+  border-color: var(--danger);
+}
+
+button.danger:hover:not(:disabled) {
+  background: var(--danger-tint);
+  border-color: var(--danger);
 }
 
 .payload,
 textarea,
 .preview {
-  font-family: ui-monospace, monospace;
-  font-size: 0.85em;
+  font-family: var(--mono);
+  font-size: 13px;
 }
 
 .payload {
-  margin: 0.5em 0 0;
-  padding: 0.6em;
-  background: var(--panel);
-  border-radius: 4px;
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 8px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   max-height: 60vh;
@@ -230,8 +363,16 @@ textarea {
 }
 
 .holds li {
-  padding: 0.4em;
+  padding: 8px;
   border-bottom: 1px solid var(--border);
+}
+
+.holds li.selected {
+  border-radius: 8px;
+}
+
+#editor {
+  margin-top: 16px;
 }
 
 .preview {
@@ -243,32 +384,51 @@ textarea {
 
 .muted {
   color: var(--muted);
+  font-weight: 400;
 }
 
 .error {
-  margin: 0.5em 1em 0;
-  padding: 0.5em;
+  margin: 12px 16px 0;
+  padding: 10px 12px;
   border: 1px solid var(--danger);
-  border-radius: 4px;
+  border-radius: 8px;
+  background: var(--danger-tint);
   color: var(--danger);
   white-space: pre-wrap;
 }
 
+/* pills: the live badge and the state of a flow */
+.badge,
+.pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 99px;
+  font: 700 13px/1.4 var(--mono);
+}
+
 .badge {
   margin-left: auto;
-  padding: 0 0.6em;
-  border-radius: 1em;
-  font-size: 0.85em;
+}
+
+.pill {
+  padding: 0 8px;
+  font-size: 12px;
 }
 
 .badge.on {
-  background: var(--down);
-  color: var(--background);
+  color: var(--ok);
+  background: var(--ok-tint);
 }
 
-.badge.off {
-  background: var(--muted);
-  color: var(--background);
+.badge.off,
+.pill.idle {
+  color: var(--muted);
+  background: var(--muted-tint);
+}
+
+.pill.active {
+  color: var(--accent);
+  background: var(--selected);
 }
 
 [hidden] {
@@ -279,17 +439,18 @@ textarea {
 .decode-split {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.6em;
+  gap: 8px;
   align-items: flex-start;
 }
 
 .decode {
   flex: 1 1 18em;
   min-width: 0;
-  margin-top: 0.5em;
-  padding: 0.4em 0.6em;
-  background: var(--panel);
-  border-radius: 4px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: var(--background);
+  border: 1px solid var(--border);
+  border-radius: 8px;
   max-height: 60vh;
   overflow: auto;
 }
@@ -306,13 +467,13 @@ textarea {
 }
 
 .decode-summary {
-  margin: 0.3em 0;
+  margin: 4px 0;
   font-weight: 600;
   overflow-wrap: anywhere;
 }
 
 .decode p {
-  margin: 0.2em 0;
+  margin: 4px 0;
 }
 
 .tree,
@@ -324,15 +485,15 @@ textarea {
 
 .tree {
   padding-left: 0;
-  font-family: ui-monospace, monospace;
-  font-size: 0.85em;
+  font-family: var(--mono);
+  font-size: 13px;
 }
 
 .tree .node {
   display: flex;
-  gap: 0.3em;
-  padding: 0 0.2em;
-  border-radius: 3px;
+  gap: 4px;
+  padding: 0 4px;
+  border-radius: 4px;
   cursor: pointer;
   overflow-wrap: anywhere;
 }
@@ -341,16 +502,27 @@ textarea {
   background: var(--selected);
 }
 
-.tree .node.selected {
+/* the selected node and its bytes in the marker colour, with dark text */
+.tree .node.selected,
+.byte.hl,
+.char.hl {
+  color: var(--background);
   background: var(--highlight);
+}
+
+.tree .node.selected .node-error {
+  color: inherit;
 }
 
 .tree .twisty {
   flex: none;
   width: 1.2em;
+  min-height: 0;
   padding: 0;
   border: none;
   background: none;
+  color: inherit;
+  font: inherit;
 }
 
 .tree .leaf {
@@ -367,30 +539,28 @@ textarea {
   cursor: pointer;
 }
 
-.byte.hl,
-.char.hl {
-  background: var(--highlight);
-}
-
 /* a download of the flow view */
 a.action-link {
-  color: inherit;
+  color: var(--accent);
   text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 /* a message a stream node has bytes in */
 button.link {
+  min-height: 0;
+  padding: 0;
   border: none;
   background: none;
-  padding: 0;
-  color: inherit;
-  text-decoration: underline;
-  cursor: pointer;
+  color: var(--accent);
   font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
 }
 
 #stream-view > summary {
   cursor: pointer;
   font-weight: 600;
-  margin: 0.5em 0;
+  margin: 12px 0 8px;
 }

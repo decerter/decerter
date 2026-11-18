@@ -25,7 +25,7 @@ dist/decerter_<version>_linux_arm64.tar.gz
 dist/SHA256SUMS
 ```
 
-Each tarball has one directory `decerter_<version>_linux_<arch>/` with the static binary `decerter` (`-trimpath`, `-buildvcs=false`, no build id), `LICENSE`, `LICENSE-Go.txt` (the BSD license of the Go standard library and of the code in `internal/tlsrecord` derived from `crypto/tls`), `README.md`, `docs/`, `api/openapi.yaml` and `THIRD_PARTY_NOTICES`: the full license texts of the Go modules in that architecture's binary, from `go-licenses report` with `tools/release/notices.tpl`. The tarballs are reproducible from one commit with one Go toolchain: sorted entries, owner and group 0, every mtime the commit time, fixed modes, gzip without a name or time stamp. `make release` refuses a work tree with changes or untracked files unless `ALLOW_DIRTY=1`; it tags, pushes and publishes nothing. It needs `go-licenses` (`make install-go-licenses`) and `file`.
+Each tarball has one directory `decerter_<version>_linux_<arch>/` with the static binary `decerter` (`-trimpath`, `-buildvcs=false`, no build id), `LICENSE`, `LICENSE-Go.txt` (the BSD license of the Go standard library and of the code in `internal/tlsrecord` derived from `crypto/tls`), `LICENSE-fonts.txt` (the SIL Open Font License of the fonts the UI page embeds, a copy of `internal/ui/web/fonts/OFL.txt`), `README.md`, `docs/`, `api/openapi.yaml` and `THIRD_PARTY_NOTICES`: the full license texts of the Go modules in that architecture's binary, from `go-licenses report` with `tools/release/notices.tpl`. The tarballs are reproducible from one commit with one Go toolchain: sorted entries, owner and group 0, every mtime the commit time, fixed modes, gzip without a name or time stamp. `make release` refuses a work tree with changes or untracked files unless `ALLOW_DIRTY=1`; it tags, pushes and publishes nothing. It needs `go-licenses` (`make install-go-licenses`) and `file`.
 
 ## Static analysis and tests
 ```sh
@@ -69,7 +69,8 @@ Every source file starts with an SPDX line for its license:
 |---|---|---|
 | Go userspace, tools, tests (also the C and C++ of `tools/offsetgen` and the Java, Kotlin and Dart of the Android test apps), Makefile, scripts, YAML | `AGPL-3.0-only` | `// SPDX-License-Identifier: AGPL-3.0-only` (`#` in Makefile, scripts and YAML) |
 | BPF C programs and headers we write (`bpf/**/*.{c,h}`) | `GPL-2.0-only OR MIT` | `// SPDX-License-Identifier: GPL-2.0-only OR MIT` |
-| Minimal UI page (`internal/ui/web/*.{html,js,css}`) | `AGPL-3.0-only` | `<!-- SPDX-License-Identifier: AGPL-3.0-only -->` right after the doctype in HTML, `// …` in JS, `/* … */` in CSS |
+| Minimal UI page (`internal/ui/web/*.{html,js,css,svg}`) and the README logo (`docs/logo.svg`) | `AGPL-3.0-only` | `<!-- SPDX-License-Identifier: AGPL-3.0-only -->` right after the doctype in HTML and as the first line of an SVG, `// …` in JS, `/* … */` in CSS |
+| Vendored fonts of the UI page (`internal/ui/web/fonts/*`: Kode Mono, Inter, JetBrains Mono, Latin subsets) | `OFL-1.1` | unchanged, license in `internal/ui/web/fonts/OFL.txt` |
 | Control API contract (`api/openapi.yaml`) and its Go types (`api/types.go`) | `MIT` | `# SPDX-License-Identifier: MIT` in the YAML, `// SPDX-License-Identifier: MIT` in Go |
 | Vendored libbpf headers (`bpf/include/bpf/*`) | `LGPL-2.1 OR BSD-2-Clause` | unchanged, kept exactly as shipped by libbpf |
 | Kernel type header (`bpf/vmlinux.h`, `make generate-vmlinux`) | `GPL-2.0-only`, the Linux kernel's types | none, kept exactly as bpftool dumps it |
@@ -79,7 +80,7 @@ Every source file starts with an SPDX line for its license:
 
 In files that need a first line of their own, such as a script shebang or the HTML doctype, the SPDX line comes right after it.
 
-`make license-check` checks these lines in every `.go`, `.c`, `.h`, `.cc`, `.java`, `.kt`, `.dart`, `.sh`, `.yaml` and `.yml` file, Makefile and the HTML, JS and CSS of `internal/ui/web` (`tools/licensecheck/spdx.sh`), and runs [go-licenses](https://github.com/google/go-licenses) on the dependencies: a new dependency must have a license on the `ALLOWED_LICENSES` list of the Makefile, all of which can be combined with `AGPL-3.0-only`.
+`make license-check` checks these lines in every `.go`, `.c`, `.h`, `.cc`, `.java`, `.kt`, `.dart`, `.sh`, `.yaml` and `.yml` file, Makefile, the HTML, JS and CSS of `internal/ui/web` and every `.svg` (`tools/licensecheck/spdx.sh`), and runs [go-licenses](https://github.com/google/go-licenses) on the dependencies: a new dependency must have a license on the `ALLOWED_LICENSES` list of the Makefile, all of which can be combined with `AGPL-3.0-only`.
 
 ## BPF objects
 The BPF objects are built from the committed `bpf/vmlinux.h`, bpftool's dump of the dev box's kernel types (7.0.3), so every build sees the same kernel types; CO-RE relocates them to the running kernel when decerter loads. Regenerating them needs clang-21 and llvm-strip-21:

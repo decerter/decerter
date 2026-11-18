@@ -17,7 +17,7 @@ import (
 	"time"
 )
 
-// Test if the ui answers the browser's own favicon request, which comes at the root without the cookie, with 204 and no body.
+// Test if the ui answers the browser's own favicon request, which comes at the root without the cookie, with 204 and no body, and serves the page's favicon.svg under the secret path with the cookie.
 func TestFaviconPositive(state *testing.T) {
 	current := startUI(state)
 	answer, body := current.do(state, uiRequest{Method: http.MethodGet, Path: "/favicon.ico", IsRoot: true, Cookie: "-"})
@@ -25,6 +25,47 @@ func TestFaviconPositive(state *testing.T) {
 	if (answer.StatusCode != http.StatusNoContent) || (body != "") || !hasSecurityHeaders(answer.Header) {
 		state.Errorf("Test of the ui favicon failed, status should be %d without a body, status: %d, body: %q", http.StatusNoContent, answer.StatusCode, body)
 		return
+	}
+
+	favicon, err := webFiles.ReadFile(webDirectory + "/favicon.svg")
+
+	if err != nil {
+		state.Fatalf("Could not read favicon.svg, error: %s", err.Error())
+	}
+
+	answer, body = current.do(state, uiRequest{Method: http.MethodGet, Path: "/favicon.svg"})
+
+	if (answer.StatusCode != http.StatusOK) || (answer.Header.Get("Content-Type") != "image/svg+xml") || (body != string(favicon)) || !hasSecurityHeaders(answer.Header) {
+		state.Errorf("Test of the ui favicon failed, favicon.svg should be served as image/svg+xml, status: %d, headers: %v, body: %q", answer.StatusCode, answer.Header, body)
+		return
+	}
+}
+
+// Test if the ui refuses favicon.svg with 403 without the cookie, with a wrong one, outside the secret path or with another Host.
+func TestFaviconNegative(state *testing.T) {
+	current := startUI(state)
+	_, port, err := net.SplitHostPort(current.host)
+
+	if err != nil {
+		state.Fatalf("Could not split the ui host, error: %s", err.Error())
+	}
+
+	negativeCases := []uiRequest{
+		{Method: http.MethodGet, Path: "/favicon.svg", Cookie: "-"},
+		{Method: http.MethodGet, Path: "/favicon.svg", Cookie: otherToken(current.credentials.Token)},
+		{Method: http.MethodGet, Path: "/favicon.svg", IsRoot: true},
+		{Method: http.MethodGet, Path: "/favicon.svg", IsRoot: true, Cookie: "-"},
+		{Method: http.MethodGet, Path: "/favicon.svg", Host: "localhost:" + port},
+		{Method: http.MethodGet, Path: "/favicon.svg", Host: "rebind.example:" + port},
+	}
+
+	for _, negative := range negativeCases {
+		answer, body := current.do(state, negative)
+
+		if (answer.StatusCode != http.StatusForbidden) || strings.Contains(body, "<svg") || !hasSecurityHeaders(answer.Header) {
+			state.Errorf("Test of the ui favicon failed, %s with root %t, host %q and cookie %q should be 403, status: %d, body: %q", negative.Path, negative.IsRoot, negative.Host, negative.Cookie, answer.StatusCode, body)
+			return
+		}
 	}
 }
 
