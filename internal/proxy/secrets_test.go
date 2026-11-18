@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/tlsrecord"
-	"github.com/cilium/ebpf"
 )
 
 // a record layer that holds one record until its secrets are set or it is released

@@ -21,10 +21,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/decerter/decerter/internal/bpf"
-	"github.com/decerter/decerter/internal/tlsrecord"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/ringbuf"
+	"github.com/decerter/decerter/internal/bpf"
+	"github.com/decerter/decerter/internal/tlsrecord"
 )
 
 // NSS key log line labels, tshark decrypts no TLS 1.3 stream without the two handshake traffic secret lines

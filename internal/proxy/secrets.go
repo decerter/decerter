@@ -7,9 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/tlsrecord"
-	"github.com/cilium/ebpf"
 )
 
 // the record layer of a TLS or a DTLS interception as the wait for its secrets sees it

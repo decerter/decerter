@@ -17,10 +17,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/decerter/decerter/internal/bpf"
-	"github.com/decerter/decerter/internal/output"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/decerter/decerter/internal/bpf"
+	"github.com/decerter/decerter/internal/output"
 	"golang.org/x/sys/unix"
 )
 

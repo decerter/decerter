@@ -12,11 +12,11 @@ import (
 	"log/slog"
 	"runtime"
 
+	"github.com/cilium/ebpf"
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/tls/boringssl"
 	"github.com/decerter/decerter/internal/tls/openssl"
 	"github.com/decerter/decerter/internal/tlsrecord"
-	"github.com/cilium/ebpf"
 )
 
 const (

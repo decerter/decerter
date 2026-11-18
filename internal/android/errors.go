@@ -24,7 +24,7 @@ var (
 	ErrOldKernel        = errors.New("kernel is too old")
 	ErrKernelVersion    = errors.New("could not parse the kernel release")
 	ErrBinary           = errors.New("binary does not fit the device")
-	ErrDecerterRunning      = errors.New("decerter runs on the device, stop it first")
+	ErrDecerterRunning  = errors.New("decerter runs on the device, stop it first")
 	ErrBinaryPath       = errors.New("the binary path on the device is taken")
 	ErrBinaryNotWorking = errors.New("the pushed binary does not run")
 	ErrForward          = errors.New("could not forward the api socket")

@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/decerter/decerter/internal/attach"
 	"github.com/cilium/ebpf"
+	"github.com/decerter/decerter/internal/attach"
 )
 
 // Test if attach.OpenExecutable returns with the expected output for this test's binary.

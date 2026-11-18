@@ -8,11 +8,11 @@ package secrets
 import (
 	"fmt"
 
+	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/rlimit"
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/tls/boringssl"
 	"github.com/decerter/decerter/internal/tls/openssl"
-	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/rlimit"
 )
 
 //go:generate go tool bpf2go -tags linux -cflags "-O2 -g -Wall -Werror -fms-extensions -Wno-microsoft-anon-tag -mcpu=v4 $BPF_CFLAGS" -target amd64,arm64 bpf ../../../bpf/secrets/secrets.c -- -I../../../bpf -I../../../bpf/include

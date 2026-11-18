@@ -15,12 +15,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/decerter/decerter/internal/bpf"
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
 	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/pcapng"
 	"github.com/decerter/decerter/internal/tlsrecord"
-	"github.com/cilium/ebpf"
 )
 
 // the packets of the blocks as they were captured and the key logs of the DSBs, in their order: "p" for a packet, "k" for a DSB

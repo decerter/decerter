@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/decerter/decerter/internal/bpf"
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/decerter/decerter/internal/bpf"
 	"golang.org/x/sys/unix"
 )
 

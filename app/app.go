@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cilium/ebpf"
 	v1 "github.com/decerter/decerter/api"
 	"github.com/decerter/decerter/internal/api"
 	"github.com/decerter/decerter/internal/attach"
@@ -35,7 +36,6 @@ import (
 	"github.com/decerter/decerter/internal/proxy"
 	"github.com/decerter/decerter/internal/route"
 	"github.com/decerter/decerter/internal/tls/openssl"
-	"github.com/cilium/ebpf"
 )
 
 const (

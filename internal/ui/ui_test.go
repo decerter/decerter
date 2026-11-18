@@ -370,10 +370,10 @@ func TestProxyStreamPositive(state *testing.T) {
 // Test if ParseTarget returns with the expected target for paths, abstract sockets and loopback addresses.
 func TestParseTargetPositive(state *testing.T) {
 	positiveCases := map[string]Target{
-		"/run/decerter/api.sock":      {Network: UnixNetwork, Address: "/run/decerter/api.sock"},
+		"/run/decerter/api.sock":  {Network: UnixNetwork, Address: "/run/decerter/api.sock"},
 		"api.sock":                {Network: UnixNetwork, Address: "api.sock"},
 		"./127.0.0.1:8080":        {Network: UnixNetwork, Address: "./127.0.0.1:8080"},
-		"@decerter-api":               {Network: UnixNetwork, Address: "@decerter-api"},
+		"@decerter-api":           {Network: UnixNetwork, Address: "@decerter-api"},
 		"127.0.0.1:8080":          {Network: TCPNetwork, Address: "127.0.0.1:8080"},
 		"127.1.2.3:8080":          {Network: TCPNetwork, Address: "127.1.2.3:8080"},
 		"[::1]:8080":              {Network: TCPNetwork, Address: "[::1]:8080"},

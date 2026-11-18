@@ -33,12 +33,12 @@ const (
 	// an installed app with the INTERNET permission whose UID the clients borrow, netd refuses sockets to a UID without it
 	appPackage string = "com.android.proxyhandler"
 	// the binaries on the device; decerter is found by name with pidof
-	decerterBinary   string = "decerter"
-	clientBinary string = "client"
-	decerterPackage  string = "github.com/decerter/decerter/cmd/decerter"
-	dexName      string = "decerter-https.dex"
-	caName       string = "ca.crt"
-	ecdsaCAName  string = "ca-ecdsa.crt"
+	decerterBinary  string = "decerter"
+	clientBinary    string = "client"
+	decerterPackage string = "github.com/decerter/decerter/cmd/decerter"
+	dexName         string = "decerter-https.dex"
+	caName          string = "ca.crt"
+	ecdsaCAName     string = "ca-ecdsa.crt"
 	// what decerter logs once it is attached, per mode
 	redirectReady string = `"msg":"Redirecting flows"`
 	captureReady  string = `"msg":"Capturing packets"`

@@ -27,6 +27,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/decerter/decerter/api"
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/bpf/redirect"
@@ -35,7 +36,6 @@ import (
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/output"
 	"github.com/decerter/decerter/internal/tlsrecord"
-	"github.com/cilium/ebpf"
 )
 
 var (

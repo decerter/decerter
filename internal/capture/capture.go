@@ -15,6 +15,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/ringbuf"
 	"github.com/decerter/decerter/internal/bpf"
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
 	"github.com/decerter/decerter/internal/bpf/redirect"
@@ -22,8 +24,6 @@ import (
 	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/tlsrecord"
-	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/ringbuf"
 	"golang.org/x/sys/unix"
 )
 

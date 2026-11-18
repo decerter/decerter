@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/ebpf"
 	v1 "github.com/decerter/decerter/api"
 	"github.com/decerter/decerter/internal/api"
 	"github.com/decerter/decerter/internal/attach"
@@ -29,7 +30,6 @@ import (
 	"github.com/decerter/decerter/internal/proxy"
 	"github.com/decerter/decerter/internal/tls/boringssl"
 	"github.com/decerter/decerter/internal/tls/openssl"
-	"github.com/cilium/ebpf"
 )
 
 // the options of app.New the tests change, the rest is the default of run mode

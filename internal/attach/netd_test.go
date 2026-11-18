@@ -13,8 +13,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/decerter/decerter/internal/attach"
 	"github.com/cilium/ebpf"
+	"github.com/decerter/decerter/internal/attach"
 )
 
 // the hooks netd held on the Android 15 emulator that run mode shares

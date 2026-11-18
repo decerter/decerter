@@ -408,7 +408,7 @@ func TestNextCommandsPositive(state *testing.T) {
 		Root      RootType
 		Package   string
 		BlockQuic bool
-		Decerter      string
+		Decerter  string
 		Device    string
 		UI        string
 	}{
@@ -518,14 +518,14 @@ func TestFindADBNegative(state *testing.T) {
 // Test if android.shellQuote returns with the expected output for words the shell would split or expand.
 func TestShellQuotePositive(state *testing.T) {
 	positiveCases := map[string]string{
-		"com.example.app": "com.example.app",
-		"@decerter-api":       "@decerter-api",
-		"":                "''",
-		"my tools/decerter":   "'my tools/decerter'",
-		"it's":            `'it'\''s'`,
-		"$(reboot)":       "'$(reboot)'",
-		"a;b":             "'a;b'",
-		"<package>":       "'<package>'",
+		"com.example.app":   "com.example.app",
+		"@decerter-api":     "@decerter-api",
+		"":                  "''",
+		"my tools/decerter": "'my tools/decerter'",
+		"it's":              `'it'\''s'`,
+		"$(reboot)":         "'$(reboot)'",
+		"a;b":               "'a;b'",
+		"<package>":         "'<package>'",
 	}
 
 	for word, expected := range positiveCases {

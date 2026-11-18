@@ -9,12 +9,12 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/cilium/ebpf"
 	"github.com/decerter/decerter/internal/bpf"
 	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/output"
 	"github.com/decerter/decerter/internal/tlsrecord"
-	"github.com/cilium/ebpf"
 )
 
 // one item of the send queue of a direction: a datagram that goes on as it came, or a DTLS record and what to do with it

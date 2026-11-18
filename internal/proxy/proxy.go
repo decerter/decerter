@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/cilium/ebpf"
 	"github.com/decerter/decerter/internal/bpf"
 	capturebpf "github.com/decerter/decerter/internal/bpf/capture"
 	"github.com/decerter/decerter/internal/bpf/redirect"
@@ -19,7 +20,6 @@ import (
 	"github.com/decerter/decerter/internal/filter"
 	"github.com/decerter/decerter/internal/history"
 	"github.com/decerter/decerter/internal/output"
-	"github.com/cilium/ebpf"
 	"golang.org/x/sys/unix"
 )
 
