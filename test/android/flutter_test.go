@@ -82,7 +82,7 @@ type flutterApp struct {
 	err      error
 }
 
-// build the Flutter test app with each SDK of decerter_E2E_FLUTTER as the invoking user, cached in ~/.cache/decerter-flutter/e2e by Flutter release and sources
+// build the Flutter test app with each SDK of DECERTER_E2E_FLUTTER as the invoking user, cached in ~/.cache/decerter-flutter/e2e by Flutter release and sources
 func buildFlutterApps(account hostAccount, sdk string) (apps []flutterApp, skipReason string) {
 	sdks := filepath.SplitList(os.Getenv(flutterEnvironment))
 
@@ -760,7 +760,7 @@ func TestFlutterRewritePositive(state *testing.T) {
 }
 
 // Test if rules added over the API rewrite both directions of the Flutter app's dart:io call with the suites of flutterSuiteNames, for the last
-// Flutter release of decerter_E2E_FLUTTER: GET / becomes GET /test at the server over the suite it is pinned to, and its answer /test becomes /TEST in the app.
+// Flutter release of DECERTER_E2E_FLUTTER: GET / becomes GET /test at the server over the suite it is pinned to, and its answer /test becomes /TEST in the app.
 func TestFlutterCipherSuitesPositive(state *testing.T) {
 	apps := requireFlutter(state)
 	app := apps[len(apps)-1]

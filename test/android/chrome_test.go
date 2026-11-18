@@ -78,7 +78,7 @@ type udpSink struct {
 	count *atomic.Int64
 }
 
-// the ChromePublic apk of decerter_E2E_CHROMIUM and a copy whose manifest has an unknown version, cached in ~/.cache/decerter-chromium/e2e by the apk's
+// the ChromePublic apk of DECERTER_E2E_CHROMIUM and a copy whose manifest has an unknown version, cached in ~/.cache/decerter-chromium/e2e by the apk's
 // size and time; a missing variable skips the cases, a failed copy fails the negative one
 func prepareChromium(ctx context.Context, account hostAccount, sdk string) (apk string, doctored string, skipReason string, err error) {
 	apk = os.Getenv(chromiumEnvironment)

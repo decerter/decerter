@@ -187,7 +187,7 @@ test-e2e: ## Run the e2e tests with sudo, needs root and the local users test an
 # decerter runs on the emulator, never on the host: the tests use a running x86_64 or arm64 emulator, or decerter android setup boots the AVD decerter-a15 (system-images;android-35;google_apis;x86_64,
 # arm64-v8a on an Apple Silicon Mac, google_apis because its adbd may run as root) from ANDROID_SDK_ROOT or ~/Android/Sdk as the cold setup case, and they stop it again; the tests build
 # decerter for the host (Linux or macOS, it runs setup and ui) and decerter and the client for the emulator's ABI; javac (a JDK) and the SDK's d8 build the Conscrypt client, tshark reads the live capture
-# the Flutter test app is built as your user with each SDK of decerter_E2E_FLUTTER (colon separated), cached in ~/.cache/decerter-flutter/e2e; the first build of an SDK takes minutes
+# the Flutter test app is built as your user with each SDK of DECERTER_E2E_FLUTTER (colon separated), cached in ~/.cache/decerter-flutter/e2e; the first build of an SDK takes minutes
 .PHONY: test-e2e-android
 test-e2e-android: ## Run the Android e2e tests on the emulator with sudo, needs the Android SDK with the emulator and the AVD decerter-a15, a JDK and tshark; the Flutter cases need DECERTER_E2E_FLUTTER (default is every ~/.cache/decerter-flutter/*/flutter), the ChromePublic cases DECERTER_E2E_CHROMIUM
 	sudo DECERTER_E2E_FLUTTER="$(DECERTER_E2E_FLUTTER)" DECERTER_E2E_CHROMIUM="$(DECERTER_E2E_CHROMIUM)" go test -tags=e2e_android -count=1 -timeout 60m ./test/android/
