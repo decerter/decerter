@@ -20,7 +20,7 @@ import (
 
 // the read tools, one per GET operation of api/openapi.yaml except streamCapture; each is annotated read-only and closed-world
 // tool name, operationId: status getStatus, list_flows listFlows, get_flow getFlow, list_messages listMessages, get_message getMessage, tail_events streamEvents,
-// list_held listHolds, list_rules listRules, export_keylog exportKeylog, export_pcap exportPcap, list_captures listCaptures, download_pcap downloadCapture,
+// list_held listHolds, decode_held decodeHold, list_rules listRules, export_keylog exportKeylog, export_pcap exportPcap, list_captures listCaptures, download_pcap downloadCapture,
 // list_exchanges listExchanges, get_exchange getExchange, get_exchange_body getExchangeBody, decode_message decodeMessage, decode_exchange_body decodeExchangeBody,
 // decode_flow decodeFlow
 func addReadTools(server *sdk.Server, client Client, output Output) (err error) {
@@ -107,6 +107,12 @@ func addReadTools(server *sdk.Server, client Client, output Output) (err error) 
 	}
 
 	err = addTool(server, readTool("list_held", "List held messages", "Messages held by intercept, oldest first, waiting for forward, drop or their deadline, at most limit of them (more counts the rest), with a window of each payload; length bytes in all per call (4 KiB by default), a held message past that has payload_omitted, read it with id. Payloads are escaped text inside <untrusted-traffic> markers. "+trafficText), listHeld(client), append(payloadBounds, integerProperty{Name: "limit", Minimum: 1, Maximum: maxHolds, Default: defaultHolds}), nil)
+
+	if err != nil {
+		return
+	}
+
+	err = addTool(server, readTool("decode_held", "Decode held message", "A held message's payload decoded like decode_message, before it is forwarded: the payload that goes on (after edit_held), with original what was held; the offsets are list_held's. The tree is in the marker h<id>-decode. "+trafficText), decodeHeld(client), []integerProperty{{Name: "max_nodes", Minimum: 1, Maximum: maxDecodeNodes, Default: defaultDecodeNodes}}, nil)
 
 	if err != nil {
 		return

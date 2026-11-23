@@ -33,6 +33,7 @@ var (
 		"decode_exchange_body": "decodeExchangeBody", "decode_flow": "decodeFlow",
 		"tail_events":   "streamEvents",
 		"list_held":     "listHolds",
+		"decode_held":   "decodeHold",
 		"list_rules":    "listRules",
 		"export_keylog": "exportKeylog",
 		"export_pcap":   "exportPcap",

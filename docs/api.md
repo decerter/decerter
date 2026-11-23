@@ -40,6 +40,7 @@ The host in the URL is `decerter`, `localhost` or a loopback address (with or wi
 | `PUT /intercept` | setIntercept | turn holding on or off, with a filter, a direction and a layer |
 | `GET /holds` | listHolds | held messages with their payloads, or with `offset` and `length` a window of each |
 | `PUT /holds/{id}` | editHold | replace a held message's payload |
+| `GET /holds/{id}/decode` | decodeHold | the held payload decoded into a tree of fields, before it goes on; `as`, `original` |
 | `POST /holds/{id}/forward` | forwardHold | let it go on |
 | `POST /holds/{id}/drop` | dropHold | drop it |
 | `GET /rules` | listRules | the API's match-and-replace rules in the order they run |

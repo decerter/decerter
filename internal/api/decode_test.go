@@ -101,6 +101,41 @@ func TestDecodePositive(state *testing.T) {
 	}
 }
 
+// Test if decodeHold returns with the expected output: a held udp message edited to a DNS query is dns by the port of its flow with offsets of the payload
+// that goes on, original=true decodes what came to the hold queue.
+func TestDecodeHoldPositive(state *testing.T) {
+	test, err := newTestBackend(state.Context())
+
+	if err != nil {
+		state.Fatalf("Test of decodeHold failed, cannot fill the backend, error: %s", err.Error())
+	}
+
+	defer test.stop()
+	server := httptest.NewServer(Handler(test.backend, slog.New(slog.DiscardHandler)))
+	defer server.Close()
+	status, _, body, err := send(state.Context(), server, http.MethodPut, fmt.Sprintf("%s/holds/%d", v1.BasePath, test.heldID), fmt.Sprintf(`{"payload": {"type": "hex", "value": "%s"}}`, hex.EncodeToString(testDNSQuery)))
+
+	if (err != nil) || (status != http.StatusOK) {
+		state.Fatalf("Test of decodeHold failed, cannot edit the held message, status: %d, body: %s, error: %v", status, body, err)
+	}
+
+	result := v1.Decode{}
+	status, err = getJSON(server, fmt.Sprintf("/holds/%d/decode", test.heldID), &result)
+	name := nodeNamed(result.Tree, "dns.qry.name")
+
+	if (err != nil) || (status != http.StatusOK) || (result.Protocol != "dns") || (result.MessageID != test.heldID) || (result.Source != v1.PayloadDecodeSource) || (result.Summary != "Standard query 0xbeef A example.com") ||
+		(result.Candidates[0].Basis != v1.PortDecodeBasis) || (name == nil) || (name.Offset != 12) || (name.Length != 13) || (result.Total != len(testDNSQuery)) {
+		state.Errorf("Test of decodeHold failed, the edited hold should be dns by its port, status: %d, result: %+v, error: %v", status, result, err)
+	}
+
+	result = v1.Decode{}
+	status, err = getJSON(server, fmt.Sprintf("/holds/%d/decode?original=true&as=raw", test.heldID), &result)
+
+	if (err != nil) || (status != http.StatusOK) || (result.Protocol != "raw") || (result.Total != len("query")) {
+		state.Errorf("Test of decodeHold failed, original=true should decode what was held, status: %d, result: %+v, error: %v", status, result, err)
+	}
+}
+
 // Test if the decode operations of stage 49 return with the expected output: a flow's handshake records each way with their bytes in data, a gRPC body by
 // its content type with the protobuf fields, and the frames of a flow an HTTP Upgrade switched to WebSocket, masked or not.
 func TestDecodeFlowPositive(state *testing.T) {

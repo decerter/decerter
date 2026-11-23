@@ -76,6 +76,7 @@ func routes() (operations []route) {
 		{method: http.MethodPut, path: "/holds/{id}", operationID: "editHold", handle: editHold},
 		{method: http.MethodPost, path: "/holds/{id}/forward", operationID: "forwardHold", handle: forwardHold},
 		{method: http.MethodPost, path: "/holds/{id}/drop", operationID: "dropHold", handle: dropHold},
+		{method: http.MethodGet, path: "/holds/{id}/decode", operationID: "decodeHold", handle: decodeHold},
 		{method: http.MethodGet, path: "/rules", operationID: "listRules", handle: listRules},
 		{method: http.MethodPost, path: "/rules", operationID: "addRule", handle: addRule},
 		{method: http.MethodDelete, path: "/rules/{id}", operationID: "deleteRule", handle: deleteRule},

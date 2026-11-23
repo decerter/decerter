@@ -42,6 +42,30 @@ func decodeMessage(client Client) (handle sdk.ToolHandlerFor[DecodeMessageInput,
 	return
 }
 
+// the decode tree of a held message's payload, like decode_message: what goes on when it is forwarded, in the marker h<id>-decode
+func decodeHeld(client Client) (handle sdk.ToolHandlerFor[DecodeHeldInput, any]) {
+	handle = func(ctx context.Context, request *sdk.CallToolRequest, input DecodeHeldInput) (result *sdk.CallToolResult, output any, err error) {
+		query := decodeQuery(input.As, input.Original)
+		decoded := v1.Decode{}
+		err = client.getJSON(ctx, "/holds/"+strconv.FormatUint(input.ID, 10)+"/decode", query, &decoded)
+
+		if err != nil {
+			return
+		}
+
+		metadata, tree := splitDecode(decoded, input.MaxNodes)
+		payloads, err := decodePayloads("h"+strconv.FormatUint(decoded.MessageID, 10), tree)
+
+		if err != nil {
+			return
+		}
+
+		result, err = untrustedResult(metadata, payloads, true)
+		return
+	}
+	return
+}
+
 // the decode tree of one side's body of an exchange, like decode_message; the bytes of a request target it decoded are escaped in the marker x<id>-request-target
 func decodeExchangeBody(client Client) (handle sdk.ToolHandlerFor[DecodeExchangeBodyInput, any]) {
 	handle = func(ctx context.Context, request *sdk.CallToolRequest, input DecodeExchangeBodyInput) (result *sdk.CallToolResult, output any, err error) {

@@ -247,7 +247,7 @@ func (writer *lineWriter) Close() (err error) {
 func serverInstructions(allowWrite bool) (instructions string) {
 	instructions = `decerter reads and rewrites the live TCP, UDP, TLS and DTLS traffic of selected local processes with eBPF. ` +
 		`These tools read its state over its control API: status, the flow history (list_flows takes the decerter filter language, e.g. proc.comm == "curl", tls.sni contains "example", tcp.dstport == 443), ` +
-		`the messages of a flow and their payloads (get_message, 4 KiB windows paged with offset and length), payloads, HTTP bodies and TLS handshakes decoded into a tree of fields like Wireshark (decode_message, decode_exchange_body, decode_flow), the live event stream (tail_events), held messages, rules and captures. ` +
+		`the messages of a flow and their payloads (get_message, 4 KiB windows paged with offset and length), payloads, held messages, HTTP bodies and TLS handshakes decoded into a tree of fields like Wireshark (decode_message, decode_held, decode_exchange_body, decode_flow), the live event stream (tail_events), held messages, rules and captures. ` +
 		`export_keylog, export_pcap and download_pcap write files into the output directory and return only their path, size and SHA-256; key material and pcaps never come back in a result. `
 
 	if allowWrite {
