@@ -1,5 +1,5 @@
 # Packet decoders
-decerter decodes a message's payload, an HTTP body or the TLS handshake of a flow into a tree of fields, like the packet details pane of Wireshark: a DNS answer shows its header flags, its questions and its records with typed values instead of hex, a ClientHello its extensions and JA4. A decode runs only when it is asked for, over the [control API](api.md), in the [web UI](ui.md) and with the [MCP](mcp.md) tools `decode_message`, `decode_exchange_body` and `decode_flow`; the proxy never decodes anything on its own. The one thing it does on the hot path is copy the handshake records of TLS and DTLS flows, see [TLS handshake](#tls-handshake).
+decerter decodes a message's payload, an HTTP body or the TLS handshake of a flow into a tree of fields, like the packet details pane of Wireshark: a DNS answer shows its header flags, its questions and its records with typed values instead of hex, a ClientHello its extensions and JA4. A decode runs only when it is asked for, over the [control API](api.md), in the [web UI](ui.md) and with the [MCP](mcp.md) tools `decode_message`, `decode_held`, `decode_exchange_body` and `decode_flow`; the proxy never decodes anything on its own. The one thing it does on the hot path is copy the handshake records of TLS and DTLS flows, see [TLS handshake](#tls-handshake).
 
 The decoders are decerter's own Go code written from the RFCs and the protocol specifications, with the standard library only (`crypto/x509` reads certificates); no code of Wireshark or of another dissector library is in decerter. Some tests check the decoders against permissive pure-Go libraries, which are never in the binary:
 - `google.golang.org/protobuf/encoding/protowire` (BSD-3-Clause) for protobuf;
@@ -25,10 +25,11 @@ A message is decoded alone, or one direction of a TCP flow is decoded as one str
 | Method and path | Operation | Bytes decoded |
 |---|---|---|
 | `GET /messages/{id}/decode` | decodeMessage | the message's payload, as `GET /messages/{id}` has it; `original=true` decodes what the peer sent when a rule or an edit changed it |
+| `GET /holds/{id}/decode` | decodeHold | the payload of a held message, as `GET /holds` has it: what goes on when it is forwarded, so a saved edit decodes at once; `original=true` decodes what was held, before an edit. Needs `--intercept` (409 without), 404 once the message went on |
 | `GET /exchanges/{id}/decode` | decodeExchangeBody | the body of one side (`side=request`, the default, or `response`) without its chunk framing, as `GET /exchanges/{id}/body` has it; `original=true` decodes the body before an edit of layer `http` |
 | `GET /flows/{id}/decode` | decodeFlow | `part=handshake` (the default): the handshake records decerter kept of one direction (`direction=up`, the default, or `down`) of a TLS or DTLS flow; the bytes are in `data`. `part=stream`: the payloads of one direction of a TCP flow joined in order, at most 4 MiB, with `segments` that map stream offsets to messages; `original=true` joins what the peers sent, `offset` and `length` pick the window of `data` (`length=0` leaves it out) |
 
-All three take `as` (Decode As): a protocol of `protocols` in the answer, or `raw` for none. An unknown `as` is a 400. Without `as` decerter chooses. A payload that no decoder takes is not an error: it comes back as protocol `raw` with one `raw` node over its bytes.
+All four take `as` (Decode As): a protocol of `protocols` in the answer, or `raw` for none. An unknown `as` is a 400. Without `as` decerter chooses. A payload that no decoder takes is not an error: it comes back as protocol `raw` with one `raw` node over its bytes.
 
 ```sh
 sudo curl --unix-socket /run/decerter/api.sock 'http://decerter/api/v1/messages/42/decode'

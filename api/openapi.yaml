@@ -38,8 +38,8 @@ info:
     Payloads in responses are lowercase hex (`hex`) plus an escaped text form (`escaped`: printable ASCII as it is,
     `\\`, `\n`, `\r`, `\t` and `\xNN` for every other byte). Values in requests are `{"type": "text"|"hex", "value": …}`.
 
-    The decode operations (`/messages/{id}/decode`, `/exchanges/{id}/decode`, `/flows/{id}/decode`) decode a payload,
-    a body or the handshake of a TLS or DTLS flow on request into a tree of fields like Wireshark's packet details: each
+    The decode operations (`/messages/{id}/decode`, `/holds/{id}/decode`, `/exchanges/{id}/decode`,
+    `/flows/{id}/decode`) decode a payload, a body or the handshake of a TLS or DTLS flow on request into a tree of fields like Wireshark's packet details: each
     node has a filter-style name, a label, a value, an offset and a length in the bytes `source` names (the payload, the
     body, or the bytes of a request target or of a handshake in `data`), a mask for bit fields, an error and children. The protocol is chosen by `as` (Decode As), then the context
     (content type, ALPN), then the server port, then sniffing the bytes; the candidates say why. Bytes no decoder takes
@@ -613,6 +613,45 @@ paths:
       responses:
         "204":
           description: Dropped
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          $ref: "#/components/responses/Conflict"
+  /holds/{id}/decode:
+    get:
+      operationId: decodeHold
+      summary: The payload of a held message as a tree of fields
+      description: |
+        Decoded on request, like GET /messages/{id}/decode. `offset` and `length` of every node are bytes of the payload
+        GET /holds gives, what goes on when the message is forwarded (with original=true what came to the hold queue,
+        before an edit). The protocol is chosen the same way: the `as` override, else the context (TLS ALPN), the server
+        port of the flow, sniffing the bytes; a tcp, tls or whole HTTP message is framed as a stream.
+      parameters:
+        - $ref: "#/components/parameters/ID"
+        - name: as
+          in: query
+          description: |
+            "Decode As": the protocol to decode with (a value of `protocols`, `raw` for none); absent lets decerter choose: the
+            context, the port, then the bytes. A value that names no protocol is 400.
+          schema:
+            type: string
+        - name: original
+          in: query
+          description: true decodes the payload as it came to the hold queue, before an edit.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        "200":
+          description: The decode tree of the held payload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Decode"
         "400":
           $ref: "#/components/responses/BadRequest"
         "403":
@@ -1570,8 +1609,8 @@ components:
     DecodeSource:
       type: string
       description: |
-        The bytes the offsets count from: payload (the message's, GET /messages/{id}), body (the exchange side's, GET
-        /exchanges/{id}/body), target (the bytes the request target carries, given in `data`), handshake (the handshake
+        The bytes the offsets count from: payload (the message's, GET /messages/{id}, or the held message's, GET
+        /holds), body (the exchange side's, GET /exchanges/{id}/body), target (the bytes the request target carries, given in `data`), handshake (the handshake
         records of a flow's direction, given in `data`), stream (the payloads of a flow's direction joined in order, see
         `segments`)
       enum: [payload, body, target, handshake, stream]

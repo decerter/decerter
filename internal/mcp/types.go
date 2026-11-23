@@ -429,6 +429,13 @@ type DecodeMessageInput struct {
 	MaxNodes int    `json:"max_nodes,omitzero" jsonschema:"the nodes of the tree this call returns, in tree order; cut says when some were left out"`
 }
 
+type DecodeHeldInput struct {
+	ID       uint64 `json:"id" jsonschema:"the held message id from list_held"`
+	As       string `json:"as,omitzero" jsonschema:"Decode As: a protocol of protocols (dns, tls, websocket, protobuf, raw for none ...); empty lets decerter choose by context, port and the bytes"`
+	Original bool   `json:"original,omitzero" jsonschema:"decode the payload as it was held, before an edit"`
+	MaxNodes int    `json:"max_nodes,omitzero" jsonschema:"the nodes of the tree this call returns, in tree order; cut says when some were left out"`
+}
+
 type DecodeExchangeBodyInput struct {
 	ID       uint64  `json:"id" jsonschema:"the exchange id from list_exchanges"`
 	Side     v1.Side `json:"side,omitzero" jsonschema:"request (default) or response"`

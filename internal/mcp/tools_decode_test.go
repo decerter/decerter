@@ -14,7 +14,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Test if decode_message and decode_exchange_body return with the expected output: the note, decerter's metadata outside the marker, the summary and tree as JSON inside it
+// Test if decode_message, decode_held and decode_exchange_body return with the expected output: the note, decerter's metadata outside the marker, the summary and tree as JSON inside it
 // with every string escaped again (a marker and a raw escape byte in a value), as and original passed on, max_nodes cutting the tree, a request target's bytes in their own marker
 // and decode_flow's handshake bytes in theirs only with data.
 func TestDecodeToolsPositive(state *testing.T) {
@@ -48,6 +48,16 @@ func TestDecodeToolsPositive(state *testing.T) {
 
 	if isError || (treeErr != nil) || (metadata.Nodes != 2) || !metadata.Cut || (len(tree.Tree[0].Children) != 1) || (metadata.Candidates[0].Reason != "no decoder took the bytes") || (metadata.Candidates[0].Score != 10) {
 		state.Errorf("Test of decode_message failed, max_nodes 2 should cut the tree, metadata: %+v, tree: %+v, error: %v", metadata, tree, treeErr)
+	}
+
+	// a held message: the same tree in the marker h<id>-decode
+	metadata = DecodeResult{}
+	text, isError = call(state, session, "decode_held", map[string]any{"id": 10, "as": "dns"}, &metadata)
+	tree = DecodeTree{}
+	treeErr = json.Unmarshal([]byte(inMarker(text, "h10-decode")), &tree)
+
+	if isError || (treeErr != nil) || (metadata.MessageID != 10) || (metadata.Protocol != "dns") || (metadata.Candidates[0].Reason != "Decode As dns") || (len(tree.Tree) != 1) {
+		state.Errorf("Test of decode_held failed, the tree should be in its marker, metadata: %+v, error: %v, text: %s", metadata, treeErr, text)
 	}
 
 	metadata = DecodeResult{}

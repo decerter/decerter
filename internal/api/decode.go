@@ -9,10 +9,12 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+	"time"
 
 	v1 "github.com/decerter/decerter/api"
 	"github.com/decerter/decerter/internal/decode"
 	"github.com/decerter/decerter/internal/history"
+	"github.com/decerter/decerter/internal/intercept"
 	"github.com/decerter/decerter/internal/tlsrecord"
 )
 
@@ -43,32 +45,7 @@ func decodeMessage(backend *Backend, writer http.ResponseWriter, request *http.R
 		payload = original
 	}
 
-	flow, _ := backend.History.Flow(message.FlowID)
-	context := decode.Context{
-		Transport:   decode.DatagramTransport,
-		Layer:       message.Layer,
-		Direction:   message.Direction,
-		ServerPort:  portOf(flow.Destination),
-		ALPN:        "",
-		ContentType: "",
-		Upgrade:     "",
-		Method:      "",
-		Target:      "",
-		Encoding:    "",
-		Extensions:  "",
-		Handshake:   false,
-		Joined:      false,
-	}
-
-	if (message.Layer == v1.TCPLayer) || (message.Layer == v1.TLSLayer) {
-		context.Transport = decode.StreamTransport
-		context.Upgrade, context.Extensions = upgradeOf(backend, message)
-	}
-
-	if flow.TLS != nil {
-		context.ALPN = flow.TLS.ALPN
-	}
-
+	context := payloadContext(backend, message.FlowID, message.Layer, message.Direction, message.Time)
 	result, err := decode.Decode(payload, context, request.URL.Query().Get("as"))
 
 	if err != nil {
@@ -83,6 +60,91 @@ func decodeMessage(backend *Backend, writer http.ResponseWriter, request *http.R
 	result.MessageID = id
 	result.Source = v1.PayloadDecodeSource
 	writeJSON(writer, http.StatusOK, result, logger)
+}
+
+// the payload of a held message as a tree, decoded now: the offsets are the payload's, as in GET /holds; it is what goes on when it is forwarded,
+// original=true decodes what came to the hold queue before an edit
+func decodeHold(backend *Backend, writer http.ResponseWriter, request *http.Request, logger *slog.Logger) {
+	id, ok := holdID(backend, writer, request, logger)
+
+	if !ok {
+		return
+	}
+
+	isOriginal, err := queryBool(request, "original")
+
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, err, logger)
+		return
+	}
+
+	held, err := backend.Holds.Get(id)
+
+	if err != nil {
+		writeError(writer, http.StatusNotFound, fmt.Errorf("%w: %w %d", ErrNotFound, err, id), logger)
+		return
+	}
+
+	payload := held.Plain
+
+	if isOriginal {
+		payload = held.Message.Plain
+	}
+
+	direction := v1.Direction(intercept.DirectionName(held.Message.Direction))
+	context := payloadContext(backend, held.Message.Flow.ID, v1.Layer(held.Message.Layer), direction, held.HeldAt)
+	result, err := decode.Decode(payload, context, request.URL.Query().Get("as"))
+
+	if err != nil {
+		writeError(writer, http.StatusBadRequest, fmt.Errorf("%w: %w", ErrBadRequest, err), logger)
+		return
+	}
+
+	if result.Error != "" {
+		logger.Warn("Could not decode held message", "error", result.Error, "messageID", id)
+	}
+
+	result.MessageID = id
+	result.Source = v1.PayloadDecodeSource
+	writeJSON(writer, http.StatusOK, result, logger)
+}
+
+// what a decoder knows of a message payload of a flow: a stream layer (tcp, tls and a whole HTTP message) is framed as a stream, a datagram layer one PDU
+// per message; the server port and the TLS ALPN of the flow, the protocol an HTTP/1 Upgrade switched it to before at
+func payloadContext(backend *Backend, flowID uint64, layer v1.Layer, direction v1.Direction, at time.Time) (context decode.Context) {
+	flow, _ := backend.History.Flow(flowID)
+	context = decode.Context{
+		Transport:   decode.DatagramTransport,
+		Layer:       layer,
+		Direction:   direction,
+		ServerPort:  portOf(flow.Destination),
+		ALPN:        "",
+		ContentType: "",
+		Upgrade:     "",
+		Method:      "",
+		Target:      "",
+		Encoding:    "",
+		Extensions:  "",
+		Handshake:   false,
+		Joined:      false,
+	}
+
+	switch layer {
+	case
+		v1.TCPLayer,
+		v1.TLSLayer:
+		context.Transport = decode.StreamTransport
+		context.Upgrade, context.Extensions = upgradeOf(backend, flowID, at)
+	case v1.HTTPLayer:
+		context.Transport = decode.StreamTransport
+	default:
+	}
+
+	if flow.TLS != nil {
+		context.ALPN = flow.TLS.ALPN
+	}
+
+	return
 }
 
 // the body of one side of an exchange as a tree, the offsets are the body's as in GET /exchanges/{id}/body; a request without a body whose target carries
@@ -218,11 +280,11 @@ func decodeExchangeBody(backend *Backend, writer http.ResponseWriter, request *h
 }
 
 // the protocol an HTTP/1 Upgrade switched the message's flow to and the extensions the server took: the flow's last exchange is a 101 whose request
-// came before the message (the read of the 101 itself may carry the first frames, the decoder skips the head)
-func upgradeOf(backend *Backend, message v1.Message) (upgrade string, extensions string) {
-	exchange, found := backend.History.LastExchange(message.FlowID)
+// came before the message at that time (the read of the 101 itself may carry the first frames, the decoder skips the head)
+func upgradeOf(backend *Backend, flowID uint64, at time.Time) (upgrade string, extensions string) {
+	exchange, found := backend.History.LastExchange(flowID)
 
-	if !found || (exchange.Request == nil) || (exchange.Response == nil) || (exchange.Response.Status != http.StatusSwitchingProtocols) || message.Time.Before(exchange.Request.Time) {
+	if !found || (exchange.Request == nil) || (exchange.Response == nil) || (exchange.Response.Status != http.StatusSwitchingProtocols) || at.Before(exchange.Request.Time) {
 		return
 	}
 
