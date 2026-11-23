@@ -142,8 +142,14 @@ section {
   overflow-x: auto;
 }
 
+/* while a held message is edited the intercept pane is as wide as the flow, for its decode tree and hex dump */
+main.editing {
+  grid-template-columns: minmax(0, 4fr) minmax(0, 5fr) minmax(0, 5fr);
+}
+
 @media (max-width: 1100px) {
-  main {
+  main,
+  main.editing {
     grid-template-columns: minmax(0, 1fr);
   }
 }
@@ -451,19 +457,17 @@ textarea {
   background: var(--background);
   border: 1px solid var(--border);
   border-radius: 8px;
-  max-height: 60vh;
+  max-height: 45vh;
   overflow: auto;
+}
+
+.decode-bytes .payload {
+  max-height: 45vh;
 }
 
 .decode-bytes {
   flex: 2 1 36em;
   min-width: 0;
-}
-
-/* the handshake bytes come whole (at most 16 KiB a direction), they scroll instead of paging */
-.handshake-bytes {
-  max-height: 60vh;
-  overflow: auto;
 }
 
 .decode-summary {
@@ -559,8 +563,47 @@ button.link {
   cursor: pointer;
 }
 
-#stream-view > summary {
+/* the folding parts of a flow and of the editor, like the panes of Wireshark: a summary line opens and closes each */
+details.fold {
+  margin-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+details.fold > summary {
+  padding: 8px 0 4px;
   cursor: pointer;
   font-weight: 600;
-  margin: 12px 0 8px;
+  overflow-wrap: anywhere;
+}
+
+details.fold > summary:hover {
+  color: var(--accent);
+}
+
+details.fold > summary .muted {
+  font-size: 13px;
+}
+
+details.fold > .toolbar {
+  margin-top: 4px;
+}
+
+/* the messages and the exchanges of a flow scroll in their own box with the header kept, so the views below them stay in sight */
+.list-scroll {
+  max-height: 30vh;
+  overflow: auto;
+}
+
+.list-scroll thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+}
+
+/* Expand All and Collapse All of a decode tree */
+button.small {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 12px;
+  font-weight: 400;
 }

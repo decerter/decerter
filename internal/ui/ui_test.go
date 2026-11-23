@@ -750,6 +750,51 @@ func TestListBoundsPositive(state *testing.T) {
 	}
 }
 
+// Test if the page folds the parts of a flow like Wireshark with the handshake and the stream folded and read only when opened, keeps the folds of the
+// decode trees by field, and decodes the held message in the editor with GET /holds/{id}/decode next to its bytes.
+func TestFoldsPositive(state *testing.T) {
+	page, err := webFiles.ReadFile("web/index.html")
+
+	if err != nil {
+		state.Fatalf("Could not read index.html, error: %s", err.Error())
+	}
+
+	script, err := webFiles.ReadFile("web/app.js")
+
+	if err != nil {
+		state.Fatalf("Could not read app.js, error: %s", err.Error())
+	}
+
+	bodyOf := func(name string) (body string) {
+		match := regexp.MustCompile(`(?s)\n(?:async )?function ` + name + `\(.*?\n\}\n`).Find(script)
+		body = string(match)
+		return
+	}
+	expected := []struct {
+		name    string
+		text    string
+		pattern string
+	}{
+		{name: "the messages unfolded", text: string(page), pattern: `<details id="messages-view" class="fold" open hidden>`},
+		{name: "the handshake folded", text: string(page), pattern: `<details id="handshake-view" class="fold" hidden>`},
+		{name: "the stream folded", text: string(page), pattern: `<details id="stream-view" class="fold" hidden>`},
+		{name: "the messages before the handshake", text: string(page), pattern: `(?s)id="messages-view".*id="handshake-view"`},
+		{name: "a decode tree of the held message", text: string(page), pattern: `<ul id="hold-decode-tree" class="tree"`},
+		{name: "the handshake read only when opened", text: bodyOf("loadHandshake"), pattern: `if \(!view\.open\) \{\n    return;`},
+		{name: "the handshake read when it is opened", text: string(script), pattern: `byId\('handshake-view'\)\.addEventListener\('toggle'`},
+		{name: "the folds kept by field", text: bodyOf("renderDecode"), pattern: `state\.folds\.has\(node\.name\) \? state\.folds\.get\(node\.name\) : depth === 0`},
+		{name: "expand and collapse all", text: bodyOf("foldAll"), pattern: `state\.folds\.set\(node\.name, isOpen\);`},
+		{name: "the held message decoded", text: bodyOf("loadHoldDecode"), pattern: `/holds/\$\{hold\.id\}/decode\?original=false`},
+		{name: "a saved edit decoded again", text: bodyOf("loadHolds"), pattern: `await loadHoldDecode\(\);`},
+	}
+
+	for _, check := range expected {
+		if !regexp.MustCompile(check.pattern).MatchString(check.text) {
+			state.Errorf("Test of the page failed, it should have %s, %q", check.name, check.pattern)
+		}
+	}
+}
+
 // a decerter ui on 127.0.0.1 in front of a fake api, stopped with the test; the client follows no redirect
 func startUI(state *testing.T) (current testUI) {
 	api := startFakeAPI(state)
