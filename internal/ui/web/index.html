@@ -33,61 +33,61 @@
 
   <section id="detail-pane">
     <h2 id="flow-title">No flow selected</h2>
-    <dl id="flow-info"></dl>
-    <p id="flow-actions" class="row" hidden>
-      <a id="flow-pcap" class="action-link" href="#" title="the flow as pcapng: with captures the packets and the TLS secrets (DSB), so Wireshark decrypts it, else packets synthesized from the history">Open in Wireshark (pcapng)</a>
-    </p>
-    <div id="handshake-view" hidden>
+    <!-- every part of a flow folds like a pane of Wireshark; the handshake and the stream start folded, so the messages come first -->
+    <details id="flow-view" class="fold" open hidden>
+      <summary>Flow</summary>
+      <dl id="flow-info"></dl>
+      <p id="flow-actions" class="row">
+        <a id="flow-pcap" class="action-link" href="#" title="the flow as pcapng: with captures the packets and the TLS secrets (DSB), so Wireshark decrypts it, else packets synthesized from the history">Open in Wireshark (pcapng)</a>
+      </p>
+    </details>
+    <details id="messages-view" class="fold" open hidden>
+      <summary>Messages <span id="messages-count" class="muted"></span></summary>
+      <div class="list-scroll">
+        <table id="messages-table">
+          <thead><tr><th>#</th><th>time</th><th>dir</th><th>layer</th><th class="number">length</th><th>verdict</th></tr></thead>
+          <tbody id="messages"></tbody>
+        </table>
+      </div>
+      <button id="more-messages" type="button" hidden>More messages</button>
+    </details>
+    <details id="message-view" class="fold" open hidden>
+      <summary id="message-title"></summary>
       <div class="row toolbar">
-        <h3>Handshake</h3>
-        <label><input type="radio" name="handshake-direction" value="up" checked> client</label>
-        <label><input type="radio" name="handshake-direction" value="down"> server</label>
-        <span id="handshake-range" class="muted"></span>
+        <label><input type="radio" name="view" value="text" checked> text</label>
+        <label><input type="radio" name="view" value="hex"> hex</label>
+        <label id="original-label"><input id="original" type="checkbox"> original</label>
+        <button id="previous-window" type="button">&lsaquo; previous</button>
+        <span id="window-range" class="muted"></span>
+        <button id="next-window" type="button">next &rsaquo;</button>
       </div>
       <div class="decode-split">
-        <div id="handshake-decode" class="decode">
+        <div id="message-decode" class="decode">
           <div class="row">
-            <label>decode as <select id="handshake-decode-as" aria-label="decode the handshake records as"><option value="">auto</option></select></label>
+            <label>decode as <select id="message-decode-as" aria-label="decode the payload as"><option value="">auto</option></select></label>
           </div>
-          <p id="handshake-decode-summary" class="decode-summary"></p>
-          <p id="handshake-decode-reason" class="muted"></p>
-          <ul id="handshake-decode-tree" class="tree" aria-label="decode tree of the handshake records"></ul>
+          <p id="message-decode-summary" class="decode-summary"></p>
+          <p id="message-decode-reason" class="muted"></p>
+          <ul id="message-decode-tree" class="tree" aria-label="decode tree of the payload"></ul>
         </div>
         <div class="decode-bytes">
-          <pre id="handshake-bytes" class="payload handshake-bytes"></pre>
+          <pre id="payload" class="payload"></pre>
         </div>
-      </div>
-    </div>
-    <details id="stream-view" hidden>
-      <summary>Stream: the messages of one direction joined, a message split over reads decodes as one</summary>
-      <div class="row toolbar">
-        <label><input type="radio" name="stream-direction" value="up" checked> client</label>
-        <label><input type="radio" name="stream-direction" value="down"> server</label>
-        <span id="stream-range" class="muted"></span>
-      </div>
-      <div id="stream-decode" class="decode">
-        <div class="row">
-          <label>decode as <select id="stream-decode-as" aria-label="decode the stream as"><option value="">auto</option></select></label>
-        </div>
-        <p id="stream-decode-summary" class="decode-summary"></p>
-        <p id="stream-decode-reason" class="muted"></p>
-        <p id="stream-location" class="muted"></p>
-        <ul id="stream-decode-tree" class="tree" aria-label="decode tree of the joined stream"></ul>
       </div>
     </details>
-    <table id="messages-table" hidden>
-      <thead><tr><th>#</th><th>time</th><th>dir</th><th>layer</th><th class="number">length</th><th>verdict</th></tr></thead>
-      <tbody id="messages"></tbody>
-    </table>
-    <button id="more-messages" type="button" hidden>More messages</button>
-    <table id="exchanges-table" hidden>
-      <thead><tr><th>#</th><th>stream</th><th>method</th><th>url</th><th>status</th><th class="number">request</th><th class="number">response</th><th>notes</th></tr></thead>
-      <tbody id="exchanges"></tbody>
-    </table>
-    <button id="more-exchanges" type="button" hidden>More exchanges</button>
-    <div id="exchange-view" hidden>
+    <details id="exchanges-view" class="fold" open hidden>
+      <summary>HTTP exchanges <span id="exchanges-count" class="muted"></span></summary>
+      <div class="list-scroll">
+        <table id="exchanges-table">
+          <thead><tr><th>#</th><th>stream</th><th>method</th><th>url</th><th>status</th><th class="number">request</th><th class="number">response</th><th>notes</th></tr></thead>
+          <tbody id="exchanges"></tbody>
+        </table>
+      </div>
+      <button id="more-exchanges" type="button" hidden>More exchanges</button>
+    </details>
+    <details id="exchange-view" class="fold" open hidden>
+      <summary id="exchange-title"></summary>
       <div class="row toolbar">
-        <h3 id="exchange-title"></h3>
         <label><input type="radio" name="side" value="request" checked> request</label>
         <label><input type="radio" name="side" value="response"> response</label>
         <label id="exchange-original-label"><input id="exchange-original" type="checkbox"> original</label>
@@ -111,31 +111,45 @@
           <pre id="exchange-body" class="payload"></pre>
         </div>
       </div>
-    </div>
-    <div id="message-view" hidden>
+    </details>
+    <details id="handshake-view" class="fold" hidden>
+      <summary><span id="handshake-title">Handshake</span> <span id="handshake-size" class="muted"></span></summary>
       <div class="row toolbar">
-        <h3 id="message-title"></h3>
-        <label><input type="radio" name="view" value="text" checked> text</label>
-        <label><input type="radio" name="view" value="hex"> hex</label>
-        <label id="original-label"><input id="original" type="checkbox"> original</label>
-        <button id="previous-window" type="button">&lsaquo; previous</button>
-        <span id="window-range" class="muted"></span>
-        <button id="next-window" type="button">next &rsaquo;</button>
+        <label><input type="radio" name="handshake-direction" value="up" checked> client</label>
+        <label><input type="radio" name="handshake-direction" value="down"> server</label>
+        <span id="handshake-range" class="muted"></span>
       </div>
       <div class="decode-split">
-        <div id="message-decode" class="decode">
+        <div id="handshake-decode" class="decode">
           <div class="row">
-            <label>decode as <select id="message-decode-as" aria-label="decode the payload as"><option value="">auto</option></select></label>
+            <label>decode as <select id="handshake-decode-as" aria-label="decode the handshake records as"><option value="">auto</option></select></label>
           </div>
-          <p id="message-decode-summary" class="decode-summary"></p>
-          <p id="message-decode-reason" class="muted"></p>
-          <ul id="message-decode-tree" class="tree" aria-label="decode tree of the payload"></ul>
+          <p id="handshake-decode-summary" class="decode-summary"></p>
+          <p id="handshake-decode-reason" class="muted"></p>
+          <ul id="handshake-decode-tree" class="tree" aria-label="decode tree of the handshake records"></ul>
         </div>
         <div class="decode-bytes">
-          <pre id="payload" class="payload"></pre>
+          <pre id="handshake-bytes" class="payload"></pre>
         </div>
       </div>
-    </div>
+    </details>
+    <details id="stream-view" class="fold" hidden>
+      <summary>Stream <span class="muted">one direction joined, a message split over reads decodes as one</span></summary>
+      <div class="row toolbar">
+        <label><input type="radio" name="stream-direction" value="up" checked> client</label>
+        <label><input type="radio" name="stream-direction" value="down"> server</label>
+        <span id="stream-range" class="muted"></span>
+      </div>
+      <div id="stream-decode" class="decode">
+        <div class="row">
+          <label>decode as <select id="stream-decode-as" aria-label="decode the stream as"><option value="">auto</option></select></label>
+        </div>
+        <p id="stream-decode-summary" class="decode-summary"></p>
+        <p id="stream-decode-reason" class="muted"></p>
+        <p id="stream-location" class="muted"></p>
+        <ul id="stream-decode-tree" class="tree" aria-label="decode tree of the joined stream"></ul>
+      </div>
+    </details>
   </section>
 
   <section id="intercept-pane">
@@ -167,6 +181,23 @@
 
     <div id="editor" hidden>
       <h3 id="editor-title"></h3>
+      <details id="hold-view" class="fold" open>
+        <summary>Decode <span class="muted">the saved payload, Save decodes an edit</span></summary>
+        <div class="decode-split">
+          <div id="hold-decode" class="decode">
+            <div class="row">
+              <label>decode as <select id="hold-decode-as" aria-label="decode the held payload as"><option value="">auto</option></select></label>
+            </div>
+            <p id="hold-decode-summary" class="decode-summary"></p>
+            <p id="hold-decode-reason" class="muted"></p>
+            <ul id="hold-decode-tree" class="tree" aria-label="decode tree of the held payload"></ul>
+          </div>
+          <div class="decode-bytes">
+            <p id="hold-range" class="muted"></p>
+            <pre id="hold-bytes" class="payload"></pre>
+          </div>
+        </div>
+      </details>
       <div class="row">
         <label><input type="radio" name="edit-mode" value="text" checked> text</label>
         <label><input type="radio" name="edit-mode" value="hex"> hex</label>

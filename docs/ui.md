@@ -9,14 +9,14 @@ sudo ./decerter run --uid 1001 --intercept --api-socket /run/decerter/api.sock
 
 The page (HTML, CSS and vanilla JS embedded in the binary, no build step):
 - the flow list, live over the event stream, with a filter box in the [filter language](filter.md) and paging: live events and the first page keep at most their newest 1000 rows, the rows More read and the selected flow stay however many come (a busy decerter can leave a gap above the rows of More, which setting the filter again reads);
-- a flow with its messages and its HTTP exchanges (HTTP/2 stream, method, URL, status, body lengths, edits and notes);
+- a flow in parts that fold like the panes of Wireshark: the flow's fields, its messages, the message shown, its HTTP exchanges (HTTP/2 stream, method, URL, status, body lengths, edits and notes), the exchange shown, the handshake and the stream; the lists scroll in their own box, and the handshake and the stream start folded and are read only when opened, so the application data comes first;
 - a message as escaped text or a hex dump, 4 KiB at a time, and as the peer sent it when it was changed; an exchange with its heads and a window of either body; a gRPC body with a line in front of each message;
-- the [decode tree](decode.md) of a message or a body next to its bytes, with "decode as": a click on a node marks its bytes, a click on a byte selects its field;
+- the [decode tree](decode.md) of a message or a body next to its bytes, with "decode as": a click on a node marks its bytes, a click on a byte selects its field; expand all and collapse all, and a branch opened or closed by hand stays so for that field in the next trees, like Wireshark;
 - the TLS or DTLS handshake decerter kept of a flow, client or server, as a tree next to its bytes;
 - the stream of a TCP flow, client or server: one direction joined and decoded, so a message split over reads decodes as one; a node opens the message with its first byte and marks its bytes, and lists every message it spans;
 - "Open in Wireshark (pcapng)": the flow as a pcapng download, with its TLS secrets when decerter keeps packets;
 - intercept on and off with a filter, a direction and the layer (every record layer, one of tcp, tls, udp and dtls, or whole HTTP messages);
-- the held messages, to edit as escaped text (`\r`, `\n`, `\t`, `\\`, `\xNN`; line breaks are only layout) or as hex, and to forward or drop.
+- the held messages, to edit as escaped text (`\r`, `\n`, `\t`, `\\`, `\xNN`; line breaks are only layout) or as hex, and to forward or drop; the editor shows the decode tree of the held payload next to its hex dump (the first 16 KiB), of what goes on, so Save decodes an edit; the intercept pane widens while it edits.
 
 The page is dark, with its fonts (Kode Mono, Inter, JetBrains Mono, OFL-1.1) and favicon embedded too, so it looks the same offline and loads nothing from another site.
 

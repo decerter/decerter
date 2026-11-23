@@ -29,11 +29,16 @@ const state = {
   exchangeId: null,
   exchangeSide: 'request',
   exchangeOffset: 0,
-  // the decode tree of the shown message, exchange body, flow handshake and joined stream, see decodePanes
-  decodes: { message: null, exchange: null, handshake: null, stream: null },
+  // the decode tree of the shown message, exchange body, flow handshake, joined stream and the held message in the editor, see decodePanes
+  decodes: { message: null, exchange: null, handshake: null, stream: null, hold: null },
+  // the branches of the decode trees opened or closed by hand, by field name: like Wireshark, a field stays open or closed in the next tree that has it
+  folds: new Map(),
   handshakeDirection: 'up',
   streamDirection: 'up',
 };
+
+// the bytes of a held payload the editor shows next to its decode tree, a whole HTTP message can be 1 MiB
+const maxHoldBytes = 16384;
 
 // the rows live events may grow a list to: the newest flows, the first messages and exchanges of the shown flow; More reads on past them
 const maxListRows = 1000;
@@ -495,21 +500,35 @@ function renderFlowInfo(flow) {
   const pcap = byId('flow-pcap');
   pcap.href = `${api}/flows/pcap?flow=${flow.id}`;
   pcap.download = `decerter-flow-${flow.id}.pcapng`;
-  byId('flow-actions').hidden = false;
+  byId('flow-view').hidden = false;
 }
 
 function trafficText(traffic) {
   return [formatBytes(traffic.bytes), `${traffic.messages} messages`, traffic.handshake_bytes ? `${formatBytes(traffic.handshake_bytes)} of handshake records` : ''].filter(Boolean).join(', ');
 }
 
-// the handshake records the history kept of a TLS or DTLS flow, GET /flows/{id}/decode: the tree of one direction and all its bytes (at most 16 KiB), no paging
+// the handshake records the history kept of a TLS or DTLS flow, GET /flows/{id}/decode: the tree of one direction and all its bytes (at most 16 KiB), no paging;
+// decoded when the pane is open, it starts folded so the messages of the flow come first
 async function loadHandshake(flow) {
+  const view = byId('handshake-view');
+
+  if (!flow) {
+    return;
+  }
+
   const traffic = state.handshakeDirection === 'down' ? flow.down : flow.up;
   const isKept = Boolean(flow.up.handshake_bytes || flow.down.handshake_bytes);
-  byId('handshake-view').hidden = !isKept;
+  view.hidden = !isKept;
 
   if (!isKept) {
     state.decodes.handshake = null;
+    return;
+  }
+
+  byId('handshake-title').textContent = `${flow.protocol === 'udp' ? 'DTLS' : 'TLS'} handshake`;
+  byId('handshake-size').textContent = [flow.up.handshake_bytes ? `client ${formatBytes(flow.up.handshake_bytes)}` : '', flow.down.handshake_bytes ? `server ${formatBytes(flow.down.handshake_bytes)}` : ''].filter(Boolean).join(', ');
+
+  if (!view.open) {
     return;
   }
 
@@ -622,13 +641,16 @@ function renderMessages() {
     el('td', { class: 'number' }, message.length === message.original_length ? message.length : `${message.original_length} → ${message.length}`),
     el('td', {}, [message.verdict, message.edited ? 'edited' : '', message.origin !== 'rules' ? message.origin : ''].filter(Boolean).join(', '))));
   byId('messages').replaceChildren(...rows);
-  byId('messages-table').hidden = false;
+  byId('messages-view').hidden = false;
+  byId('messages-count').textContent = `(${state.messages.length}${state.messagesCursor ? '+' : ''})`;
   byId('more-messages').hidden = !state.messagesCursor;
 }
 
 // a window of a message's payload, or of what the peer sent when it was changed
 async function selectMessage(id, offset) {
   const detail = await call('GET', `/messages/${id}?offset=${offset}&length=${windowLength}`);
+  // another message unfolds the pane, paging keeps it as it is
+  byId('message-view').open ||= state.messageId !== id;
   state.messageId = id;
   state.offset = detail.payload.offset;
   state.detail = detail;
@@ -661,6 +683,7 @@ const decodePanes = {
   exchange: { select: 'exchange-decode-as', summary: 'exchange-decode-summary', reason: 'exchange-decode-reason', tree: 'exchange-decode-tree' },
   handshake: { select: 'handshake-decode-as', summary: 'handshake-decode-summary', reason: 'handshake-decode-reason', tree: 'handshake-decode-tree' },
   stream: { select: 'stream-decode-as', summary: 'stream-decode-summary', reason: 'stream-decode-reason', tree: 'stream-decode-tree' },
+  hold: { select: 'hold-decode-as', summary: 'hold-decode-summary', reason: 'hold-decode-reason', tree: 'hold-decode-tree' },
 };
 
 // the decode of key (the message or exchange side it is of), kept while key stays
@@ -714,12 +737,13 @@ function renderDecode(kind) {
   byId(pane.reason).textContent = [chosen ? `${result.protocol}: ${chosen.reason}` : result.protocol, others.length ? `also: ${others.join(', ')}` : '', result.truncated ? `only the first ${result.length} of ${result.total} bytes` : '', result.error || ''].filter(Boolean).join('; ');
   let count = 0;
 
-  // a node and its children; the roots and their children are open
+  // a node and its children; the roots are open, the branches below them closed, unless a branch of the same field was opened or closed by hand
   const item = (node, depth) => {
     const id = count++;
     const hasChildren = (node.children || []).length > 0;
-    const children = hasChildren ? el('ul', { hidden: depth > 0 }, ...node.children.map((child) => item(child, depth + 1))) : null;
-    const twisty = hasChildren ? el('button', { type: 'button', class: 'twisty', ariaLabel: 'open or close' }, depth > 0 ? '▸' : '▾') : el('span', { class: 'leaf' }, '');
+    const isOpen = state.folds.has(node.name) ? state.folds.get(node.name) : depth === 0;
+    const children = hasChildren ? el('ul', { hidden: !isOpen }, ...node.children.map((child) => item(child, depth + 1))) : null;
+    const twisty = hasChildren ? el('button', { type: 'button', class: 'twisty', ariaLabel: 'open or close' }, isOpen ? '▾' : '▸') : el('span', { class: 'leaf' }, '');
     const row = el('div', { class: 'node', title: `${node.name}, bytes ${node.offset}–${node.offset + node.length}${node.mask ? `, mask 0x${node.mask.toString(16)}` : ''}` }, twisty, el('span', {}, nodeText(node)));
 
     if (node.error) {
@@ -729,8 +753,8 @@ function renderDecode(kind) {
     if (hasChildren) {
       twisty.addEventListener('click', (event) => {
         event.stopPropagation();
-        children.hidden = !children.hidden;
-        twisty.textContent = children.hidden ? '▸' : '▾';
+        setBranch(children, children.hidden);
+        state.folds.set(node.name, !children.hidden);
       });
     }
 
@@ -744,7 +768,32 @@ function renderDecode(kind) {
   byId(pane.tree).replaceChildren(...(result.tree || []).map((node) => item(node, 0)));
 }
 
-// the pre whose spans the offsets of kind's tree count in: the payload, the body, the bytes of a request target or the handshake records
+// open or close the branch below a node, its twisty shows which
+function setBranch(list, isOpen) {
+  list.hidden = !isOpen;
+  list.parentElement.querySelector(':scope > .node > .twisty').textContent = isOpen ? '▾' : '▸';
+}
+
+// expand or collapse every branch of a tree, like Wireshark's Expand All and Collapse All; the fields keep it in the next trees
+function foldAll(kind, isOpen) {
+  const decoded = state.decodes[kind];
+
+  for (const list of byId(decodePanes[kind].tree).querySelectorAll('ul')) {
+    setBranch(list, isOpen);
+  }
+
+  if (!decoded) {
+    return;
+  }
+
+  for (const node of decoded.nodes.values()) {
+    if ((node.children || []).length > 0) {
+      state.folds.set(node.name, isOpen);
+    }
+  }
+}
+
+// the pre whose spans the offsets of kind's tree count in: the payload, the body, the bytes of a request target, the handshake records or the held payload
 function bytesOf(kind) {
   if (kind === 'message') {
     return byId('payload');
@@ -756,6 +805,10 @@ function bytesOf(kind) {
 
   if (kind === 'stream') {
     return byId('payload');
+  }
+
+  if (kind === 'hold') {
+    return byId('hold-bytes');
   }
 
   const decoded = state.decodes.exchange;
@@ -778,8 +831,7 @@ async function selectNode(kind, id, isPaging) {
   // open the branches above it
   for (let list = row.parentElement.parentElement; list && list.id !== decodePanes[kind].tree; list = list.parentElement.parentElement) {
     if (list.hidden) {
-      list.hidden = false;
-      list.parentElement.querySelector(':scope > .node > .twisty').textContent = '▾';
+      setBranch(list, true);
     }
   }
 
@@ -791,8 +843,8 @@ async function selectNode(kind, id, isPaging) {
     return;
   }
 
-  // the handshake shows all its bytes, scroll to the first marked one
-  if (kind === 'handshake') {
+  // the handshake and the held payload show all their bytes, scroll to the first marked one
+  if ((kind === 'handshake') || (kind === 'hold')) {
     markBytes(kind);
     const first = bytesOf(kind).querySelector('.hl');
 
@@ -961,7 +1013,8 @@ function renderExchanges() {
       el('td', {}, notes));
   });
   byId('exchanges').replaceChildren(...rows);
-  byId('exchanges-table').hidden = rows.length === 0;
+  byId('exchanges-view').hidden = rows.length === 0;
+  byId('exchanges-count').textContent = `(${rows.length}${state.exchangesCursor ? '+' : ''})`;
   byId('more-exchanges').hidden = !state.exchangesCursor;
 }
 
@@ -1006,6 +1059,7 @@ async function selectExchange(id, offset) {
   const exchange = await call('GET', `/exchanges/${id}`);
   const isRequest = state.exchangeSide === 'request';
   const message = isRequest ? exchange.request : exchange.response;
+  byId('exchange-view').open ||= state.exchangeId !== id;
   state.exchangeId = id;
   state.exchangeOffset = offset;
   renderExchanges();
@@ -1084,6 +1138,28 @@ async function loadHolds() {
   const list = await call('GET', '/holds');
   state.holds = list.holds;
   renderHolds();
+  await loadHoldDecode();
+}
+
+// the decode tree of the held message in the editor, GET /holds/{id}/decode, next to its bytes: what goes on when it is forwarded, so an edit shows once it is saved
+async function loadHoldDecode() {
+  const hold = state.editing && state.holds.find((known) => known.id === state.editing.id);
+
+  if (!hold) {
+    return;
+  }
+
+  // the bytes again only when the saved payload changed
+  if (state.editing.shownHex !== hold.payload.hex) {
+    const bytes = bytesOfHex(hold.payload.hex);
+    const shown = bytes.subarray(0, maxHoldBytes);
+    state.editing.shownHex = hold.payload.hex;
+    byId('hold-bytes').replaceChildren(byteSpans(shown, 0, 'hex'));
+    byId('hold-range').textContent = bytes.length === 0 ? 'empty' : shown.length < bytes.length ? `the first ${shown.length} of ${bytes.length} bytes` : `${bytes.length} bytes`;
+  }
+
+  await loadDecode('hold', `${hold.id} ${hold.payload.hex}`, `/holds/${hold.id}/decode?original=false`);
+  markBytes('hold');
 }
 
 const refreshHolds = debounce(loadHolds, 100);
@@ -1135,7 +1211,7 @@ async function release(id, verdict) {
 
 // the editor keeps its text while the held list changes around it
 
-function openEditor(id) {
+async function openEditor(id) {
   const hold = state.holds.find((known) => known.id === id);
 
   if (!hold) {
@@ -1153,7 +1229,11 @@ function openEditor(id) {
   }
 
   byId('editor').hidden = false;
+  // the intercept pane gets wider while it edits, for the decode tree and the hex dump
+  document.querySelector('main').classList.add('editing');
+  state.decodes.hold = null;
   renderHolds();
+  await loadHoldDecode();
 }
 
 function editorHint(mode) {
@@ -1180,7 +1260,9 @@ async function saveEditor() {
 
 function closeEditor() {
   state.editing = null;
+  state.decodes.hold = null;
   byId('editor').hidden = true;
+  document.querySelector('main').classList.remove('editing');
   renderHolds();
 }
 
@@ -1262,6 +1344,18 @@ function start() {
     return loadStream(state.flows.get(state.flowId));
   }));
   byId('stream-view').addEventListener('toggle', action(() => loadStream(state.flows.get(state.flowId))));
+  byId('handshake-view').addEventListener('toggle', action(() => loadHandshake(state.flows.get(state.flowId))));
+  byId('hold-decode-as').addEventListener('change', action(() => {
+    state.decodes.hold = null;
+    return loadHoldDecode();
+  }));
+
+  // Expand All and Collapse All next to each decode as
+  for (const kind of Object.keys(decodePanes)) {
+    byId(decodePanes[kind].select).closest('.row').append(
+      el('button', { type: 'button', class: 'small', onclick: () => foldAll(kind, true) }, 'expand all'),
+      el('button', { type: 'button', class: 'small', onclick: () => foldAll(kind, false) }, 'collapse all'));
+  }
 
   for (const radio of document.querySelectorAll('input[name="stream-direction"]')) {
     radio.addEventListener('change', action(() => {
@@ -1278,6 +1372,7 @@ function start() {
   }
 
   byId('handshake-bytes').addEventListener('click', (event) => onByteClick('handshake', event));
+  byId('hold-bytes').addEventListener('click', (event) => onByteClick('hold', event));
   byId('payload').addEventListener('click', (event) => onByteClick('message', event));
   byId('exchange-body').addEventListener('click', (event) => onByteClick('exchange', event));
   byId('exchange-decoded').addEventListener('click', (event) => onByteClick('exchange', event));
