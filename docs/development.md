@@ -164,5 +164,6 @@ gh attestation verify decerter_v0.1.0_linux_amd64.tar.gz --repo decerter/decerte
 ## GitHub settings
 These are settings of the repository on GitHub, nothing in the tree sets them:
 
-- **Rulesets:** a ruleset for `main` that requires the checks of `ci.yml` and `pre-commit.yml` (`lint`, `unit (ubuntu-24.04)`, `license`, `build (ubuntu-24.04)`, `bpf-drift`, `e2e-linux (ubuntu-24.04)`, `pre-commit`, plus `unit (ubuntu-24.04-arm)` and `build (ubuntu-24.04-arm)` once the arm64 runners are available to the repository) and blocks force pushes, and a tag ruleset for `v*` so only you can create release tags.
+- **Rulesets:** a ruleset for `main` that blocks deletion and force pushes, takes changes only as pull requests merged by rebase, and requires the checks of `ci.yml` and `pre-commit.yml` on a branch that is up to date with `main`: `pre-commit`, `lint`, `license`, `coverage`, `bpf-drift`, and `unit`, `build` and `e2e-linux` on both `ubuntu-24.04` and `ubuntu-24.04-arm`. A tag ruleset for `refs/tags/v*` blocks creating, updating and deleting the tags and force pushes to them, with the repository admin role as the only bypass, so only an admin can push a release tag.
+- **Security:** Dependabot alerts and security updates, secret scanning and push protection are on.
 - **Actions:** Settings → Actions → General: workflow permissions read-only by default (the workflows ask for what they need), and the policy that actions must be pinned to a full commit SHA.
