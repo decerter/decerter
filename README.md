@@ -224,9 +224,9 @@ Available Commands:
   ui          Serve the minimal web UI on 127.0.0.1, a client of the control API
 
 Flags:
-  -h, --help              help for decerter
-      --log-level level   log level (default is info, valid values: trace, debug, info, warn, error)
-  -v, --version           version for decerter
+  -h, --help[=true|false]      help for decerter
+      --log-level level        log level (default is info, valid values: trace, debug, info, warn, error)
+  -v, --version[=true|false]   version for decerter
 
 Additional help topics:
   decerter filter     The --filter language of run and capture
