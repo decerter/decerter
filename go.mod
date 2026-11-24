@@ -8,24 +8,24 @@ tool github.com/cilium/ebpf/cmd/bpf2go
 
 require github.com/cilium/ebpf v0.22.0
 
-require golang.org/x/sys v0.49.0
+require golang.org/x/sys v0.50.0
 
-require golang.org/x/crypto v0.58.0
+require golang.org/x/crypto v0.59.0
 
 require github.com/ulikunitz/xz v0.5.17
 
 require (
 	github.com/getkin/kin-openapi v0.153.0
 	github.com/google/jsonschema-go v0.4.3
-	github.com/jackc/pgx/v5 v5.12.0
+	github.com/jackc/pgx/v5 v5.13.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/pion/rtcp v1.2.20
 	github.com/pion/rtp v1.10.6
 	github.com/spf13/cobra v1.10.2
-	github.com/spf13/pflag v1.0.10
+	github.com/spf13/pflag v1.1.0
 	github.com/spf13/viper v1.21.0
 	golang.org/x/arch v0.33.0
-	golang.org/x/net v0.62.0
+	golang.org/x/net v0.63.0
 	google.golang.org/protobuf v1.36.12
 )
 
@@ -49,7 +49,7 @@ require (
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
 	go.yaml.in/yaml/v4 v4.0.0 // indirect
 	golang.org/x/oauth2 v0.35.0 // indirect
-	golang.org/x/sync v0.24.0 // indirect
-	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/sync v0.25.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
 	golang.org/x/time v0.15.0 // indirect
 )
