@@ -1,0 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+
+# version updates of the Go modules and the pinned GitHub Actions: weekly, one grouped pull request per ecosystem,
+# see docs/development.md
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      gomod:
+        patterns:
+          - "*"
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
